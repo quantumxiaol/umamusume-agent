@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+logs/
+*.log
+
+# Character cache (根据需要可选择性提交)
+characters/*/
+!characters/README.md
+!characters/.gitkeep
+
+# Vector database cache
+resources/docs/vectorstore_cache.pkl
+resources/docs/*.faiss
+
+# Generated outputs
+outputs/
+inputs/
+*.wav
+*.mp3
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+temp_audio/
+test_audio_output/
+
+
+
+# Playwright
+.playwright/
+
+# Node.js (for frontend)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Audio download cache
+audio_downloads/
+html_dumps/
+
+# uv lock file (optional, can be committed for reproducibility)
+# uv.lock
+
+# umamusume prompt
+result-prompts/
+# umamusume voice
+result-voices/
+
