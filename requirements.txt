@@ -1,0 +1,35 @@
+# Python 3.12
+# conda create -n umamusume-novel python=3.12
+# uv venv --python 3.12.0
+# pip install -r requirements.txt -e .
+# agent
+langchain==0.3.25
+langchain-core==0.3.59
+langgraph==0.3.31
+langchain_community==0.3.24
+langchain_experimental
+langchain_openai==0.3.5
+
+openai==1.75.0
+dashscope
+
+PyYAML==6.0.2
+pydantic==2.11.3
+pydantic_core==2.33.1
+
+python-dotenv
+
+# server
+fastapi==0.115.12
+uvicorn==0.34.2
+
+#DB
+chromadb
+faiss-cpu
+sentence-transformers
+
+# pytorch
+torch==2.7.1
+
+# crawler
+bs4
