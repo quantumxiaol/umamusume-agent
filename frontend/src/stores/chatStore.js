@@ -132,7 +132,7 @@ export const useChatStore = defineStore('chat', {
         return;
       }
       let attempts = 0;
-      const maxAttempts = 60;
+      const maxAttempts = 300;
       const intervalMs = 1000;
 
       const timerId = setInterval(async () => {
