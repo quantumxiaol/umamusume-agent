@@ -14,7 +14,7 @@ from typing import Optional, AsyncGenerator, Dict, Any
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, Response
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
@@ -44,6 +44,7 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 CHARACTERS_DIR = Path(config.CHARACTERS_DIRECTORY)
 
 _RESPONSE_FORMAT_INSTRUCTION = (
+    "对白采用中文对话\n"
     "请严格按以下格式回复：\n"
     "动作：<可选，描述动作/神态/场景>\n"
     "对白：<仅角色台词，不要包含动作或旁白>\n"
@@ -411,6 +412,22 @@ async def get_audio(path: str):
     if not _is_allowed_audio_path(audio_path):
         raise HTTPException(status_code=403, detail="Audio path not allowed")
     return FileResponse(audio_path)
+
+
+@app.head("/audio")
+async def head_audio(path: str):
+    if not path:
+        raise HTTPException(status_code=400, detail="Missing audio path")
+    audio_path = Path(path)
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    if not _is_allowed_audio_path(audio_path):
+        raise HTTPException(status_code=403, detail="Audio path not allowed")
+    headers = {
+        "Content-Length": str(audio_path.stat().st_size),
+        "Accept-Ranges": "bytes",
+    }
+    return Response(status_code=200, headers=headers)
 
 
 # ============= 辅助函数 =============
