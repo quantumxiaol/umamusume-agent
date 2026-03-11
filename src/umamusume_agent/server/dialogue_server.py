@@ -42,13 +42,21 @@ tts_client = IndexTTSMCPClient()
 OUTPUTS_DIR = Path(config.OUTPUTS_DIRECTORY)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 CHARACTERS_DIR = Path(config.CHARACTERS_DIRECTORY)
+SESSION_TTL_SECONDS = max(0, config.DIALOGUE_SESSION_TTL_SECONDS)
+SESSION_HISTORY_MAX_MESSAGES = max(0, config.DIALOGUE_SESSION_HISTORY_MAX_MESSAGES)
+SESSION_CLEANUP_INTERVAL_SECONDS = max(5, config.DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS)
 
-_RESPONSE_FORMAT_INSTRUCTION = (
+_STRUCTURED_RESPONSE_FORMAT_INSTRUCTION = (
     "对白采用中文对话\n"
     "请严格按以下格式回复：\n"
     "动作：<可选，描述动作/神态/场景>\n"
     "对白：<仅角色台词，不要包含动作或旁白>\n"
     "注意：对白会用于语音合成，请确保可直接朗读。"
+)
+
+_PLAIN_TEXT_RESPONSE_FORMAT_INSTRUCTION = (
+    "请使用自然中文直接回复，不要添加“动作：”“对白：”等标签。\n"
+    "保持角色人设和语气，内容适合直接用于文字聊天。"
 )
 
 _STAGE_PATTERNS = [
@@ -92,6 +100,7 @@ class DialogueRequest(BaseModel):
     session_id: str
     message: str
     generate_voice: bool = False  # 是否生成语音
+    text_only: bool = False  # 是否纯文本回复（不生成语音，不使用动作/对白标签）
 
 
 class SessionInfo(BaseModel):
@@ -99,7 +108,9 @@ class SessionInfo(BaseModel):
     session_id: str
     character_name: str
     created_at: datetime
+    last_active_at: datetime
     message_count: int
+    history_size: int
     output_dir: Optional[str] = None
 
 
@@ -112,20 +123,38 @@ class DialogueSession:
         self.session_id = session_id
         self.character = character
         self.created_at = datetime.now()
+        self.last_active_at = self.created_at
         self.history = []
         self.message_count = 0
         self.voice_index = 0
         self.output_dir = _create_output_dir(character, self.created_at)
         self.audio_history: list[Dict[str, Any]] = []
     
+    def touch(self):
+        self.last_active_at = datetime.now()
+
+    def _trim_history(self):
+        if SESSION_HISTORY_MAX_MESSAGES <= 0:
+            return
+        overflow = len(self.history) - SESSION_HISTORY_MAX_MESSAGES
+        if overflow > 0:
+            del self.history[:overflow]
+
     def add_message(self, role: str, content: str):
         """添加消息到历史"""
         self.history.append({"role": role, "content": content})
         self.message_count += 1
+        self.touch()
+        self._trim_history()
     
-    def get_messages(self) -> list:
+    def get_messages(self, text_only: bool = False) -> list:
         """获取完整消息列表（包含系统提示）"""
-        system_prompt = f"{self.character.get_system_prompt()}\n\n{_RESPONSE_FORMAT_INSTRUCTION}"
+        response_instruction = (
+            _PLAIN_TEXT_RESPONSE_FORMAT_INSTRUCTION
+            if text_only
+            else _STRUCTURED_RESPONSE_FORMAT_INSTRUCTION
+        )
+        system_prompt = f"{self.character.get_system_prompt()}\n\n{response_instruction}"
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(self.history)
         return messages
@@ -214,10 +243,83 @@ def _extract_dialogue_text(text: str) -> str:
 
 def get_session(session_id: str) -> Optional[DialogueSession]:
     """获取会话"""
-    return sessions.get(session_id)
+    session = sessions.get(session_id)
+    if not session:
+        return None
+    if _is_session_expired(session):
+        sessions.pop(session_id, None)
+        logger.info(f"Session expired and removed on access: {session_id}")
+        return None
+    session.touch()
+    return session
+
+
+def _is_session_expired(session: DialogueSession, now: Optional[datetime] = None) -> bool:
+    if SESSION_TTL_SECONDS <= 0:
+        return False
+    current_time = now or datetime.now()
+    idle_seconds = (current_time - session.last_active_at).total_seconds()
+    return idle_seconds > SESSION_TTL_SECONDS
+
+
+def _cleanup_expired_sessions() -> int:
+    if SESSION_TTL_SECONDS <= 0:
+        return 0
+    now = datetime.now()
+    expired_session_ids = [
+        session_id
+        for session_id, session in list(sessions.items())
+        if _is_session_expired(session, now=now)
+    ]
+    for session_id in expired_session_ids:
+        sessions.pop(session_id, None)
+    if expired_session_ids:
+        logger.info(f"Cleaned up {len(expired_session_ids)} expired sessions")
+    return len(expired_session_ids)
+
+
+async def _session_cleanup_worker():
+    logger.info(
+        f"Session cleanup worker started: ttl={SESSION_TTL_SECONDS}s, interval={SESSION_CLEANUP_INTERVAL_SECONDS}s"
+    )
+    try:
+        while True:
+            await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
+            _cleanup_expired_sessions()
+    except asyncio.CancelledError:
+        logger.info("Session cleanup worker stopped")
+        raise
+
+
+def _should_generate_voice(request: DialogueRequest) -> bool:
+    if request.generate_voice and request.text_only:
+        logger.info("text_only=true, skip voice generation for this request")
+        return False
+    return request.generate_voice
 
 
 # ============= API 端点 =============
+
+@app.on_event("startup")
+async def startup_session_cleanup():
+    if SESSION_TTL_SECONDS <= 0:
+        logger.info("Session TTL disabled, cleanup worker not started")
+        app.state.session_cleanup_task = None
+        return
+    app.state.session_cleanup_task = asyncio.create_task(_session_cleanup_worker())
+
+
+@app.on_event("shutdown")
+async def shutdown_session_cleanup():
+    task = getattr(app.state, "session_cleanup_task", None)
+    if not task:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
 
 @app.get("/")
 async def root():
@@ -286,7 +388,7 @@ async def chat(request: DialogueRequest):
         # 调用 LLM
         response = await llm_client.chat.completions.create(
             model=config.ROLEPLAY_LLM_MODEL_NAME,
-            messages=session.get_messages(),
+            messages=session.get_messages(text_only=request.text_only),
             temperature=0.7
         )
         
@@ -298,7 +400,7 @@ async def chat(request: DialogueRequest):
         result = {"reply": reply}
         
         # 生成语音（如果需要）
-        if request.generate_voice:
+        if _should_generate_voice(request):
             voice_plan = _reserve_voice_output(session)
             voice_info = await _generate_voice_for_reply(session, reply, voice_plan)
             if voice_info:
@@ -330,7 +432,7 @@ async def chat_stream(request: DialogueRequest):
             # 流式调用 LLM
             stream = await llm_client.chat.completions.create(
                 model=config.ROLEPLAY_LLM_MODEL_NAME,
-                messages=session.get_messages(),
+                messages=session.get_messages(text_only=request.text_only),
                 temperature=0.7,
                 stream=True
             )
@@ -350,7 +452,7 @@ async def chat_stream(request: DialogueRequest):
             # 发送完成事件
             yield f"event: done\ndata: {{}}\n\n"
 
-            if request.generate_voice:
+            if _should_generate_voice(request):
                 voice_plan = _reserve_voice_output(session)
                 payload = json.dumps(voice_plan, ensure_ascii=False)
                 yield f"event: voice_pending\ndata: {payload}\n\n"
@@ -369,12 +471,15 @@ async def chat_stream(request: DialogueRequest):
 @app.get("/sessions")
 async def list_sessions():
     """列出所有活跃会话"""
+    _cleanup_expired_sessions()
     return [
         {
             "session_id": s.session_id,
             "character_name": s.character.name_zh,
             "created_at": s.created_at.isoformat(),
+            "last_active_at": s.last_active_at.isoformat(),
             "message_count": s.message_count,
+            "history_size": len(s.history),
             "output_dir": str(s.output_dir)
         }
         for s in sessions.values()

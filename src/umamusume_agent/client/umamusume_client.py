@@ -62,19 +62,27 @@ class UmamusumeClient:
         payload = {"character_name": character_name, "force_rebuild": force_rebuild}
         return _post_json(self.load_url, payload)
 
-    def chat(self, session_id: str, message: str, generate_voice: bool = False) -> Dict[str, Any]:
+    def chat(
+        self,
+        session_id: str,
+        message: str,
+        generate_voice: bool = False,
+        text_only: bool = False,
+    ) -> Dict[str, Any]:
         """
         发送消息并返回 AI 回复（非流式）。
 
         :param session_id: 会话 ID
         :param message: 用户输入
         :param generate_voice: 是否生成语音
+        :param text_only: 是否纯文本回复（禁用语音标签和语音合成）
         :return: 回答字典
         """
         payload = {
             "session_id": session_id,
             "message": message,
             "generate_voice": generate_voice,
+            "text_only": text_only,
         }
         return _post_json(self.chat_url, payload)
 
@@ -84,6 +92,7 @@ class UmamusumeClient:
         message: str,
         callback: Callable[[str, Any], None],
         generate_voice: bool = False,
+        text_only: bool = False,
     ) -> None:
         """
         发送消息并以流式方式接收 AI 回复。
@@ -92,11 +101,13 @@ class UmamusumeClient:
         :param message: 用户输入
         :param callback: 回调函数，接收 (event, data) 两个参数
         :param generate_voice: 是否生成语音
+        :param text_only: 是否纯文本回复（禁用语音标签和语音合成）
         """
         payload = {
             "session_id": session_id,
             "message": message,
             "generate_voice": generate_voice,
+            "text_only": text_only,
         }
         try:
             response = requests.post(
