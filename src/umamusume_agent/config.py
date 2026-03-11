@@ -90,6 +90,9 @@ class Config:
             os.getenv("OUTPUTS_DIRECTORY", "./outputs").lstrip("./"),
         )
     )
+    DIALOGUE_SESSION_TTL_SECONDS: int = int(os.getenv("DIALOGUE_SESSION_TTL_SECONDS", "3600"))
+    DIALOGUE_SESSION_HISTORY_MAX_MESSAGES: int = int(os.getenv("DIALOGUE_SESSION_HISTORY_MAX_MESSAGES", "40"))
+    DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS: int = int(os.getenv("DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS", "60"))
 
     # ================== Character Settings ==================
     _characters_dir = os.getenv("CHARACTERS_DIRECTORY", "./characters")
