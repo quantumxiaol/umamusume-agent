@@ -6,15 +6,32 @@ import {
   loadCharacter,
   chatOnce,
   chatStream,
+  fetchHistory,
+  clearHistory,
 } from '@/services/api';
 
+const USER_UUID_STORAGE_KEY = 'umamusume_user_uuid';
+
+const getOrCreateUserUuid = () => {
+  const cached = localStorage.getItem(USER_UUID_STORAGE_KEY);
+  if (cached) {
+    return cached;
+  }
+  const generated = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `fallback-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
+  localStorage.setItem(USER_UUID_STORAGE_KEY, generated);
+  return generated;
+};
+
 const createMessage = (role, content, extra = {}) => ({
-  id: `${role}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  id: extra.id || `${role}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   role,
   content,
   voice: extra.voice || null,
   status: extra.status || 'ready',
-  createdAt: new Date().toISOString(),
+  renderMode: extra.renderMode || 'structured',
+  createdAt: extra.createdAt || new Date().toISOString(),
 });
 
 const resolveAudioUrl = (url) => {
@@ -33,11 +50,14 @@ const resolveAudioUrl = (url) => {
 export const useChatStore = defineStore('chat', {
   state: () => ({
     characters: [],
+    userUuid: '',
     selectedCharacter: '',
     sessionId: '',
     systemPrompt: '',
     voicePreviewUrl: '',
     outputDir: '',
+    restoredHistoryMessages: 0,
+    historyCharacters: [],
     messages: [],
     isLoading: false,
     error: null,
@@ -49,6 +69,7 @@ export const useChatStore = defineStore('chat', {
 
   actions: {
     async initCharacters() {
+      this.userUuid = getOrCreateUserUuid();
       try {
         const data = await fetchCharacters();
         this.characters = data.characters || [];
@@ -64,18 +85,22 @@ export const useChatStore = defineStore('chat', {
       this.isLoading = true;
       this.error = null;
       try {
-        const data = await loadCharacter(name, forceRebuild);
+        const userUuid = this.userUuid || getOrCreateUserUuid();
+        const data = await loadCharacter(name, forceRebuild, userUuid);
         if (data.error) {
           this.error = data.error;
           return;
         }
+        this.userUuid = data.user_uuid || userUuid;
+        localStorage.setItem(USER_UUID_STORAGE_KEY, this.userUuid);
         this.selectedCharacter = name;
         this.sessionId = data.session_id || '';
         this.systemPrompt = data.system_prompt || '';
         this.voicePreviewUrl = resolveAudioUrl(data.voice_preview_url || '');
         this.outputDir = data.output_dir || '';
-        this.messages = [];
+        this.restoredHistoryMessages = Number(data.restored_history_messages || 0);
         this._clearVoicePollers();
+        await this.refreshHistory(name);
       } catch (err) {
         this.error = err.message || '加载角色失败。';
       } finally {
@@ -153,6 +178,64 @@ export const useChatStore = defineStore('chat', {
       this.voicePollers[messageId] = timerId;
     },
 
+    _toHistoryMessages(records) {
+      if (!Array.isArray(records)) {
+        return [];
+      }
+      return records.map((record, index) => {
+        const role = record.role === 'assistant' ? 'assistant' : 'user';
+        const createdAt = record.timestamp || new Date().toISOString();
+        const id = [
+          'history',
+          record.session_id || 'session',
+          record.message_index ?? index,
+          index,
+        ].join('-');
+        return createMessage(role, record.content || '', {
+          id,
+          createdAt,
+          renderMode: role === 'assistant' ? 'structured' : 'structured',
+          status: 'ready',
+        });
+      });
+    },
+
+    async refreshHistory(characterName = this.selectedCharacter) {
+      if (!this.userUuid || !characterName) {
+        return;
+      }
+      try {
+        const data = await fetchHistory(this.userUuid, characterName, 400);
+        this.historyCharacters = Array.isArray(data.characters) ? data.characters : [];
+        this.messages = this._toHistoryMessages(data.messages || []);
+      } catch (err) {
+        this.error = err.message || '读取历史失败。';
+      }
+    },
+
+    async clearCurrentCharacterHistory() {
+      if (!this.userUuid || !this.selectedCharacter) {
+        this.error = '请先选择角色。';
+        return;
+      }
+      this.isLoading = true;
+      this.error = null;
+      try {
+        const result = await clearHistory(this.userUuid, this.selectedCharacter);
+        if (result.error) {
+          this.error = result.error;
+          return;
+        }
+        this.messages = [];
+        this.restoredHistoryMessages = 0;
+        await this.refreshHistory(this.selectedCharacter);
+      } catch (err) {
+        this.error = err.message || '清理历史失败。';
+      } finally {
+        this.isLoading = false;
+      }
+    },
+
     async sendMessage(text) {
       if (!text.trim()) {
         this.error = '请输入内容。';
@@ -168,7 +251,10 @@ export const useChatStore = defineStore('chat', {
       this.error = null;
 
       if (this.streamMode) {
-        const assistantMessage = createMessage('assistant', '', { status: 'streaming' });
+        const assistantMessage = createMessage('assistant', '', {
+          status: 'streaming',
+          renderMode: 'raw',
+        });
         this.messages.push(assistantMessage);
         this.currentAssistantId = assistantMessage.id;
         this.isLoading = true;
@@ -213,7 +299,9 @@ export const useChatStore = defineStore('chat', {
           if (data.error) {
             this.error = data.error;
           } else {
-            const assistantMessage = createMessage('assistant', data.reply || '');
+            const assistantMessage = createMessage('assistant', data.reply || '', {
+              renderMode: 'structured',
+            });
             if (data.voice) {
               assistantMessage.voice = {
                 status: 'ready',

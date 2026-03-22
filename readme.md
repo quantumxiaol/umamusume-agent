@@ -18,7 +18,8 @@
 
 - 角色管理：从 `characters/` 加载角色配置
 - 对话服务：`/load_character`、`/chat`、`/chat_stream`
-- 纯文本模式：`text_only=true` 时输出自然文本，不使用“动作/对白”标签，并且不会触发 TTS
+- 历史落盘：按 `user_uuid/角色/时间戳/session` 写入 `jsonl` 对话日志（暂时不依赖数据库）
+- 对话格式：无论是否启用 TTS，回复都规范为“动作 + 对白”两行；`text_only=true` 仅用于禁用语音合成
 - 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
 - 前端 UI：角色选择、提示词预览、音色试听、多轮对话、语音播放
 
@@ -56,6 +57,9 @@ cat .env.template > .env
   - `DIALOGUE_SESSION_TTL_SECONDS`（默认 `3600`，会话空闲超时秒数，`<=0` 表示不启用 TTL）
   - `DIALOGUE_SESSION_HISTORY_MAX_MESSAGES`（默认 `40`，单会话最大历史消息数，`<=0` 表示不裁剪）
   - `DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS`（默认 `60`，后台清理扫描间隔秒数）
+  - `DIALOGUE_HISTORY_DIRECTORY`（默认 `./outputs/dialogues`，对话历史 `jsonl` 落盘目录）
+  - `DIALOGUE_PREFIX_CACHE_ENABLED`（默认 `true`，是否启用前缀缓存注入）
+  - `DIALOGUE_PREFIX_CACHE_MIN_CHARS`（默认 `1000`，System Prompt 最小字符数阈值）
 
 现在用到的只有LLM的API，剩下的未来可能会用。
 
@@ -125,27 +129,55 @@ result-prompts/ + result-voices/ -> build_character.py -> characters/<角色名>
 - 运行产物：`outputs/`
 - 其它资源：`resources/`（来源于旧项目，还未使用）
 
-## 启动服务
+## 后端使用说明（最新）
 
-### 1) 启动 IndexTTS MCP（可选，仅在需要语音时）
+### 1) 可选：启动 IndexTTS MCP（仅在需要语音时）
 
 ```bash
 python mcp_service/server.py --http --host 127.0.0.1 --port 8890
 ```
 
-### 2) 启动对话服务（本项目）
+### 2) 启动对话服务
 
 ```bash
 uvicorn umamusume_agent.server.dialogue_server:app --host 0.0.0.0 --port 1111
 ```
 
-## CLI 客户端测试
+### 3) 服务自检
 
 ```bash
-python -m src.umamusume_agent.client.cli -u http://127.0.0.1:1111 -c "爱慕织姬" --stream --voice
+curl -s http://127.0.0.1:1111/
 ```
 
-## 前端
+## CLI 使用说明（最新）
+
+```bash
+# 交互模式（流式）
+python -m src.umamusume_agent.client.cli -u http://127.0.0.1:1111 -c "爱慕织姬" --stream
+
+# 交互模式（流式 + 语音）
+python -m src.umamusume_agent.client.cli -u http://127.0.0.1:1111 -c "爱慕织姬" --stream --voice
+
+# 调试模式（查看流式分块与解析细节）
+python -m src.umamusume_agent.client.cli -u http://127.0.0.1:1111 -c "爱慕织姬" --stream --debug
+
+# 固定用户 UUID（跨设备/多端共享记忆）
+python -m src.umamusume_agent.client.cli -u http://127.0.0.1:1111 -c "爱慕织姬" --user-uuid "your-stable-uuid"
+```
+
+说明：
+- CLI 默认根据本机用户名生成稳定 `user_uuid`。
+- 会话创建后会显示 `已恢复历史: N 条`，代表按 `user_uuid + 角色` 回放到当前会话的消息条数。
+
+CLI 交互命令：
+- `history`：查看当前角色历史
+- `history all`：查看该用户所有角色历史
+- `history <角色名>`：查看指定角色历史
+- `clear_history`：清空当前角色历史（会二次确认）
+- `clear_history <角色名>`：清空指定角色历史
+- `character <角色名>`：切换角色（会加载该角色历史）
+
+## 前端使用说明（最新）
 
 ```bash
 cd frontend
@@ -155,74 +187,214 @@ pnpm run dev
 
 浏览器打开：`http://localhost:5173/`
 
-## 接口简述
+前端功能与当前后端已同步：
+- 角色切换会重新调用 `/load_character`，并展示 `已恢复历史 N 条`。
+- 聊天窗口会显示当前用户与该角色的历史对话，不会在切角色时直接丢失历史能力。
+- 点击 `查看历史` 会调用 `/history` 刷新该角色历史。
+- 点击 `清空本角色历史` 会调用 `DELETE /history` 清理该角色历史。
 
-- `POST /load_character`：加载角色并创建会话
-- `POST /chat`：非流式对话
-- `POST /chat_stream`：流式对话（SSE）
-- `GET /characters`：可用角色列表
-- `GET /audio?path=...`：音频文件访问
+## FastAPI 接口调用说明
 
-### 对话请求参数（`/chat` 与 `/chat_stream`）
+服务地址示例：`http://127.0.0.1:1111`
 
-- `session_id`：会话 ID（由 `/load_character` 返回）
-- `message`：用户输入文本
-- `generate_voice`：是否生成语音（默认 `false`）
-- `text_only`：是否纯文本模式（默认 `false`）
+### 接口总览
 
-参数组合说明：
-- `generate_voice=false, text_only=false`：结构化文本回复（通常含“动作/对白”标签），不生成语音。
-- `generate_voice=true, text_only=false`：结构化文本回复，并触发 TTS 生成语音。
-- `text_only=true`：纯文本回复（无“动作/对白”标签），并强制不生成语音（即使 `generate_voice=true` 也会忽略）。
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/` | 健康检查 |
+| `POST` | `/load_character` | 加载角色并创建会话 |
+| `POST` | `/chat` | 非流式对话 |
+| `POST` | `/chat_stream` | 流式对话（SSE） |
+| `GET` | `/sessions` | 查看活跃会话 |
+| `DELETE` | `/session/{session_id}` | 删除会话 |
+| `GET` | `/history` | 查看历史（按用户，支持按角色过滤） |
+| `DELETE` | `/history` | 清空指定用户+角色历史 |
+| `GET` | `/characters` | 角色列表 |
+| `GET`/`HEAD` | `/audio` | 音频文件访问/探测 |
 
-### 会话生命周期与内存控制
+### 1) 健康检查 `GET /`
 
-- 会话通过内存字典管理（`session_id -> session`）。
-- 每条消息会刷新会话活跃时间；超出 `DIALOGUE_SESSION_TTL_SECONDS` 的空闲会话会被清理。
-- 服务启动后会有后台任务按 `DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS` 周期扫描并删除过期会话。
-- 对话历史会按 `DIALOGUE_SESSION_HISTORY_MAX_MESSAGES` 自动裁剪，避免单会话无限增长。
-- 会话过期或被删除后，再用旧 `session_id` 调用 `/chat` 会返回 `404`，需要重新 `/load_character` 获取新会话。
-
-## 无前端：纯文本模式如何选定角色
-
-核心逻辑：角色是通过 `POST /load_character` 绑定到 `session_id` 的。后续 `/chat` 只需要传这个 `session_id`。
-
-### 1) 查看可用角色（可选）
+- 作用：检查服务是否存活
+- 返回：`service`、`version`、`status`
 
 ```bash
-curl -s http://127.0.0.1:1111/characters
+curl -s http://127.0.0.1:1111/
 ```
 
-### 2) 选定角色并创建会话
+### 2) 加载角色并建会话 `POST /load_character`
+
+- 作用：加载角色配置，并创建一个新的 `session_id`；后续对话都通过该 `session_id` 绑定角色
+
+请求 JSON：
+
+| 字段 | 类型 | 必填 | 默认值 | 作用 |
+|------|------|------|--------|------|
+| `character_name` | string | 是 | - | 角色名（与 `characters/` 中配置匹配） |
+| `force_rebuild` | bool | 否 | `false` | 强制重建角色配置缓存 |
+| `user_uuid` | string | 否 | `null` | 用户唯一标识；不传则服务端自动生成 |
+
+返回关键字段：
+
+| 字段 | 作用 |
+|------|------|
+| `session_id` | 对话会话 ID，后续 `/chat` / `/chat_stream` 必填 |
+| `user_uuid` | 本次会话绑定的用户 UUID |
+| `character_name` / `character_name_jp` | 当前角色信息 |
+| `system_prompt` / `personality` | 当前角色提示词与人格配置 |
+| `created_at` | 会话创建时间 |
+| `restored_history_messages` | 本次会话启动时恢复到内存的历史消息条数（按同 `user_uuid + 角色` 聚合） |
+| `output_dir` | 本会话音频输出目录 |
+| `history_file` | 本会话历史日志 `jsonl` 路径 |
+| `voice_preview_url` | 角色参考音频访问 URL（用于试听） |
 
 ```bash
 curl -s -X POST http://127.0.0.1:1111/load_character \
   -H "Content-Type: application/json" \
-  -d '{"character_name":"爱慕织姬"}'
+  -d '{
+    "character_name": "爱慕织姬",
+    "user_uuid": "0a028a76-f436-44d3-bbc9-567704e1e6e1"
+  }'
 ```
 
-返回里拿到 `session_id`，例如：
+### 3) 非流式对话 `POST /chat`
 
-```json
-{
-  "session_id": "0f0f7f4f-xxxx-xxxx-xxxx-8b0b5f9a8d2b",
-  "character_name": "爱慕织姬"
-}
-```
+- 作用：一次性返回完整回复（固定为“动作 + 对白”两行）
 
-### 3) 用该会话进行纯文本对话
+请求 JSON：
+
+| 字段 | 类型 | 必填 | 默认值 | 作用 |
+|------|------|------|--------|------|
+| `session_id` | string | 是 | - | 会话 ID |
+| `message` | string | 是 | - | 用户输入 |
+| `generate_voice` | bool | 否 | `false` | 是否生成 TTS 音频 |
+| `text_only` | bool | 否 | `false` | 兼容字段；`true` 时仅禁用语音生成，不改变“动作/对白”输出格式 |
+
+参数行为：
+
+- `generate_voice=false`：仅返回文本回复
+- `generate_voice=true`：返回文本回复，并在 `voice` 字段返回语音信息
+- `text_only=true`：强制不生成语音（即使 `generate_voice=true`）
 
 ```bash
 curl -s -X POST http://127.0.0.1:1111/chat \
   -H "Content-Type: application/json" \
   -d '{
-    "session_id":"0f0f7f4f-xxxx-xxxx-xxxx-8b0b5f9a8d2b",
-    "message":"你好，今天训练安排是什么？",
-    "text_only":true
+    "session_id": "替换成你的session_id",
+    "message": "你叫什么名字？",
+    "generate_voice": false
   }'
 ```
 
-如果想切换角色，重新调用一次 `/load_character` 获取新的 `session_id` 即可。
+### 4) 流式对话 `POST /chat_stream`（SSE）
+
+- 作用：按 token 流式返回文本，结束后发 `done` 事件
+- 请求 JSON 与 `/chat` 相同
+
+SSE 事件：
+
+- 默认事件（无 `event:`）：token 文本分块
+- `event: done`：文本生成结束（`data: {}`）
+- `event: voice_pending`：已开始后台语音合成（`data` 为 JSON）
+- `event: error`：流式过程错误
+
+```bash
+curl -N -X POST http://127.0.0.1:1111/chat_stream \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "session_id": "替换成你的session_id",
+    "message": "今天训练计划是什么？",
+    "generate_voice": false
+  }'
+```
+
+### 5) 会话管理
+
+- `GET /sessions`：列出当前活跃会话（含 `session_id`、`user_uuid`、`message_count`、`history_file` 等）
+- `DELETE /session/{session_id}`：主动删除会话
+
+```bash
+curl -s http://127.0.0.1:1111/sessions
+curl -s -X DELETE http://127.0.0.1:1111/session/替换成你的session_id
+```
+
+### 6) 历史管理 `GET /history` / `DELETE /history`
+
+- 作用：按 `user_uuid + 角色` 查看/清理历史消息
+- 说明：`character_name` 可传中文名/英文名/目录名，服务端会做别名匹配
+
+`GET /history` 参数：
+
+| 字段 | 类型 | 必填 | 默认值 | 作用 |
+|------|------|------|--------|------|
+| `user_uuid` | string(UUID) | 是 | - | 用户唯一标识 |
+| `character_name` | string | 否 | `null` | 角色过滤条件；不传则返回该用户全部角色历史 |
+| `limit` | int | 否 | `200` | 返回消息条数上限；`0` 表示返回全部 |
+
+`GET /history` 返回关键字段：
+
+| 字段 | 作用 |
+|------|------|
+| `total_messages` | 匹配条件下历史总条数 |
+| `returned_messages` | 本次实际返回条数 |
+| `messages` | 历史消息数组（含 `role/content/timestamp/session_id/message_index`） |
+| `characters` | 角色维度统计（`character_name_en/message_count/last_message_at`） |
+
+`DELETE /history` 参数：
+
+| 字段 | 类型 | 必填 | 作用 |
+|------|------|------|------|
+| `user_uuid` | string(UUID) | 是 | 用户唯一标识 |
+| `character_name` | string | 是 | 要清空的角色名（支持别名） |
+
+`DELETE /history` 返回关键字段：`deleted_files`、`deleted_messages`、`cleared_active_sessions`
+
+```bash
+# 查看某个角色历史（最近 200 条）
+curl -s "http://127.0.0.1:1111/history?user_uuid=0a028a76-f436-44d3-bbc9-567704e1e6e1&character_name=爱慕织姬&limit=200"
+
+# 查看该用户全部角色历史
+curl -s "http://127.0.0.1:1111/history?user_uuid=0a028a76-f436-44d3-bbc9-567704e1e6e1&limit=200"
+
+# 清空该用户与某个角色的历史
+curl -s -X DELETE "http://127.0.0.1:1111/history?user_uuid=0a028a76-f436-44d3-bbc9-567704e1e6e1&character_name=爱慕织姬"
+```
+
+### 7) 角色列表 `GET /characters`
+
+- 作用：查看可用角色名，供 `/load_character` 选择
+
+```bash
+curl -s http://127.0.0.1:1111/characters
+```
+
+### 8) 音频访问 `GET /audio` / `HEAD /audio`
+
+- 作用：访问或探测角色参考音频、TTS 生成音频
+- 参数：`path`（绝对路径或相对路径均可）
+- 说明：服务端会校验路径，仅允许 `outputs/` 与 `characters/` 下文件
+
+```bash
+curl -I "http://127.0.0.1:1111/audio?path=/absolute/path/to/reply_001.wav"
+curl -L "http://127.0.0.1:1111/audio?path=/absolute/path/to/reply_001.wav" -o reply_001.wav
+```
+
+### 9) 无前端最小调用流程
+
+1. `GET /characters` 找角色名
+2. `POST /load_character` 拿 `session_id`
+3. 使用该 `session_id` 调 `/chat` 或 `/chat_stream`
+4. 需要切角色时，重新调用一次 `/load_character`
+
+### 会话生命周期与历史落盘
+
+- 会话内存管理：`session_id -> session`
+- 记忆恢复：每次 `/load_character` 会按 `user_uuid + character_name_en` 聚合历史 `message` 记录并回放到新会话
+- 空闲超时：`DIALOGUE_SESSION_TTL_SECONDS`（默认 `3600` 秒）
+- 后台清理间隔：`DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS`（默认 `60` 秒）
+- 历史裁剪：`DIALOGUE_SESSION_HISTORY_MAX_MESSAGES`（默认 `40`）
+- 历史文件：`<DIALOGUE_HISTORY_DIRECTORY>/<user_uuid>/<角色>_<时间戳>_<session前8位>/history.jsonl`
+- 历史字段包含：`session_id`、`user_uuid`、`character_name_en`、`timestamp`、`event`、`content` 等
 
 ## 默认端口
 
@@ -272,7 +444,7 @@ curl -s -X POST http://127.0.0.1:1111/chat \
 ## 备注
 
 - 语音合成是异步后台进行：流式对话结束后会显示 `voice_pending`，音频落地后可播放。
-- 当 `text_only=false` 时，LLM 输出按“动作/对白”规范，服务端会优先抽取“对白”用于 TTS。
+- 无论 `text_only` 是否为 `true`，LLM 输出都按“动作/对白”规范；`text_only=true` 仅用于禁用语音生成。
 
 ## 当前存在的问题
 

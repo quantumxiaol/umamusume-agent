@@ -30,11 +30,12 @@ export const fetchCharacters = async () => {
   }
 };
 
-export const loadCharacter = async (characterName, forceRebuild = false) => {
+export const loadCharacter = async (characterName, forceRebuild = false, userUuid = '') => {
   try {
     const response = await apiClient.post('/load_character', {
       character_name: characterName,
       force_rebuild: forceRebuild,
+      user_uuid: userUuid || undefined,
     });
     return response.data || {};
   } catch (error) {
@@ -151,5 +152,34 @@ export const chatStream = async (sessionId, message, generateVoice = false, onEv
   } catch (error) {
     emitEvent(onEvent, 'error', error.message || 'Stream error occurred');
     throw error;
+  }
+};
+
+export const fetchHistory = async (userUuid, characterName = '', limit = 200) => {
+  try {
+    const response = await apiClient.get('/history', {
+      params: {
+        user_uuid: userUuid,
+        character_name: characterName || undefined,
+        limit,
+      },
+    });
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const clearHistory = async (userUuid, characterName) => {
+  try {
+    const response = await apiClient.delete('/history', {
+      params: {
+        user_uuid: userUuid,
+        character_name: characterName,
+      },
+    });
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
   }
 };
