@@ -2691,6 +2691,20 @@ wheels = [
 ]
 
 [[package]]
+name = "torchaudio"
+version = "2.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/45/97/e584276755305d3a0af0ff280ce7eeafc45855355ae0a6de38b13ac195ac/torchaudio-2.3.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:5e36685420a07a176146e9d6e0fa8225198f126e167a00785538f853807e2d43", size = 1808180, upload-time = "2024-06-05T16:44:58.503Z" },
+    { url = "https://files.pythonhosted.org/packages/48/b7/04a96dabea4ffd1cc990b429c36f08316b442f2ea4964bd8b52e28aeb36f/torchaudio-2.3.1-cp312-cp312-manylinux1_x86_64.whl", hash = "sha256:07b72d76fa108ac0f3400a759456ba96bdaa2b8649fd9588cc93295a532b01d9", size = 3350075, upload-time = "2024-06-05T16:44:39.047Z" },
+    { url = "https://files.pythonhosted.org/packages/53/30/89de93b7082b58c29f2e368a737c613a07d0adbe87505b9592f4c88be718/torchaudio-2.3.1-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:42af6c7a430e6268f2c028e06078d413912b5ec6efa28a097ebdd3c3c79659df", size = 1646768, upload-time = "2024-06-05T16:44:46.727Z" },
+    { url = "https://files.pythonhosted.org/packages/22/fa/23a6456de8b6fbac7026efb9c7163335c57b79437618686149daf2f9be39/torchaudio-2.3.1-cp312-cp312-win_amd64.whl", hash = "sha256:25bd1137e47de96b48ef0dc4865bc620a0b759e44c009c7e78e92d7bfdf257ba", size = 2362582, upload-time = "2024-06-05T16:44:34.565Z" },
+]
+
+[[package]]
 name = "tqdm"
 version = "4.67.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2777,15 +2791,28 @@ name = "umamusume-agent"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "fastapi" },
+    { name = "librosa" },
+    { name = "mcp" },
+    { name = "numpy" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+extras = [
     { name = "aiofiles" },
     { name = "bs4" },
     { name = "chromadb" },
     { name = "crawl4ai" },
     { name = "dashscope" },
     { name = "faiss-cpu" },
-    { name = "fastapi" },
     { name = "fastapi-mcp" },
     { name = "google-api-python-client" },
+    { name = "httplib2" },
     { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-community" },
@@ -2793,53 +2820,57 @@ dependencies = [
     { name = "langchain-experimental" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
+    { name = "langchain-text-splitters" },
     { name = "langgraph" },
-    { name = "librosa" },
-    { name = "mcp" },
+    { name = "lxml" },
     { name = "mcp-server" },
-    { name = "openai" },
     { name = "playwright" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
     { name = "sentence-transformers" },
     { name = "tf-playwright-stealth" },
+    { name = "torch" },
+    { name = "torchaudio" },
     { name = "tqdm" },
-    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "aiofiles", specifier = ">=24.1.0" },
-    { name = "bs4", specifier = "==0.0.2" },
-    { name = "chromadb", specifier = "==1.0.15" },
-    { name = "crawl4ai", specifier = "==0.6.3" },
-    { name = "dashscope", specifier = "==1.23.7" },
-    { name = "faiss-cpu", specifier = "==1.11.0" },
+    { name = "aiofiles", marker = "extra == 'extras'", specifier = ">=24.1.0" },
+    { name = "bs4", marker = "extra == 'extras'", specifier = "==0.0.2" },
+    { name = "chromadb", marker = "extra == 'extras'", specifier = "==1.0.15" },
+    { name = "crawl4ai", marker = "extra == 'extras'", specifier = "==0.6.3" },
+    { name = "dashscope", marker = "extra == 'extras'", specifier = "==1.23.7" },
+    { name = "faiss-cpu", marker = "extra == 'extras'", specifier = "==1.11.0" },
     { name = "fastapi", specifier = ">=0.115.6" },
-    { name = "fastapi-mcp", specifier = "==0.3.4" },
-    { name = "google-api-python-client", specifier = "==2.174.0" },
-    { name = "httpx", specifier = "==0.28.1" },
-    { name = "langchain", specifier = "==0.3.25" },
-    { name = "langchain-community", specifier = "==0.3.24" },
-    { name = "langchain-core", specifier = "==0.3.59" },
-    { name = "langchain-experimental", specifier = "==0.3.4" },
-    { name = "langchain-mcp-adapters", specifier = "==0.1.8" },
-    { name = "langchain-openai", specifier = "==0.3.5" },
-    { name = "langgraph", specifier = "==0.3.31" },
+    { name = "fastapi-mcp", marker = "extra == 'extras'", specifier = "==0.3.4" },
+    { name = "google-api-python-client", marker = "extra == 'extras'", specifier = "==2.174.0" },
+    { name = "httplib2", marker = "extra == 'extras'", specifier = "==0.22.0" },
+    { name = "httpx", marker = "extra == 'extras'", specifier = "==0.28.1" },
+    { name = "langchain", marker = "extra == 'extras'", specifier = "==0.3.25" },
+    { name = "langchain-community", marker = "extra == 'extras'", specifier = "==0.3.24" },
+    { name = "langchain-core", marker = "extra == 'extras'", specifier = "==0.3.59" },
+    { name = "langchain-experimental", marker = "extra == 'extras'", specifier = "==0.3.4" },
+    { name = "langchain-mcp-adapters", marker = "extra == 'extras'", specifier = "==0.1.8" },
+    { name = "langchain-openai", marker = "extra == 'extras'", specifier = "==0.3.5" },
+    { name = "langchain-text-splitters", marker = "extra == 'extras'", specifier = "==0.3.8" },
+    { name = "langgraph", marker = "extra == 'extras'", specifier = "==0.3.31" },
     { name = "librosa", specifier = ">=0.11.0" },
+    { name = "lxml", marker = "extra == 'extras'", specifier = "==5.4.0" },
     { name = "mcp", specifier = "==1.10.1" },
-    { name = "mcp-server", specifier = "==0.1.4" },
+    { name = "mcp-server", marker = "extra == 'extras'", specifier = "==0.1.4" },
+    { name = "numpy", specifier = "==1.26.4" },
     { name = "openai", specifier = "==1.75.0" },
-    { name = "playwright", specifier = "==1.53.0" },
+    { name = "playwright", marker = "extra == 'extras'", specifier = "==1.53.0" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "pyyaml", specifier = "==6.0.2" },
-    { name = "sentence-transformers", specifier = "==5.0.0" },
-    { name = "tf-playwright-stealth", specifier = "==1.2.0" },
-    { name = "tqdm", specifier = "==4.67.1" },
+    { name = "requests", specifier = ">=2.32.4" },
+    { name = "sentence-transformers", marker = "extra == 'extras'", specifier = "==5.0.0" },
+    { name = "tf-playwright-stealth", marker = "extra == 'extras'", specifier = "==1.2.0" },
+    { name = "torch", marker = "extra == 'extras'", specifier = "==2.3.1" },
+    { name = "torchaudio", marker = "extra == 'extras'", specifier = "==2.3.1" },
+    { name = "tqdm", marker = "extra == 'extras'", specifier = "==4.67.1" },
     { name = "uvicorn", specifier = ">=0.30.0" },
 ]
+provides-extras = ["extras"]
 
 [[package]]
 name = "uritemplate"

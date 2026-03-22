@@ -27,21 +27,28 @@
 
 ### Python
 
-建议使用 conda 或 uv：
+推荐使用 `uv`（依赖分层更清晰）：
 
 ```bash
-conda create -n umamusume-agent python=3.12
-conda activate umamusume-agent
-pip install -r requirements.txt
-```
-
-或
-
-```bash
+# 方案 A：使用 uv venv
 uv venv --python 3.12
 source .venv/bin/activate
 uv lock
 uv sync
+
+# 方案 B：使用 conda 环境
+conda create -n umamusume-agent python=3.12
+conda activate umamusume-agent
+uv lock
+uv sync
+```
+
+`uv sync` 默认安装精简版依赖：`dialogue_server + builder` 主链路必需包。
+
+如需启用其余可选能力，统一安装 `extras`：
+
+```bash
+uv sync --extra extras
 ```
 
 ### .env
@@ -61,7 +68,7 @@ cat .env.template > .env
   - `DIALOGUE_PREFIX_CACHE_ENABLED`（默认 `true`，是否启用前缀缓存注入）
   - `DIALOGUE_PREFIX_CACHE_MIN_CHARS`（默认 `1000`，System Prompt 最小字符数阈值）
 
-现在用到的只有LLM的API，剩下的未来可能会用。
+当前主链路主要依赖 `ROLEPLAY_LLM_*` 与 `INDEXTTS_MCP_*`；RAG/Web/旧模块需要安装 `extras` 后再配置。
 
 ## 数据准备
 

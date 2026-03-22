@@ -6,35 +6,45 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
+    "fastapi>=0.115.6",
+    "librosa>=0.11.0",
+    "mcp==1.10.1",
+    "numpy==1.26.4",
+    "openai==1.75.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.32.4",
+    "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+extras = [
     "aiofiles>=24.1.0",
     "bs4==0.0.2",
     "chromadb==1.0.15",
     "crawl4ai==0.6.3",
-    "fastapi-mcp==0.3.4",
     "dashscope==1.23.7",
     "faiss-cpu==1.11.0",
-    "fastapi>=0.115.6",
+    "fastapi-mcp==0.3.4",
     "google-api-python-client==2.174.0",
+    "httplib2==0.22.0",
     "httpx==0.28.1",
     "langchain==0.3.25",
     "langchain-community==0.3.24",
     "langchain-core==0.3.59",
     "langchain-experimental==0.3.4",
-    "langchain-openai==0.3.5",
-    "langgraph==0.3.31",
     "langchain-mcp-adapters==0.1.8",
-    "mcp==1.10.1",
+    "langchain-openai==0.3.5",
+    "langchain-text-splitters==0.3.8",
+    "langgraph==0.3.31",
+    "lxml==5.4.0",
     "mcp-server==0.1.4",
-    "openai==1.75.0",
     "playwright==1.53.0",
-    "pydantic>=2.7.0",
-    "python-dotenv>=1.0.0",
-    "pyyaml==6.0.2",
     "sentence-transformers==5.0.0",
     "tf-playwright-stealth==1.2.0",
+    "torch==2.3.1",
+    "torchaudio==2.3.1",
     "tqdm==4.67.1",
-    "uvicorn>=0.30.0",
-    "librosa>=0.11.0",
 ]
 
 
