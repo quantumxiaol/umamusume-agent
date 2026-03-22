@@ -15,6 +15,7 @@ const selectedCharacter = computed(() => chatStore.selectedCharacter);
 const systemPrompt = computed(() => chatStore.systemPrompt);
 const voicePreviewUrl = computed(() => chatStore.voicePreviewUrl);
 const outputDir = computed(() => chatStore.outputDir);
+const restoredHistoryMessages = computed(() => chatStore.restoredHistoryMessages);
 const messages = computed(() => chatStore.messages);
 const isLoading = computed(() => chatStore.isLoading);
 const error = computed(() => chatStore.error);
@@ -23,6 +24,10 @@ const voiceEnabled = computed(() => chatStore.voiceEnabled);
 const messageParts = computed(() => {
   const map = {};
   messages.value.forEach((message) => {
+    if (message.role === 'assistant' && message.renderMode === 'raw') {
+      map[message.id] = { action: '', dialogue: '' };
+      return;
+    }
     map[message.id] = formatMessage(message.content);
   });
   return map;
@@ -67,6 +72,21 @@ const toggleVoice = () => {
   chatStore.setVoiceEnabled(!voiceEnabled.value);
 };
 
+const handleRefreshHistory = async () => {
+  await chatStore.refreshHistory();
+};
+
+const handleClearHistory = async () => {
+  if (!selectedCharacter.value) {
+    return;
+  }
+  const confirmed = window.confirm(`确认清空你与「${selectedCharacter.value}」的历史对话吗？`);
+  if (!confirmed) {
+    return;
+  }
+  await chatStore.clearCurrentCharacterHistory();
+};
+
 const playAudio = (messageId) => {
   const audio = audioRefs.value[messageId];
   if (audio) {
@@ -81,34 +101,81 @@ const formatMessage = (text) => {
   const actionLines = [];
   const dialogueLines = [];
   let capturingDialogue = false;
-  const dialogueMarkers = ['对白：', '对白:', '台词：', '台词:'];
+  const actionLabels = new Set(['动作', '神态', '场景', '神情', '表情']);
+  const dialogueLabels = new Set(['对白', '台词', '对话', 'tts', 'dialogue', 'speech']);
+  const dialogueMarkers = ['对白：', '对白:', '台词：', '台词:', '对话：', '对话:', 'TTS：', 'TTS:'];
+
+  const parseLabelledLine = (line) => {
+    for (const marker of ['动作：', '动作:', '神态：', '神态:', '场景：', '场景:']) {
+      if (line.startsWith(marker)) {
+        return { kind: 'action', content: line.slice(marker.length).trim() };
+      }
+    }
+    for (const marker of dialogueMarkers) {
+      if (line.startsWith(marker)) {
+        return { kind: 'dialogue', content: line.slice(marker.length).trim() };
+      }
+    }
+    const match = line.match(/^([\u4e00-\u9fffA-Za-z]{1,8})[:：]\s*(.*)$/);
+    if (!match) {
+      return null;
+    }
+    const label = (match[1] || '').trim().toLowerCase();
+    const content = (match[2] || '').trim();
+    if (actionLabels.has(label)) {
+      return { kind: 'action', content };
+    }
+    if (dialogueLabels.has(label)) {
+      return { kind: 'dialogue', content };
+    }
+    return { kind: 'unknown', content };
+  };
 
   text.split(/\n/).forEach((raw) => {
     const line = raw.trim();
     if (!line) {
       return;
     }
-    if (line.startsWith('动作：') || line.startsWith('动作:')) {
-      const inlineMarker = dialogueMarkers.find((marker) => line.includes(marker));
-      if (inlineMarker) {
-        const [actionPart, dialoguePart] = line.split(inlineMarker, 2);
-        actionLines.push(actionPart.replace(/^动作[:：]/, '').trim());
-        const dialogue = dialoguePart.trim();
-        if (dialogue) {
-          dialogueLines.push(dialogue);
+
+    const labelled = parseLabelledLine(line);
+    if (labelled) {
+      if (labelled.kind === 'action') {
+        const inlineMatch = labelled.content.match(/^(.*?[。！？；;…])\s*([\u4e00-\u9fffA-Za-z]{1,8})[:：]\s*(.+)$/);
+        if (inlineMatch) {
+          const inlineAction = (inlineMatch[1] || '').trim();
+          const inlineLabel = (inlineMatch[2] || '').trim().toLowerCase();
+          const inlineDialogue = (inlineMatch[3] || '').trim();
+          if (inlineAction && inlineDialogue && !actionLabels.has(inlineLabel)) {
+            actionLines.push(inlineAction);
+            dialogueLines.push(inlineDialogue);
+            capturingDialogue = true;
+            return;
+          }
         }
-        capturingDialogue = true;
+        capturingDialogue = false;
+        if (labelled.content) {
+          actionLines.push(labelled.content);
+        }
         return;
       }
-      capturingDialogue = false;
-      actionLines.push(line.replace(/^动作[:：]/, '').trim());
-      return;
+
+      if (labelled.kind === 'dialogue') {
+        capturingDialogue = true;
+        if (labelled.content) {
+          dialogueLines.push(labelled.content);
+        }
+        return;
+      }
+
+      if (labelled.kind === 'unknown' && (capturingDialogue || actionLines.length)) {
+        capturingDialogue = true;
+        if (labelled.content) {
+          dialogueLines.push(labelled.content);
+        }
+        return;
+      }
     }
-    if (line.startsWith('对白：') || line.startsWith('对白:') || line.startsWith('台词：') || line.startsWith('台词:')) {
-      capturingDialogue = true;
-      dialogueLines.push(line.replace(/^(对白|台词)[:：]/, '').trim());
-      return;
-    }
+
     if (capturingDialogue) {
       dialogueLines.push(line);
       return;
@@ -221,6 +288,7 @@ onMounted(() => {
           <div>
             <h2>{{ selectedCharacter || '未选择角色' }}</h2>
             <p class="meta">当前会话将保存语音到 outputs 目录。</p>
+            <p v-if="selectedCharacter" class="meta">已恢复历史 {{ restoredHistoryMessages }} 条，当前显示 {{ messages.length }} 条。</p>
           </div>
           <div class="toggle-group">
             <label class="toggle">
@@ -231,6 +299,8 @@ onMounted(() => {
               <input type="checkbox" :checked="voiceEnabled" @change="toggleVoice" />
               <span>语音合成</span>
             </label>
+            <button class="tool-button" :disabled="!selectedCharacter || isLoading" @click="handleRefreshHistory">查看历史</button>
+            <button class="tool-button danger" :disabled="!selectedCharacter || isLoading" @click="handleClearHistory">清空本角色历史</button>
           </div>
         </section>
 
@@ -247,14 +317,19 @@ onMounted(() => {
             </div>
             <div class="message-body">
               <template v-if="message.role === 'assistant'">
-                <div v-if="messageParts[message.id]?.action" class="line action-line">
-                  <span class="line-tag action-tag">动作</span>
-                  <span class="line-text">{{ messageParts[message.id].action }}</span>
-                </div>
-                <div v-if="messageParts[message.id]?.dialogue" class="line dialogue-line">
-                  <span class="line-tag dialogue-tag">对白</span>
-                  <p class="line-text">{{ messageParts[message.id].dialogue }}</p>
-                </div>
+                <template v-if="message.renderMode === 'raw'">
+                  <pre class="stream-raw">{{ message.content }}</pre>
+                </template>
+                <template v-else>
+                  <div v-if="messageParts[message.id]?.action" class="line action-line">
+                    <span class="line-tag action-tag">动作</span>
+                    <span class="line-text">{{ messageParts[message.id].action }}</span>
+                  </div>
+                  <div v-if="messageParts[message.id]?.dialogue" class="line dialogue-line">
+                    <span class="line-tag dialogue-tag">对白</span>
+                    <p class="line-text">{{ messageParts[message.id].dialogue }}</p>
+                  </div>
+                </template>
               </template>
               <template v-else>
                 <p>{{ message.content }}</p>
@@ -543,6 +618,8 @@ h1 {
 
 .toggle-group {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 12px;
 }
 
@@ -552,6 +629,31 @@ h1 {
   gap: 6px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.tool-button {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tool-button:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.tool-button.danger {
+  border-color: rgba(192, 72, 61, 0.35);
+  color: #b1443b;
+}
+
+.tool-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .chat-window {
@@ -598,6 +700,14 @@ h1 {
 .message-body {
   font-size: 14px;
   line-height: 1.6;
+}
+
+.stream-raw {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  line-height: 1.7;
 }
 
 .line {

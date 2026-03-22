@@ -14,6 +14,26 @@ def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": f"Request failed: {exc}"}
 
 
+def _get_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        response = requests.get(url, params=params, timeout=600)
+        if response.status_code == 200:
+            return response.json()
+        return {"error": f"HTTP {response.status_code}: {response.text}"}
+    except requests.RequestException as exc:
+        return {"error": f"Request failed: {exc}"}
+
+
+def _delete_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        response = requests.delete(url, params=params, timeout=600)
+        if response.status_code == 200:
+            return response.json()
+        return {"error": f"HTTP {response.status_code}: {response.text}"}
+    except requests.RequestException as exc:
+        return {"error": f"Request failed: {exc}"}
+
+
 def _iter_sse_events(response: requests.Response) -> Iterable[Tuple[str, str]]:
     event_name = None
     data_lines = []
@@ -57,9 +77,19 @@ class UmamusumeClient:
         self.load_url = f"{self.server_url}/load_character"
         self.chat_url = f"{self.server_url}/chat"
         self.chatstream_url = f"{self.server_url}/chat_stream"
+        self.history_url = f"{self.server_url}/history"
 
-    def load_character(self, character_name: str, force_rebuild: bool = False) -> Dict[str, Any]:
-        payload = {"character_name": character_name, "force_rebuild": force_rebuild}
+    def load_character(
+        self,
+        character_name: str,
+        force_rebuild: bool = False,
+        user_uuid: str | None = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "character_name": character_name,
+            "force_rebuild": force_rebuild,
+            "user_uuid": user_uuid,
+        }
         return _post_json(self.load_url, payload)
 
     def chat(
@@ -75,7 +105,7 @@ class UmamusumeClient:
         :param session_id: 会话 ID
         :param message: 用户输入
         :param generate_voice: 是否生成语音
-        :param text_only: 是否纯文本回复（禁用语音标签和语音合成）
+        :param text_only: 兼容字段；true 时仅禁用语音合成，不改变“动作/对白”回复结构
         :return: 回答字典
         """
         payload = {
@@ -101,7 +131,7 @@ class UmamusumeClient:
         :param message: 用户输入
         :param callback: 回调函数，接收 (event, data) 两个参数
         :param generate_voice: 是否生成语音
-        :param text_only: 是否纯文本回复（禁用语音标签和语音合成）
+        :param text_only: 兼容字段；true 时仅禁用语音合成，不改变“动作/对白”回复结构
         """
         payload = {
             "session_id": session_id,
@@ -133,3 +163,24 @@ class UmamusumeClient:
 
         except requests.RequestException as exc:
             callback("error", f"Request failed: {exc}")
+
+    def get_history(
+        self,
+        user_uuid: str,
+        character_name: str | None = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "user_uuid": user_uuid,
+            "limit": limit,
+        }
+        if character_name:
+            params["character_name"] = character_name
+        return _get_json(self.history_url, params)
+
+    def clear_history(self, user_uuid: str, character_name: str) -> Dict[str, Any]:
+        params = {
+            "user_uuid": user_uuid,
+            "character_name": character_name,
+        }
+        return _delete_json(self.history_url, params)

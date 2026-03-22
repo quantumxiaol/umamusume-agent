@@ -7,6 +7,13 @@ import os
 # 加载 .env 文件（从项目根目录开始）
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"))
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 class Config:
     """
     配置类：集中管理所有环境变量
@@ -90,9 +97,17 @@ class Config:
             os.getenv("OUTPUTS_DIRECTORY", "./outputs").lstrip("./"),
         )
     )
+    DIALOGUE_HISTORY_DIRECTORY: str = os.path.abspath(
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            os.getenv("DIALOGUE_HISTORY_DIRECTORY", "./outputs/dialogues").lstrip("./"),
+        )
+    )
     DIALOGUE_SESSION_TTL_SECONDS: int = int(os.getenv("DIALOGUE_SESSION_TTL_SECONDS", "3600"))
     DIALOGUE_SESSION_HISTORY_MAX_MESSAGES: int = int(os.getenv("DIALOGUE_SESSION_HISTORY_MAX_MESSAGES", "40"))
     DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS: int = int(os.getenv("DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS", "60"))
+    DIALOGUE_PREFIX_CACHE_ENABLED: bool = _env_bool("DIALOGUE_PREFIX_CACHE_ENABLED", True)
+    DIALOGUE_PREFIX_CACHE_MIN_CHARS: int = int(os.getenv("DIALOGUE_PREFIX_CACHE_MIN_CHARS", "1000"))
 
     # ================== Character Settings ==================
     _characters_dir = os.getenv("CHARACTERS_DIRECTORY", "./characters")
