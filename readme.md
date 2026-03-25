@@ -43,7 +43,7 @@ uv lock
 uv sync
 ```
 
-`uv sync` 默认安装精简版依赖：`dialogue_server + builder` 主链路必需包。
+`uv sync` 默认安装精简版依赖：`dialogue_server` 主链路必需包（角色构建依赖已剥离至 `umamusume-character-build` 项目）。
 
 如需启用其余可选能力，统一安装 `extras`：
 
@@ -70,30 +70,12 @@ cat .env.template > .env
 
 当前主链路主要依赖 `ROLEPLAY_LLM_*` 与 `INDEXTTS_MCP_*`；RAG/Web/旧模块需要安装 `extras` 后再配置。
 
-## 数据准备
+## 数据准备（角色导入）
 
-在使用了[umamusume-agent-prompt](https://github.com/quantumxiaol/umamusume-agent-prompt)和[umamusume-voice-data](https://github.com/quantumxiaol/umamusume-voice-data)获取到数据后，把数据移动到`result-prompts/`和`result-voices/`下。
+**注意：** 本项目现已纯粹专注于对话交互阶段（Runtime）。
+角色的自动化构建、音频筛选与卡片生成功能，已正式剥离至独立的构建项目 `umamusume-character-build`。
 
-### 1) 检查现有数据
-
-```bash
-python scripts/check_status.py --show-voice-only
-```
-
-### 2) 构建角色目录
-
-```bash
-python build_character.py
-python build_character.py --workers 2
-```
-
-会在 `characters/<角色>/` 下生成：
-- `config.json`
-- `prompt.md`
-- `reference.*`
-- `reference_jp.txt` / `reference_zh.txt`
-
-当前音频筛选有些问题，可以自己选择没有鼻音、静音少、语调正常的语句并重命名。
+您只需要将构建好或打包好的角色文件夹（内含 `config.json`、`prompt.md`、参考音频等）提取并直接放入本项目的 `characters/` 目录下即可。
 
 ## 角色说明与文件组织
 
@@ -118,21 +100,9 @@ characters/
 - `reference_jp.txt`：日文参考文本，对应参考音频内容。
 - `reference_zh.txt`：中文参考文本，便于检索与对照。
 
-### 构建过程
-
-```text
-result-prompts/ + result-voices/ -> build_character.py -> characters/<角色名>/
-```
-
-简要流程：
-- 拉取/整理角色 prompt 与音频数据，放入 `result-prompts/` 和 `result-voices/`。
-- 可先用 `scripts/check_status.py` 检查缺失情况。
-- 运行 `python build_character.py` 生成角色目录与配置文件。
-
 ### 文件组织形式
 
-- 原始输入：`result-prompts/`、`result-voices/`
-- 构建输出：`characters/`
+- 数据来源：`characters/` (外部导入角色卡片)
 - 运行产物：`outputs/`
 - 其它资源：`resources/`（来源于旧项目，还未使用）
 
@@ -415,19 +385,15 @@ curl -L "http://127.0.0.1:1111/audio?path=/absolute/path/to/reply_001.wav" -o re
 
 ```
 ./
-|- build_character.py          # 构建角色配置
 |- scripts/                    # 工具脚本
 |   |- check_status.py         # 数据状态检查
-|- characters/                 # 角色配置输出
-|- result-prompts/             # 角色 prompt 原始结果
-|- result-voices/              # 角色音频原始结果
+|- characters/                 # 导入的角色卡片目录
 |- outputs/                    # 对话语音输出
 |- resources/                  # 资源与文档（部分为遗留）
 |   |- docs/                   # RAG 文档（未使用）
 |   |- prompt/                 # 旧提示词库（未使用）
 |   |- results/                # 旧结果样例（未使用）
 |- src/umamusume_agent/
-|   |- builder/                # 本地构建封装（调用 build_character.py）
 |   |- character/              # 角色模型与管理
 |   |- client/                 # CLI 客户端
 |   |- crawler/                # 旧爬虫（未使用）

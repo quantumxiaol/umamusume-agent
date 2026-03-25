@@ -788,10 +788,15 @@ async def _session_cleanup_worker():
         raise
 
 
-def _should_generate_voice(request: DialogueRequest) -> bool:
+def _should_generate_voice(request: DialogueRequest, session: 'DialogueSession') -> bool:
     if request.generate_voice and request.text_only:
         logger.info("text_only=true, skip voice generation for this request")
         return False
+        
+    voice_config = session.character.get_voice_config()
+    if voice_config.get("no_voice") or not voice_config.get("ref_audio_path"):
+        return False
+        
     return request.generate_voice
 
 
@@ -863,7 +868,7 @@ async def load_character(request: LoadCharacterRequest):
             "restored_history_messages": len(session.history),
             "output_dir": str(session.output_dir),
             "history_file": str(session.history_file),
-            "voice_preview_url": _build_audio_url(Path(character.get_voice_config()["ref_audio_path"])),
+            "voice_preview_url": _build_audio_url(Path(character.get_voice_config()["ref_audio_path"])) if character.get_voice_config().get("ref_audio_path") else None,
         }
     
     except FileNotFoundError as e:
@@ -906,7 +911,7 @@ async def chat(request: DialogueRequest):
         result = {"reply": reply}
         
         # 生成语音（如果需要）
-        if _should_generate_voice(request):
+        if _should_generate_voice(request, session):
             voice_plan = _reserve_voice_output(session)
             voice_info = await _generate_voice_for_reply(session, reply, voice_plan)
             if voice_info:
@@ -960,7 +965,7 @@ async def chat_stream(request: DialogueRequest):
             # 发送完成事件
             yield f"event: done\ndata: {{}}\n\n"
 
-            if _should_generate_voice(request):
+            if _should_generate_voice(request, session):
                 voice_plan = _reserve_voice_output(session)
                 payload = json.dumps(voice_plan, ensure_ascii=False)
                 yield f"event: voice_pending\ndata: {payload}\n\n"
@@ -1185,6 +1190,10 @@ async def _generate_voice_for_reply(
 ) -> Optional[Dict[str, Any]]:
     try:
         voice_config = session.character.get_voice_config()
+        if voice_config.get("no_voice") or not voice_config.get("ref_audio_path"):
+            logger.info(f"Skipping TTS generation for session {session.session_id}: no_voice is True or ref_audio_path is missing")
+            return None
+            
         prompt_audio_path = voice_config["ref_audio_path"]
         output_name = voice_plan["output_name"]
         target_path = Path(voice_plan["audio_path"])
