@@ -24,8 +24,9 @@ class Personality(BaseModel):
 
 class VoiceConfig(BaseModel):
     """语音配置"""
+    no_voice: bool = Field(default=False, description="是否无语音")
     model: str = Field(default="IndexTTS2", description="TTS模型名称")
-    ref_audio_path: str = Field(..., description="参考音频路径（相对于角色目录）")
+    ref_audio_path: Optional[str] = Field(None, description="参考音频路径（相对于角色目录）")
     ref_text_path: Optional[str] = Field(None, description="参考文本路径")
     language_code: str = Field(default="ja-JP", description="语言代码")
     sample_rate: int = Field(default=22050, description="采样率")
@@ -66,7 +67,7 @@ class CharacterConfig(BaseModel):
         """获取语音配置字典"""
         config = self.voice_config.model_dump()
         # 转换为绝对路径
-        if self.character_dir:
+        if self.character_dir and config.get('ref_audio_path'):
             config['ref_audio_path'] = str(self.character_dir / config['ref_audio_path'])
             if config.get('ref_text_path'):
                 config['ref_text_path'] = str(self.character_dir / config['ref_text_path'])

@@ -161,16 +161,12 @@ class CharacterManager:
             logger.info(f"Character '{character_name}' loaded from disk cache")
             return character
         
-        # 缓存未命中，需要构建
-        logger.info(f"Character '{character_name}' not found in cache, triggering build...")
-        character = await self._build_character(character_name)
-        
-        # 保存到文件和内存
-        await self._save_to_file(character)
-        self._cache[cache_key] = character
-        
-        logger.info(f"Character '{character_name}' built and cached successfully")
-        return character
+        # 缓存未命中且未发现配置文件，抛出异常
+        logger.error(f"Character '{character_name}' not found in cache or disk.")
+        raise FileNotFoundError(
+            f"Character '{character_name}' not found. "
+            f"Please ensure it exists in {self.get_character_dir(character_name)}"
+        )
     
     async def _load_from_file(self, character_name: str) -> CharacterConfig:
         """
@@ -226,38 +222,7 @@ class CharacterManager:
             logger.error(f"Failed to save character config to {config_file}: {e}")
             raise
     
-    async def _build_character(self, character_name: str) -> CharacterConfig:
-        """
-        构建角色配置（从网络爬取数据）
-        
-        Args:
-            character_name: 角色名称
-        
-        Returns:
-            角色配置对象
-        
-        TODO: 实现完整的构建流程
-        """
-        # 这里需要集成：
-        # 1. CSV查询（获取标准名称）
-        # 2. Web爬虫（获取Wiki数据和音频）
-        # 3. LLM提取（生成system_prompt和personality）
-        # 4. 音频处理（转码为标准格式）
-        
-        logger.warning(f"Character building not fully implemented yet for '{character_name}'")
-        
-        # 目前先抛出异常，提示用户手动创建
-        raise FileNotFoundError(
-            f"Character '{character_name}' not found. "
-            f"Please create config.json in {self.get_character_dir(character_name)}"
-        )
-        
-        # TODO: 未来实现
-        # from ..builder import CharacterBuilder
-        # builder = CharacterBuilder()
-        # character = await builder.build(character_name)
-        # return character
-    
+
     def list_characters(self) -> list[str]:
         """
         列出所有已缓存的角色
