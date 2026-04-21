@@ -24,6 +24,12 @@ pnpm run dev
 pnpm run build
 ```
 
+前端环境变量：
+
+- `VITE_API_BASE_URL`：后端 API 地址，本地默认 `http://127.0.0.1:1111`
+- `VITE_API_ACCESS_KEY`：可选；发送给后端的 `X-API-Key`，仅适合作为轻量门槛
+- `VITE_BASE_PATH`：静态资源基础路径，本地默认 `/`；GitHub Pages 项目页应设为 `/umamusume-agent/`
+
 ## Usage
 
 ### 启动后端（本项目根目录）
@@ -49,7 +55,25 @@ pnpm run dev
 - **提示词预览**：查看已加载角色的系统提示词
 - **试听声音**：播放角色参考音频
 - **流式 / 非流式**：支持实时输出和一次性回复
-- **语音合成**：每条回复带“播放语音”按钮（合成中会显示状态）
+- **语音合成**：前端默认关闭；手动开启后，每条回复可生成语音并显示状态
+
+## GitHub Pages 发布
+
+仓库已提供工作流 [.github/workflows/deploy-pages.yml](/Users/quantumxiaol/Desktop/dev/umamusume-agent/.github/workflows/deploy-pages.yml:1)。
+
+- 推送 `main` 分支时自动构建 `frontend/`
+- 生产构建默认指向 `https://quantumxiaol-umamusume-agent.hf.space`
+- 生产静态资源基础路径默认是 `/umamusume-agent/`
+
+发布前请在仓库设置中启用 GitHub Pages：
+
+1. `Settings -> Pages`
+2. `Build and deployment -> Source` 选择 `GitHub Actions`
+
+如果以后更换 HF Space 或仓库名，只需要更新工作流里的：
+
+- `VITE_API_BASE_URL`
+- `VITE_BASE_PATH`
 
 ## 界面说明
 
@@ -80,4 +104,5 @@ frontend/
 ## 备注
 
 - `.env` 里 `VITE_API_BASE_URL` 默认指向 `http://127.0.0.1:1111`
+- `.env` 里 `VITE_BASE_PATH` 本地默认设为 `/`
 - 语音文件会保存到后端 `outputs/<角色>_<时间戳>/reply_###.wav`

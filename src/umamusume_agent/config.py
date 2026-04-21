@@ -1,11 +1,50 @@
 # src/umamusume_agent/config.py
-
-from dotenv import load_dotenv
-from typing import Optional
 import os
+from pathlib import Path
+from typing import Optional
 
-# 加载 .env 文件（从项目根目录开始）
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"))
+from dotenv import dotenv_values
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _is_placeholder_env_value(value: str) -> bool:
+    stripped = value.strip()
+    return stripped.startswith("<") and stripped.endswith(">")
+
+
+def _load_env_defaults() -> None:
+    """
+    加载配置优先级：
+    1. 运行时环境变量（如 HF Space Secrets）
+    2. 项目根目录 .env
+    3. 项目根目录 .env.template
+    """
+    merged_defaults: dict[str, str] = {}
+
+    for filename in (".env.template", ".env"):
+        env_path = _PROJECT_ROOT / filename
+        if not env_path.exists():
+            continue
+
+        for key, value in dotenv_values(env_path).items():
+            if not key or value is None:
+                continue
+
+            normalized_value = value.strip()
+            if not normalized_value:
+                continue
+            if _is_placeholder_env_value(normalized_value):
+                continue
+
+            merged_defaults[key] = normalized_value
+
+    for key, value in merged_defaults.items():
+        os.environ.setdefault(key, value)
+
+
+_load_env_defaults()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -30,6 +69,13 @@ class Config:
     ROLEPLAY_LLM_MODEL_NAME: str = os.getenv("ROLEPLAY_LLM_MODEL_NAME", "qwen-long-latest")
     ROLEPLAY_LLM_MODEL_BASE_URL: str = os.getenv("ROLEPLAY_LLM_MODEL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     ROLEPLAY_LLM_MODEL_API_KEY: str = os.getenv("ROLEPLAY_LLM_MODEL_API_KEY", "")
+
+    # API protection
+    API_ACCESS_KEY: str = os.getenv("API_ACCESS_KEY", "")
+    API_RATE_LIMIT_ENABLED: bool = _env_bool("API_RATE_LIMIT_ENABLED", True)
+    API_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("API_RATE_LIMIT_WINDOW_SECONDS", "60"))
+    API_RATE_LIMIT_MAX_REQUESTS: int = int(os.getenv("API_RATE_LIMIT_MAX_REQUESTS", "60"))
+    API_CHAT_RATE_LIMIT_MAX_REQUESTS: int = int(os.getenv("API_CHAT_RATE_LIMIT_MAX_REQUESTS", "12"))
 
     # 默认 User-Agent
     USER_AGENT: str = os.getenv("USER_AGENT", "MyApp/1.0")

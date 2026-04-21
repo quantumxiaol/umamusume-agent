@@ -2,13 +2,24 @@
 import axios from 'axios';
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:1111';
+export const API_ACCESS_KEY = import.meta.env.VITE_API_ACCESS_KEY || '';
+
+const buildAuthHeaders = (headers = {}) => {
+  if (!API_ACCESS_KEY) {
+    return headers;
+  }
+  return {
+    ...headers,
+    'X-API-Key': API_ACCESS_KEY,
+  };
+};
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: 600000,
-  headers: {
+  headers: buildAuthHeaders({
     'Content-Type': 'application/json',
-  },
+  }),
 });
 
 const parseError = (error) => {
@@ -68,9 +79,9 @@ export const chatStream = async (sessionId, message, generateVoice = false, onEv
     const url = `${API_BASE_URL}/chat_stream`;
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
+      headers: buildAuthHeaders({
         'Content-Type': 'application/json',
-      },
+      }),
       body: JSON.stringify({
         session_id: sessionId,
         message,

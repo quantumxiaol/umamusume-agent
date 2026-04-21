@@ -62,7 +62,7 @@ export const useChatStore = defineStore('chat', {
     isLoading: false,
     error: null,
     streamMode: true,
-    voiceEnabled: true,
+    voiceEnabled: false,
     currentAssistantId: '',
     voicePollers: {},
   }),
