@@ -5,7 +5,7 @@ colorFrom: pink
 colorTo: blue
 sdk: docker
 app_port: 7860
-short_description: FastAPI backend for Umamusume roleplay chat, deployed on Hugging Face Spaces.
+short_description: FastAPI backend for Umamusume roleplay chat.
 ---
 
 # Umamusume Agent
