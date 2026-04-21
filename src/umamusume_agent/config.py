@@ -69,6 +69,8 @@ class Config:
     ROLEPLAY_LLM_MODEL_NAME: str = os.getenv("ROLEPLAY_LLM_MODEL_NAME", "qwen-long-latest")
     ROLEPLAY_LLM_MODEL_BASE_URL: str = os.getenv("ROLEPLAY_LLM_MODEL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     ROLEPLAY_LLM_MODEL_API_KEY: str = os.getenv("ROLEPLAY_LLM_MODEL_API_KEY", "")
+    ROLEPLAY_LLM_TIMEOUT_SECONDS: float = float(os.getenv("ROLEPLAY_LLM_TIMEOUT_SECONDS", "60"))
+    ROLEPLAY_LLM_MAX_RETRIES: int = int(os.getenv("ROLEPLAY_LLM_MAX_RETRIES", "2"))
 
     # API protection
     API_ACCESS_KEY: str = os.getenv("API_ACCESS_KEY", "")
@@ -76,6 +78,7 @@ class Config:
     API_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("API_RATE_LIMIT_WINDOW_SECONDS", "60"))
     API_RATE_LIMIT_MAX_REQUESTS: int = int(os.getenv("API_RATE_LIMIT_MAX_REQUESTS", "60"))
     API_CHAT_RATE_LIMIT_MAX_REQUESTS: int = int(os.getenv("API_CHAT_RATE_LIMIT_MAX_REQUESTS", "12"))
+    ENABLE_TTS: bool = _env_bool("ENABLE_TTS", False)
 
     # 默认 User-Agent
     USER_AGENT: str = os.getenv("USER_AGENT", "MyApp/1.0")

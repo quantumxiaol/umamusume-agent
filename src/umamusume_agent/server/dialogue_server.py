@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse, FileResponse, Response, JSONRes
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIConnectionError, APITimeoutError, APIStatusError
 
 from ..character import CharacterManager, CharacterConfig
 from ..tts import IndexTTSMCPClient, MCPToolError
@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)
 character_manager = CharacterManager()
 llm_client = AsyncOpenAI(
     api_key=config.ROLEPLAY_LLM_MODEL_API_KEY,
-    base_url=config.ROLEPLAY_LLM_MODEL_BASE_URL
+    base_url=config.ROLEPLAY_LLM_MODEL_BASE_URL,
+    timeout=max(5.0, config.ROLEPLAY_LLM_TIMEOUT_SECONDS),
+    max_retries=max(0, config.ROLEPLAY_LLM_MAX_RETRIES),
 )
 tts_client = IndexTTSMCPClient()
 
@@ -59,6 +61,7 @@ API_RATE_LIMIT_ENABLED = config.API_RATE_LIMIT_ENABLED
 API_RATE_LIMIT_WINDOW_SECONDS = max(1, config.API_RATE_LIMIT_WINDOW_SECONDS)
 API_RATE_LIMIT_MAX_REQUESTS = max(1, config.API_RATE_LIMIT_MAX_REQUESTS)
 API_CHAT_RATE_LIMIT_MAX_REQUESTS = max(1, config.API_CHAT_RATE_LIMIT_MAX_REQUESTS)
+ENABLE_TTS = config.ENABLE_TTS
 API_AUTH_EXEMPT_PATHS = {"/", "/audio"}
 _CHAT_ENDPOINTS = {"/chat", "/chat_stream"}
 _rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
@@ -238,6 +241,40 @@ def _should_attach_prefix_cache(system_prompt: str) -> bool:
     if not _supports_prefix_cache_provider():
         return False
     return len(system_prompt) >= PREFIX_CACHE_MIN_CHARS
+
+
+def _extract_upstream_error_detail(exc: APIStatusError) -> str:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return f"上游模型服务返回 {exc.status_code}"
+
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and message.strip():
+                    return f"上游模型服务返回 {exc.status_code}: {message.strip()}"
+            detail = payload.get("detail")
+            if isinstance(detail, str) and detail.strip():
+                return f"上游模型服务返回 {exc.status_code}: {detail.strip()}"
+    except Exception:
+        pass
+
+    return f"上游模型服务返回 {exc.status_code}"
+
+
+def _translate_llm_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, APITimeoutError):
+        return HTTPException(status_code=504, detail="上游模型服务超时，请稍后重试。")
+    if isinstance(exc, APIConnectionError):
+        return HTTPException(status_code=502, detail="无法连接到上游模型服务，请稍后重试。")
+    if isinstance(exc, APIStatusError):
+        status_code = exc.status_code or 502
+        mapped_status = status_code if 400 <= status_code <= 599 else 502
+        return HTTPException(status_code=mapped_status, detail=_extract_upstream_error_detail(exc))
+    return HTTPException(status_code=500, detail=f"对话失败: {str(exc)}")
 
 
 def _normalize_user_uuid(user_uuid: Optional[str]) -> str:
@@ -864,6 +901,8 @@ async def _session_cleanup_worker():
 
 
 def _should_generate_voice(request: DialogueRequest, session: 'DialogueSession') -> bool:
+    if not ENABLE_TTS:
+        return False
     if request.generate_voice and request.text_only:
         logger.info("text_only=true, skip voice generation for this request")
         return False
@@ -943,7 +982,11 @@ async def load_character(request: LoadCharacterRequest):
             "restored_history_messages": len(session.history),
             "output_dir": str(session.output_dir),
             "history_file": str(session.history_file),
-            "voice_preview_url": _build_audio_url(Path(character.get_voice_config()["ref_audio_path"])) if character.get_voice_config().get("ref_audio_path") else None,
+            "voice_preview_url": (
+                _build_audio_url(Path(character.get_voice_config()["ref_audio_path"]))
+                if ENABLE_TTS and character.get_voice_config().get("ref_audio_path")
+                else None
+            ),
         }
     
     except FileNotFoundError as e:
@@ -996,7 +1039,7 @@ async def chat(request: DialogueRequest):
     
     except Exception as e:
         logger.error(f"Chat failed: {e}")
-        raise HTTPException(status_code=500, detail=f"对话失败: {str(e)}")
+        raise _translate_llm_exception(e)
 
 
 @app.post("/chat_stream")
@@ -1048,7 +1091,8 @@ async def chat_stream(request: DialogueRequest):
         
         except Exception as e:
             logger.error(f"Stream chat failed: {e}")
-            yield f"event: error\ndata: {str(e)}\n\n"
+            translated = _translate_llm_exception(e)
+            yield f"event: error\ndata: {translated.detail}\n\n"
     
     return StreamingResponse(
         event_generator(),

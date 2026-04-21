@@ -11,6 +11,7 @@ import {
 } from '@/services/api';
 
 const USER_UUID_STORAGE_KEY = 'umamusume_user_uuid';
+const TTS_ENABLED = import.meta.env.VITE_ENABLE_TTS === 'true';
 
 const getOrCreateUserUuid = () => {
   const cached = localStorage.getItem(USER_UUID_STORAGE_KEY);
@@ -96,7 +97,7 @@ export const useChatStore = defineStore('chat', {
         this.selectedCharacter = name;
         this.sessionId = data.session_id || '';
         this.systemPrompt = data.system_prompt || '';
-        this.voicePreviewUrl = resolveAudioUrl(data.voice_preview_url || '');
+        this.voicePreviewUrl = TTS_ENABLED ? resolveAudioUrl(data.voice_preview_url || '') : '';
         this.outputDir = data.output_dir || '';
         this.restoredHistoryMessages = Number(data.restored_history_messages || 0);
         this._clearVoicePollers();
@@ -113,7 +114,7 @@ export const useChatStore = defineStore('chat', {
     },
 
     setVoiceEnabled(value) {
-      this.voiceEnabled = value;
+      this.voiceEnabled = TTS_ENABLED ? value : false;
     },
 
     _clearVoicePollers() {
@@ -262,7 +263,7 @@ export const useChatStore = defineStore('chat', {
         await chatStream(
           this.sessionId,
           text,
-          this.voiceEnabled,
+          TTS_ENABLED && this.voiceEnabled,
           (event) => {
             const { type, data } = event;
             if (!this.currentAssistantId) {
@@ -275,7 +276,7 @@ export const useChatStore = defineStore('chat', {
 
             if (type === 'token') {
               target.content += data || '';
-            } else if (type === 'voice_pending') {
+            } else if (type === 'voice_pending' && TTS_ENABLED) {
               target.voice = {
                 status: 'pending',
                 audio_url: resolveAudioUrl(data.audio_url),
@@ -295,14 +296,14 @@ export const useChatStore = defineStore('chat', {
       } else {
         this.isLoading = true;
         try {
-          const data = await chatOnce(this.sessionId, text, this.voiceEnabled);
+          const data = await chatOnce(this.sessionId, text, TTS_ENABLED && this.voiceEnabled);
           if (data.error) {
             this.error = data.error;
           } else {
             const assistantMessage = createMessage('assistant', data.reply || '', {
               renderMode: 'structured',
             });
-            if (data.voice) {
+            if (TTS_ENABLED && data.voice) {
               assistantMessage.voice = {
                 status: 'ready',
                 audio_url: resolveAudioUrl(data.voice.audio_url),

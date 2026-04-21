@@ -143,7 +143,7 @@ curl -s http://127.0.0.1:1111/
 - GitHub Pages：发布 `frontend/` 静态站点
 - Hugging Face Space：使用仓库根目录的 `app.py` 与 `Dockerfile` 运行 FastAPI
 - 前端生产环境默认直连 `https://quantumxiaol-umamusume-agent.hf.space`
-- 前端默认关闭 TTS，避免 CPU Space 上额外负担
+- 前后端默认关闭 TTS，当前部署仅保留文本对话
 - 后端支持可选 `X-API-Key` 软门槛与内存级请求限流
 
 ### GitHub Pages

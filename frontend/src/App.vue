@@ -4,6 +4,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useChatStore } from '@/stores/chatStore';
 
 const chatStore = useChatStore();
+const ttsEnabled = import.meta.env.VITE_ENABLE_TTS === 'true';
 
 const messageInput = ref('');
 const characterFilter = ref('');
@@ -224,11 +225,11 @@ onMounted(() => {
       <div>
         <p class="eyebrow">Umamusume Voice Agent</p>
         <h1>赛马娘对话控制台</h1>
-        <p class="subtitle">选择角色、试听声音、查看人格提示词，开启多轮语音对话。</p>
+        <p class="subtitle">选择角色、查看人格提示词，开启多轮文本对话。</p>
       </div>
       <div class="status-panel">
         <div class="status-pill">{{ streamMode ? '流式' : '非流式' }}</div>
-        <div class="status-pill">TTS {{ voiceEnabled ? '开启' : '关闭' }}</div>
+        <div class="status-pill">{{ ttsEnabled ? `TTS ${voiceEnabled ? '开启' : '关闭'}` : '文本模式' }}</div>
         <div class="status-pill" v-if="outputDir">{{ outputDir.split('/').slice(-1)[0] }}</div>
       </div>
     </header>
@@ -259,7 +260,7 @@ onMounted(() => {
           </div>
         </section>
 
-        <section class="card">
+        <section v-if="ttsEnabled" class="card">
           <div class="card-header">
             <h2>角色声音</h2>
             <span class="meta">参考音色</span>
@@ -287,7 +288,7 @@ onMounted(() => {
         <section class="chat-header">
           <div>
             <h2>{{ selectedCharacter || '未选择角色' }}</h2>
-            <p class="meta">当前会话将保存语音到 outputs 目录。</p>
+            <p class="meta">当前会话会在后端保留文本历史。</p>
             <p v-if="selectedCharacter" class="meta">已恢复历史 {{ restoredHistoryMessages }} 条，当前显示 {{ messages.length }} 条。</p>
           </div>
           <div class="toggle-group">
@@ -295,7 +296,7 @@ onMounted(() => {
               <input type="checkbox" :checked="streamMode" @change="toggleStreamMode" />
               <span>流式输出</span>
             </label>
-            <label class="toggle">
+            <label v-if="ttsEnabled" class="toggle">
               <input type="checkbox" :checked="voiceEnabled" @change="toggleVoice" />
               <span>语音合成</span>
             </label>
@@ -307,7 +308,7 @@ onMounted(() => {
         <section class="chat-window">
           <div v-if="!messages.length" class="empty-state">
             <h3>开始对话吧</h3>
-            <p>输入一句话，角色会用指定人格与你对话，并生成语音。</p>
+            <p>输入一句话，角色会用指定人格与你对话。</p>
           </div>
 
           <div v-for="message in messages" :key="message.id" :class="['message', message.role]">
@@ -336,7 +337,7 @@ onMounted(() => {
               </template>
             </div>
 
-            <div v-if="message.role === 'assistant'" class="message-audio">
+            <div v-if="ttsEnabled && message.role === 'assistant'" class="message-audio">
               <button
                 class="audio-button"
                 :disabled="!message.voice || !message.voice.audio_url || message.voice.status === 'pending'"
@@ -374,7 +375,7 @@ onMounted(() => {
           </div>
           <div class="meta-row">
             <span v-if="error" class="error">{{ error }}</span>
-            <span v-else class="hint">支持多轮对话，语音会自动归档。</span>
+            <span v-else class="hint">支持多轮文本对话，历史会自动归档。</span>
           </div>
         </section>
       </main>

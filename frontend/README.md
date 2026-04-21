@@ -28,6 +28,7 @@ pnpm run build
 
 - `VITE_API_BASE_URL`：后端 API 地址，本地默认 `http://127.0.0.1:1111`
 - `VITE_API_ACCESS_KEY`：可选；发送给后端的 `X-API-Key`，仅适合作为轻量门槛
+- `VITE_ENABLE_TTS`：本地开发默认 `true`；GitHub Pages 生产构建默认强制为 `false`
 - `VITE_BASE_PATH`：静态资源基础路径，本地默认 `/`；GitHub Pages 项目页应设为 `/umamusume-agent/`
 
 ## Usage
@@ -53,9 +54,8 @@ pnpm run dev
 
 - **角色选择**：从后端 `/characters` 获取已构建角色，点击即可加载
 - **提示词预览**：查看已加载角色的系统提示词
-- **试听声音**：播放角色参考音频
 - **流式 / 非流式**：支持实时输出和一次性回复
-- **语音合成**：前端默认关闭；手动开启后，每条回复可生成语音并显示状态
+- **文本对话**：当前部署默认关闭 TTS，仅保留文本对话链路
 
 ## GitHub Pages 发布
 
@@ -63,6 +63,7 @@ pnpm run dev
 
 - 推送 `main` 分支时自动构建 `frontend/`
 - 生产构建默认指向 `https://quantumxiaol-umamusume-agent.hf.space`
+- 生产构建默认禁用 TTS UI（`VITE_ENABLE_TTS=false`）
 - 生产静态资源基础路径默认是 `/umamusume-agent/`
 
 发布前请在仓库设置中启用 GitHub Pages：
