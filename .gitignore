@@ -43,10 +43,14 @@ env/
 logs/
 *.log
 
-# Character cache (根据需要可选择性提交)
-characters/*/
-!characters/README.md
-!characters/.gitkeep
+# Character assets
+!characters/
+!characters/**/
+!characters/**/*.json
+!characters/**/*.md
+!characters/**/*.txt
+!characters/**/*.mp3
+!characters/**/*.wav
 
 # Vector database cache
 resources/docs/vectorstore_cache.pkl
@@ -57,6 +61,10 @@ outputs/
 inputs/
 *.wav
 *.mp3
+
+# Keep tracked character reference audio
+!characters/**/*.mp3
+!characters/**/*.wav
 
 # Temporary files
 tmp/
@@ -87,4 +95,3 @@ html_dumps/
 result-prompts/
 # umamusume voice
 result-voices/
-
