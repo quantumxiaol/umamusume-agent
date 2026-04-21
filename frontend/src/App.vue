@@ -288,7 +288,7 @@ onMounted(() => {
         <section class="chat-header">
           <div>
             <h2>{{ selectedCharacter || '未选择角色' }}</h2>
-            <p class="meta">当前会话会在后端保留文本历史。</p>
+            <p class="meta">历史按当前浏览器与后端临时保存，服务重启后可能丢失。</p>
             <p v-if="selectedCharacter" class="meta">已恢复历史 {{ restoredHistoryMessages }} 条，当前显示 {{ messages.length }} 条。</p>
           </div>
           <div class="toggle-group">
@@ -375,7 +375,7 @@ onMounted(() => {
           </div>
           <div class="meta-row">
             <span v-if="error" class="error">{{ error }}</span>
-            <span v-else class="hint">支持多轮文本对话，历史会自动归档。</span>
+            <span v-else class="hint">支持多轮文本对话；历史为临时保存，不保证长期保留。</span>
           </div>
         </section>
       </main>

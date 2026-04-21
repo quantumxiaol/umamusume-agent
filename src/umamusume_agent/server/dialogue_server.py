@@ -274,7 +274,45 @@ def _translate_llm_exception(exc: Exception) -> HTTPException:
         status_code = exc.status_code or 502
         mapped_status = status_code if 400 <= status_code <= 599 else 502
         return HTTPException(status_code=mapped_status, detail=_extract_upstream_error_detail(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=502, detail=str(exc))
     return HTTPException(status_code=500, detail=f"对话失败: {str(exc)}")
+
+
+def _extract_completion_text(response: Any) -> str:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        raise ValueError("上游模型返回空响应（choices 为空）")
+
+    first_choice = choices[0]
+    message = getattr(first_choice, "message", None)
+    if message is None:
+        raise ValueError("上游模型响应缺少 message 字段")
+
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _extract_stream_delta_text(chunk: Any) -> str:
+    choices = getattr(chunk, "choices", None) or []
+    if not choices:
+        return ""
+
+    first_choice = choices[0]
+    delta = getattr(first_choice, "delta", None)
+    if delta is None:
+        return ""
+
+    content = getattr(delta, "content", None)
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return str(content)
 
 
 def _normalize_user_uuid(user_uuid: Optional[str]) -> str:
@@ -1020,7 +1058,7 @@ async def chat(request: DialogueRequest):
             temperature=0.7
         )
         
-        reply_raw = response.choices[0].message.content or ""
+        reply_raw = _extract_completion_text(response)
         reply = _normalize_structured_reply(reply_raw)
         
         # 添加助手回复
@@ -1068,12 +1106,13 @@ async def chat_stream(request: DialogueRequest):
             
             full_reply_raw = ""
             async for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_reply_raw += content
-                    
-                    # 发送 SSE 事件
-                    yield f"data: {content}\n\n"
+                content = _extract_stream_delta_text(chunk)
+                if not content:
+                    continue
+                full_reply_raw += content
+                
+                # 发送 SSE 事件
+                yield f"data: {content}\n\n"
 
             full_reply = _normalize_structured_reply(full_reply_raw)
             
