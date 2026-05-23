@@ -284,6 +284,7 @@ export const useChatStore = defineStore('chat', {
               };
               this._startVoicePolling(target);
             } else if (type === 'done') {
+              target.renderMode = 'structured';
               target.status = 'ready';
               this.isLoading = false;
             } else if (type === 'error') {

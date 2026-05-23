@@ -132,6 +132,25 @@ const formatMessage = (text) => {
     return { kind: 'unknown', content };
   };
 
+  const splitInlineDialogue = (content) => {
+    let match = null;
+    dialogueMarkers.forEach((marker) => {
+      const index = content.indexOf(marker);
+      if (index > 0 && (!match || index < match.index)) {
+        match = { index, marker };
+      }
+    });
+    if (!match) {
+      return null;
+    }
+    const action = content.slice(0, match.index).trim();
+    const dialogue = content.slice(match.index + match.marker.length).trim();
+    if (!action || !dialogue) {
+      return null;
+    }
+    return { action, dialogue };
+  };
+
   text.split(/\n/).forEach((raw) => {
     const line = raw.trim();
     if (!line) {
@@ -141,12 +160,19 @@ const formatMessage = (text) => {
     const labelled = parseLabelledLine(line);
     if (labelled) {
       if (labelled.kind === 'action') {
+        const inlineSplit = splitInlineDialogue(labelled.content);
+        if (inlineSplit) {
+          actionLines.push(inlineSplit.action);
+          dialogueLines.push(inlineSplit.dialogue);
+          capturingDialogue = true;
+          return;
+        }
         const inlineMatch = labelled.content.match(/^(.*?[。！？；;…])\s*([\u4e00-\u9fffA-Za-z]{1,8})[:：]\s*(.+)$/);
         if (inlineMatch) {
           const inlineAction = (inlineMatch[1] || '').trim();
           const inlineLabel = (inlineMatch[2] || '').trim().toLowerCase();
           const inlineDialogue = (inlineMatch[3] || '').trim();
-          if (inlineAction && inlineDialogue && !actionLabels.has(inlineLabel)) {
+          if (inlineAction && inlineDialogue && dialogueLabels.has(inlineLabel)) {
             actionLines.push(inlineAction);
             dialogueLines.push(inlineDialogue);
             capturingDialogue = true;

@@ -171,6 +171,8 @@ def _get_client_ip(request: Request) -> str:
 
 
 def _requires_api_key(request: Request) -> bool:
+    if request.method == "OPTIONS":
+        return False
     if not API_ACCESS_KEY:
         return False
     return request.url.path not in API_AUTH_EXEMPT_PATHS
@@ -181,6 +183,8 @@ async def _check_rate_limit(request: Request) -> Optional[JSONResponse]:
         return None
 
     path = request.url.path
+    if request.method == "OPTIONS":
+        return None
     if path in API_AUTH_EXEMPT_PATHS:
         return None
 
