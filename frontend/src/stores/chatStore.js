@@ -48,6 +48,62 @@ const resolveAudioUrl = (url) => {
   return url;
 };
 
+const normalizeMarkdownText = (text) => {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+  return normalized || '_空消息_';
+};
+
+const sanitizeFilenamePart = (value) => {
+  const sanitized = String(value || 'conversation')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 80);
+  return sanitized || 'conversation';
+};
+
+const markdownTimestamp = () => new Date().toISOString().replace(/[:.]/g, '-');
+
+const writeTextToClipboard = async (text) => {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_err) {
+      // Fall back for browsers that expose Clipboard API but block it by policy.
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) {
+    throw new Error('当前浏览器不允许写入剪贴板。');
+  }
+};
+
+const downloadMarkdownFile = (filename, text) => {
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+};
+
 export const useChatStore = defineStore('chat', {
   state: () => ({
     characters: [],
@@ -62,6 +118,7 @@ export const useChatStore = defineStore('chat', {
     messages: [],
     isLoading: false,
     error: null,
+    exportNotice: '',
     streamMode: true,
     voiceEnabled: false,
     currentAssistantId: '',
@@ -100,6 +157,7 @@ export const useChatStore = defineStore('chat', {
         this.voicePreviewUrl = TTS_ENABLED ? resolveAudioUrl(data.voice_preview_url || '') : '';
         this.outputDir = data.output_dir || '';
         this.restoredHistoryMessages = Number(data.restored_history_messages || 0);
+        this.exportNotice = '';
         this._clearVoicePollers();
         await this.refreshHistory(name);
       } catch (err) {
@@ -229,6 +287,7 @@ export const useChatStore = defineStore('chat', {
         }
         this.messages = [];
         this.restoredHistoryMessages = 0;
+        this.exportNotice = '';
         await this.refreshHistory(this.selectedCharacter);
       } catch (err) {
         this.error = err.message || '清理历史失败。';
@@ -250,6 +309,7 @@ export const useChatStore = defineStore('chat', {
       const userMessage = createMessage('user', text);
       this.messages.push(userMessage);
       this.error = null;
+      this.exportNotice = '';
 
       if (this.streamMode) {
         const assistantMessage = createMessage('assistant', '', {
@@ -324,6 +384,70 @@ export const useChatStore = defineStore('chat', {
     clearMessages() {
       this.messages = [];
       this._clearVoicePollers();
+    },
+
+    buildConversationMarkdown() {
+      const characterName = this.selectedCharacter || '未选择角色';
+      const exportedAt = new Date().toLocaleString();
+      const lines = [
+        `# ${characterName} 对话记录`,
+        '',
+        `- 导出时间：${exportedAt}`,
+        `- 角色：${characterName}`,
+        `- 消息数：${this.messages.length}`,
+        '',
+        '## 对话',
+        '',
+      ];
+
+      this.messages.forEach((message, index) => {
+        const speaker = message.role === 'assistant' ? characterName : '训练员';
+        const status = message.status === 'streaming' ? '（生成中）' : '';
+        lines.push(`### ${index + 1}. ${speaker}${status}`);
+        lines.push('');
+        lines.push(normalizeMarkdownText(message.content));
+        lines.push('');
+      });
+
+      return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+    },
+
+    async copyConversationMarkdown() {
+      this.error = null;
+      this.exportNotice = '';
+      if (!this.messages.length) {
+        this.exportNotice = '当前没有可复制的对话。';
+        return false;
+      }
+
+      try {
+        await writeTextToClipboard(this.buildConversationMarkdown());
+        this.exportNotice = '已复制 Markdown 到剪贴板。';
+        return true;
+      } catch (err) {
+        this.error = err.message || '复制 Markdown 失败。';
+        return false;
+      }
+    },
+
+    downloadConversationMarkdown() {
+      this.error = null;
+      this.exportNotice = '';
+      if (!this.messages.length) {
+        this.exportNotice = '当前没有可下载的对话。';
+        return false;
+      }
+
+      try {
+        const filenameBase = sanitizeFilenamePart(this.selectedCharacter || 'umamusume-dialogue');
+        const filename = `${filenameBase}-${markdownTimestamp()}.md`;
+        downloadMarkdownFile(filename, this.buildConversationMarkdown());
+        this.exportNotice = `已下载 ${filename}。`;
+        return true;
+      } catch (err) {
+        this.error = err.message || '下载 Markdown 失败。';
+        return false;
+      }
     },
   },
 });

@@ -20,8 +20,10 @@ const restoredHistoryMessages = computed(() => chatStore.restoredHistoryMessages
 const messages = computed(() => chatStore.messages);
 const isLoading = computed(() => chatStore.isLoading);
 const error = computed(() => chatStore.error);
+const exportNotice = computed(() => chatStore.exportNotice);
 const streamMode = computed(() => chatStore.streamMode);
 const voiceEnabled = computed(() => chatStore.voiceEnabled);
+const canExportConversation = computed(() => Boolean(selectedCharacter.value && messages.value.length && !isLoading.value));
 const messageParts = computed(() => {
   const map = {};
   messages.value.forEach((message) => {
@@ -86,6 +88,20 @@ const handleClearHistory = async () => {
     return;
   }
   await chatStore.clearCurrentCharacterHistory();
+};
+
+const handleCopyMarkdown = async () => {
+  if (!canExportConversation.value) {
+    return;
+  }
+  await chatStore.copyConversationMarkdown();
+};
+
+const handleDownloadMarkdown = () => {
+  if (!canExportConversation.value) {
+    return;
+  }
+  chatStore.downloadConversationMarkdown();
 };
 
 const playAudio = (messageId) => {
@@ -326,6 +342,8 @@ onMounted(() => {
               <input type="checkbox" :checked="voiceEnabled" @change="toggleVoice" />
               <span>语音合成</span>
             </label>
+            <button class="tool-button" :disabled="!canExportConversation" @click="handleCopyMarkdown">复制 Markdown</button>
+            <button class="tool-button" :disabled="!canExportConversation" @click="handleDownloadMarkdown">下载 Markdown</button>
             <button class="tool-button" :disabled="!selectedCharacter || isLoading" @click="handleRefreshHistory">查看历史</button>
             <button class="tool-button danger" :disabled="!selectedCharacter || isLoading" @click="handleClearHistory">清空本角色历史</button>
           </div>
@@ -401,6 +419,7 @@ onMounted(() => {
           </div>
           <div class="meta-row">
             <span v-if="error" class="error">{{ error }}</span>
+            <span v-else-if="exportNotice" class="success">{{ exportNotice }}</span>
             <span v-else class="hint">支持多轮文本对话；历史为临时保存，不保证长期保留。</span>
           </div>
         </section>
@@ -845,6 +864,10 @@ textarea {
 
 .error {
   color: #c0483d;
+}
+
+.success {
+  color: var(--accent-strong);
 }
 
 @media (max-width: 980px) {
