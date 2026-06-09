@@ -181,6 +181,20 @@ export const fetchHistory = async (userUuid, characterName = '', limit = 200) =>
   }
 };
 
+export const importHistory = async (sessionId, messages, replaceCurrent = true, source = 'manual') => {
+  try {
+    const response = await apiClient.post('/history/import', {
+      session_id: sessionId,
+      messages,
+      replace_current: replaceCurrent,
+      source,
+    });
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
 export const clearHistory = async (userUuid, characterName) => {
   try {
     const response = await apiClient.delete('/history', {

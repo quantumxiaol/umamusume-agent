@@ -10,6 +10,7 @@ const messageInput = ref('');
 const characterFilter = ref('');
 const promptOpen = ref(true);
 const audioRefs = ref({});
+const historyFileInput = ref(null);
 
 const characters = computed(() => chatStore.characters);
 const selectedCharacter = computed(() => chatStore.selectedCharacter);
@@ -24,6 +25,9 @@ const exportNotice = computed(() => chatStore.exportNotice);
 const streamMode = computed(() => chatStore.streamMode);
 const voiceEnabled = computed(() => chatStore.voiceEnabled);
 const canExportConversation = computed(() => Boolean(selectedCharacter.value && messages.value.length && !isLoading.value));
+const cachedMessageCount = computed(() => chatStore.cachedMessageCount);
+const canImportBrowserCache = computed(() => Boolean(selectedCharacter.value && cachedMessageCount.value && !isLoading.value));
+const canImportFile = computed(() => Boolean(selectedCharacter.value && !isLoading.value));
 const messageParts = computed(() => {
   const map = {};
   messages.value.forEach((message) => {
@@ -102,6 +106,39 @@ const handleDownloadMarkdown = () => {
     return;
   }
   chatStore.downloadConversationMarkdown();
+};
+
+const confirmHistoryImport = (sourceLabel) => (
+  window.confirm(`${sourceLabel}会替换当前会话上下文，并同步到后端用于后续对话。确认继续吗？`)
+);
+
+const handleImportBrowserCache = async () => {
+  if (!canImportBrowserCache.value) {
+    return;
+  }
+  if (!confirmHistoryImport('导入浏览器缓存')) {
+    return;
+  }
+  await chatStore.importFromBrowserCache();
+};
+
+const handleImportFileClick = () => {
+  if (!canImportFile.value) {
+    return;
+  }
+  historyFileInput.value?.click();
+};
+
+const handleImportFileChange = async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = '';
+  if (!file) {
+    return;
+  }
+  if (!confirmHistoryImport(`导入「${file.name}」`)) {
+    return;
+  }
+  await chatStore.importConversationFile(file);
 };
 
 const playAudio = (messageId) => {
@@ -344,6 +381,17 @@ onMounted(() => {
             </label>
             <button class="tool-button" :disabled="!canExportConversation" @click="handleCopyMarkdown">复制 Markdown</button>
             <button class="tool-button" :disabled="!canExportConversation" @click="handleDownloadMarkdown">下载 Markdown</button>
+            <button class="tool-button" :disabled="!canImportBrowserCache" @click="handleImportBrowserCache">
+              导入缓存<span v-if="cachedMessageCount"> {{ cachedMessageCount }}</span>
+            </button>
+            <button class="tool-button" :disabled="!canImportFile" @click="handleImportFileClick">导入文件</button>
+            <input
+              ref="historyFileInput"
+              class="file-input"
+              type="file"
+              accept=".md,.markdown,.json,text/markdown,application/json"
+              @change="handleImportFileChange"
+            />
             <button class="tool-button" :disabled="!selectedCharacter || isLoading" @click="handleRefreshHistory">查看历史</button>
             <button class="tool-button danger" :disabled="!selectedCharacter || isLoading" @click="handleClearHistory">清空本角色历史</button>
           </div>
@@ -700,6 +748,10 @@ h1 {
 .tool-button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.file-input {
+  display: none;
 }
 
 .chat-window {

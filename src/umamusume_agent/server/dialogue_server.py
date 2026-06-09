@@ -146,6 +146,21 @@ class DialogueRequest(BaseModel):
     text_only: bool = False  # 兼容字段：true 时仅禁用语音生成，回复格式仍为动作/对白
 
 
+class HistoryImportMessage(BaseModel):
+    """导入历史消息"""
+    role: str
+    content: str
+    timestamp: Optional[str] = None
+
+
+class HistoryImportRequest(BaseModel):
+    """导入历史请求"""
+    session_id: str
+    messages: list[HistoryImportMessage]
+    replace_current: bool = True
+    source: str = "manual"
+
+
 class SessionInfo(BaseModel):
     """会话信息"""
     session_id: str
@@ -508,6 +523,24 @@ def _collect_history_messages(user_uuid: str, character_name: Optional[str] = No
     return messages
 
 
+def _normalize_import_messages(raw_messages: list[HistoryImportMessage]) -> list[Dict[str, str]]:
+    messages: list[Dict[str, str]] = []
+    for index, item in enumerate(raw_messages, start=1):
+        role = (item.role or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            raise HTTPException(status_code=400, detail=f"Invalid role at message {index}: {item.role}")
+
+        content = (item.content or "").strip()
+        if not content:
+            continue
+
+        messages.append({"role": role, "content": content})
+
+    if not messages:
+        raise HTTPException(status_code=400, detail="No valid messages to import")
+    return messages
+
+
 def _load_persistent_history(user_uuid: str, character: CharacterConfig) -> list[Dict[str, str]]:
     """
     按 user_uuid + 角色聚合历史消息，用于在新会话中恢复上下文记忆。
@@ -610,6 +643,14 @@ class DialogueSession:
         except Exception:
             logger.exception("Failed to persist dialogue history: session_id=%s", self.session_id)
 
+    def _rewrite_history_file(self):
+        try:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.history_file.open("w", encoding="utf-8"):
+                pass
+        except Exception:
+            logger.exception("Failed to rewrite dialogue history: session_id=%s", self.session_id)
+
     def mark_closed(self, reason: str):
         if self._closed:
             return
@@ -640,6 +681,33 @@ class DialogueSession:
                 "message_index": self.message_count,
             }
         )
+
+    def import_messages(self, messages: list[Dict[str, str]], replace_current: bool = True, source: str = "manual"):
+        """导入历史消息到当前会话上下文，并持久化到当前 session 的 history 文件。"""
+        if replace_current:
+            self.history.clear()
+            self.message_count = 0
+            self.touch()
+            self._rewrite_history_file()
+            self._append_history_event(
+                {
+                    "event": "session_start",
+                    "created_at": self.created_at.isoformat(),
+                    "restored_history_messages": 0,
+                    "reset_reason": "history_import",
+                }
+            )
+
+        self._append_history_event(
+            {
+                "event": "history_import",
+                "source": source,
+                "replace_current": replace_current,
+                "imported_messages": len(messages),
+            }
+        )
+        for message in messages:
+            self.add_message(message["role"], message["content"])
 
     def get_messages(self, text_only: bool = False) -> list:
         """获取完整消息列表（包含系统提示）"""
@@ -1222,6 +1290,29 @@ async def get_history(
         "limit": limit,
         "messages": messages,
         "characters": characters,
+    }
+
+
+@app.post("/history/import")
+async def import_history(request: HistoryImportRequest):
+    """导入历史对话到当前 session，使其参与后续 LLM 上下文。"""
+    session = get_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    messages = _normalize_import_messages(request.messages)
+    source = (request.source or "manual").strip()[:80] or "manual"
+    session.import_messages(messages, replace_current=request.replace_current, source=source)
+
+    return {
+        "status": "imported",
+        "session_id": session.session_id,
+        "user_uuid": session.user_uuid,
+        "character_name": session.character.name_en or session.character.name_zh,
+        "imported_messages": len(messages),
+        "history_size": len(session.history),
+        "replace_current": request.replace_current,
+        "history_file": str(session.history_file),
     }
 
 

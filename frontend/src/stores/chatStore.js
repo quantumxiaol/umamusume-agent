@@ -7,10 +7,12 @@ import {
   chatOnce,
   chatStream,
   fetchHistory,
+  importHistory,
   clearHistory,
 } from '@/services/api';
 
 const USER_UUID_STORAGE_KEY = 'umamusume_user_uuid';
+const HISTORY_CACHE_PREFIX = 'umamusume_history_cache_v1';
 const TTS_ENABLED = import.meta.env.VITE_ENABLE_TTS === 'true';
 
 const getOrCreateUserUuid = () => {
@@ -104,6 +106,131 @@ const downloadMarkdownFile = (filename, text) => {
   URL.revokeObjectURL(url);
 };
 
+const historyCacheKey = (userUuid, characterName) => (
+  `${HISTORY_CACHE_PREFIX}:${encodeURIComponent(userUuid || '')}:${encodeURIComponent(characterName || '')}`
+);
+
+const normalizeConversationRecords = (records) => {
+  if (!Array.isArray(records)) {
+    return [];
+  }
+
+  return records
+    .map((record) => {
+      const rawRole = String(record?.role || record?.speaker || '').trim().toLowerCase();
+      const role = rawRole === 'assistant' || rawRole === '角色' ? 'assistant' : rawRole === 'user' || rawRole === '训练员' ? 'user' : '';
+      const content = String(record?.content || record?.text || '').trim();
+      if (!role || !content) {
+        return null;
+      }
+      return {
+        role,
+        content,
+        timestamp: record?.timestamp || record?.createdAt || new Date().toISOString(),
+      };
+    })
+    .filter(Boolean);
+};
+
+const messageToRecord = (message) => ({
+  role: message.role === 'assistant' ? 'assistant' : 'user',
+  content: message.content || '',
+  timestamp: message.createdAt || new Date().toISOString(),
+});
+
+const readHistoryCache = (userUuid, characterName) => {
+  if (!userUuid || !characterName) {
+    return { savedAt: '', messages: [] };
+  }
+
+  try {
+    const raw = localStorage.getItem(historyCacheKey(userUuid, characterName));
+    if (!raw) {
+      return { savedAt: '', messages: [] };
+    }
+    const payload = JSON.parse(raw);
+    return {
+      savedAt: payload?.savedAt || '',
+      messages: normalizeConversationRecords(payload?.messages || []),
+    };
+  } catch (_err) {
+    return { savedAt: '', messages: [] };
+  }
+};
+
+const writeHistoryCache = (userUuid, characterName, messages) => {
+  if (!userUuid || !characterName) {
+    return;
+  }
+  const records = normalizeConversationRecords(messages);
+  const payload = {
+    version: 1,
+    userUuid,
+    characterName,
+    savedAt: new Date().toISOString(),
+    messages: records,
+  };
+  localStorage.setItem(historyCacheKey(userUuid, characterName), JSON.stringify(payload));
+};
+
+const removeHistoryCache = (userUuid, characterName) => {
+  if (!userUuid || !characterName) {
+    return;
+  }
+  localStorage.removeItem(historyCacheKey(userUuid, characterName));
+};
+
+const parseMarkdownConversation = (text) => {
+  const records = [];
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  let currentRole = '';
+  let currentContent = [];
+
+  const pushCurrent = () => {
+    const content = currentContent.join('\n').trim();
+    if (currentRole && content) {
+      records.push({ role: currentRole, content });
+    }
+    currentContent = [];
+  };
+
+  lines.forEach((line) => {
+    const headingMatch = line.match(/^###\s+\d+\.\s+(.+?)(?:（[^）]*）)?\s*$/);
+    if (headingMatch) {
+      pushCurrent();
+      const speaker = (headingMatch[1] || '').trim().toLowerCase();
+      currentRole = speaker === '训练员' || speaker === 'user' ? 'user' : 'assistant';
+      return;
+    }
+
+    if (currentRole) {
+      currentContent.push(line);
+    }
+  });
+
+  pushCurrent();
+  return normalizeConversationRecords(records);
+};
+
+const parseImportedConversationText = (text) => {
+  const rawText = String(text || '').trim();
+  if (!rawText) {
+    return [];
+  }
+
+  try {
+    const payload = JSON.parse(rawText);
+    const records = normalizeConversationRecords(Array.isArray(payload) ? payload : payload?.messages);
+    if (records.length) {
+      return records;
+    }
+  } catch (_err) {
+    // Fall through to Markdown parsing.
+  }
+
+  return parseMarkdownConversation(rawText);
+};
+
 export const useChatStore = defineStore('chat', {
   state: () => ({
     characters: [],
@@ -119,6 +246,8 @@ export const useChatStore = defineStore('chat', {
     isLoading: false,
     error: null,
     exportNotice: '',
+    cachedMessageCount: 0,
+    cachedSavedAt: '',
     streamMode: true,
     voiceEnabled: false,
     currentAssistantId: '',
@@ -158,6 +287,7 @@ export const useChatStore = defineStore('chat', {
         this.outputDir = data.output_dir || '';
         this.restoredHistoryMessages = Number(data.restored_history_messages || 0);
         this.exportNotice = '';
+        this._refreshCacheInfo(name);
         this._clearVoicePollers();
         await this.refreshHistory(name);
       } catch (err) {
@@ -173,6 +303,35 @@ export const useChatStore = defineStore('chat', {
 
     setVoiceEnabled(value) {
       this.voiceEnabled = TTS_ENABLED ? value : false;
+    },
+
+    _refreshCacheInfo(characterName = this.selectedCharacter) {
+      const cache = readHistoryCache(this.userUuid, characterName);
+      this.cachedMessageCount = cache.messages.length;
+      this.cachedSavedAt = cache.savedAt;
+    },
+
+    _cacheCurrentConversation() {
+      if (!this.userUuid || !this.selectedCharacter || !this.messages.length) {
+        this._refreshCacheInfo();
+        return;
+      }
+
+      try {
+        writeHistoryCache(
+          this.userUuid,
+          this.selectedCharacter,
+          this.messages.map(messageToRecord)
+        );
+      } catch (_err) {
+        // Local storage can be full or disabled; backend history remains the source of truth.
+      }
+      this._refreshCacheInfo();
+    },
+
+    _removeCurrentConversationCache() {
+      removeHistoryCache(this.userUuid, this.selectedCharacter);
+      this._refreshCacheInfo();
     },
 
     _clearVoicePollers() {
@@ -264,11 +423,17 @@ export const useChatStore = defineStore('chat', {
         return;
       }
       try {
-        const data = await fetchHistory(this.userUuid, characterName, 400);
+        const data = await fetchHistory(this.userUuid, characterName, 0);
         this.historyCharacters = Array.isArray(data.characters) ? data.characters : [];
         this.messages = this._toHistoryMessages(data.messages || []);
+        if (this.messages.length) {
+          this._cacheCurrentConversation();
+        } else {
+          this._refreshCacheInfo(characterName);
+        }
       } catch (err) {
         this.error = err.message || '读取历史失败。';
+        this._refreshCacheInfo(characterName);
       }
     },
 
@@ -288,6 +453,7 @@ export const useChatStore = defineStore('chat', {
         this.messages = [];
         this.restoredHistoryMessages = 0;
         this.exportNotice = '';
+        this._removeCurrentConversationCache();
         await this.refreshHistory(this.selectedCharacter);
       } catch (err) {
         this.error = err.message || '清理历史失败。';
@@ -347,6 +513,7 @@ export const useChatStore = defineStore('chat', {
               target.renderMode = 'structured';
               target.status = 'ready';
               this.isLoading = false;
+              this._cacheCurrentConversation();
             } else if (type === 'error') {
               this.error = data || '流式对话发生错误。';
               target.status = 'ready';
@@ -372,6 +539,7 @@ export const useChatStore = defineStore('chat', {
               };
             }
             this.messages.push(assistantMessage);
+            this._cacheCurrentConversation();
           }
         } catch (err) {
           this.error = err.message || '对话失败。';
@@ -384,6 +552,71 @@ export const useChatStore = defineStore('chat', {
     clearMessages() {
       this.messages = [];
       this._clearVoicePollers();
+    },
+
+    async importConversationMessages(records, source = 'manual') {
+      this.error = null;
+      this.exportNotice = '';
+      if (!this.selectedCharacter || !this.sessionId) {
+        this.error = '请先加载角色。';
+        return false;
+      }
+
+      const normalizedRecords = normalizeConversationRecords(records);
+      if (!normalizedRecords.length) {
+        this.exportNotice = '未找到可导入的对话消息。';
+        return false;
+      }
+
+      let backendSynced = false;
+      try {
+        await importHistory(this.sessionId, normalizedRecords, true, source);
+        backendSynced = true;
+      } catch (err) {
+        this.error = `已导入到浏览器缓存，但同步后端失败，后续 LLM 不会使用这份历史：${err.message || err}`;
+      }
+
+      this.messages = normalizedRecords.map((record, index) => createMessage(record.role, record.content, {
+        id: `import-${Date.now()}-${index}`,
+        createdAt: record.timestamp,
+        renderMode: 'structured',
+        status: 'ready',
+      }));
+      this.restoredHistoryMessages = this.messages.length;
+      this._cacheCurrentConversation();
+      if (backendSynced) {
+        this.exportNotice = `已导入 ${this.messages.length} 条历史，并同步到当前会话上下文。`;
+      }
+      return backendSynced;
+    },
+
+    async importFromBrowserCache() {
+      this.error = null;
+      this.exportNotice = '';
+      const cache = readHistoryCache(this.userUuid, this.selectedCharacter);
+      if (!cache.messages.length) {
+        this.exportNotice = '当前角色没有可导入的浏览器缓存。';
+        this._refreshCacheInfo();
+        return false;
+      }
+      return this.importConversationMessages(cache.messages, 'browser_cache');
+    },
+
+    async importConversationFile(file) {
+      this.error = null;
+      this.exportNotice = '';
+      if (!file) {
+        return false;
+      }
+
+      try {
+        const text = await file.text();
+        const records = parseImportedConversationText(text);
+        return await this.importConversationMessages(records, `file:${file.name || 'history'}`);
+      } catch (err) {
+        this.error = err.message || '导入历史文件失败。';
+        return false;
+      }
     },
 
     buildConversationMarkdown() {
