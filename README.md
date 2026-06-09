@@ -72,7 +72,7 @@ cat .env.template > .env
 - 代理可选：如未启用代理，建议注释 `HTTP_PROXY/HTTPS_PROXY`
 - 会话治理配置：
   - `DIALOGUE_SESSION_TTL_SECONDS`（默认 `3600`，会话空闲超时秒数，`<=0` 表示不启用 TTL）
-  - `DIALOGUE_SESSION_HISTORY_MAX_MESSAGES`（默认 `40`，单会话最大历史消息数，`<=0` 表示不裁剪）
+  - `DIALOGUE_SESSION_HISTORY_MAX_MESSAGES`（默认 `0`，单会话最大历史消息数，`<=0` 表示不裁剪；DeepSeek 自动上下文缓存建议保持不裁剪）
   - `DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS`（默认 `60`，后台清理扫描间隔秒数）
   - `DIALOGUE_HISTORY_DIRECTORY`（默认 `./outputs/dialogues`，对话历史 `jsonl` 落盘目录）
   - `DIALOGUE_PREFIX_CACHE_ENABLED`（默认 `true`，是否启用前缀缓存注入）
