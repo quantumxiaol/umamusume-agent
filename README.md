@@ -77,7 +77,8 @@ cat .env.template > .env
   - `DIALOGUE_HISTORY_DIRECTORY`（默认 `./outputs/dialogues`，对话历史 `jsonl` 落盘目录）
   - `DIALOGUE_PREFIX_CACHE_ENABLED`（默认 `true`，是否启用前缀缓存注入）
   - `DIALOGUE_PREFIX_CACHE_MIN_CHARS`（默认 `1000`，System Prompt 最小字符数阈值）
-
+  - `DIALOGUE_HIDDEN_FORMAT_REINJECTION_ENABLED`（默认 `true`，是否启用后端隐藏格式约束再注入；不写入历史、不导出到前端）
+  - `DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES`（默认 `100`，每隔多少条 user/assistant 历史消息插入一次隐藏格式约束）
 当前主链路主要依赖 `ROLEPLAY_LLM_*` 与 `INDEXTTS_MCP_*`；RAG/Web/旧模块需要安装 `extras` 后再配置。
 
 ## 数据准备（角色导入）

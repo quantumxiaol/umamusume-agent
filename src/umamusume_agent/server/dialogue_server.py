@@ -54,6 +54,11 @@ SESSION_HISTORY_MAX_MESSAGES = max(0, config.DIALOGUE_SESSION_HISTORY_MAX_MESSAG
 SESSION_CLEANUP_INTERVAL_SECONDS = max(5, config.DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS)
 PREFIX_CACHE_ENABLED = config.DIALOGUE_PREFIX_CACHE_ENABLED
 PREFIX_CACHE_MIN_CHARS = max(0, config.DIALOGUE_PREFIX_CACHE_MIN_CHARS)
+HIDDEN_FORMAT_REINJECTION_ENABLED = config.DIALOGUE_HIDDEN_FORMAT_REINJECTION_ENABLED
+HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES = max(
+    0,
+    config.DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES,
+)
 ROLEPLAY_BASE_URL = (config.ROLEPLAY_LLM_MODEL_BASE_URL or "").lower()
 ROLEPLAY_MODEL_NAME = (config.ROLEPLAY_LLM_MODEL_NAME or "").lower()
 API_ACCESS_KEY = (config.API_ACCESS_KEY or "").strip()
@@ -84,6 +89,14 @@ _STRUCTURED_RESPONSE_FORMAT_INSTRUCTION = (
 
 _PLAIN_TEXT_RESPONSE_FORMAT_INSTRUCTION = (
     "本次不需要生成语音文件，但输出格式仍必须是“动作：”和“对白：”两行。"
+)
+
+_HIDDEN_FORMAT_REINJECTION_PROMPT = (
+    "【后端隐藏格式约束提醒】\n"
+    "继续严格遵守输出格式，只输出两行，且顺序固定：\n"
+    "动作：<只写角色自己的动作、神态或心理；简短；不要写台词>\n"
+    "对白：<只写角色对训练员说的话；自然口语；不要写动作或旁白>\n"
+    "不要输出第三行、标题、解释、总结或列表；不要替训练员说话、行动、思考或决定关系进展。"
 )
 
 _ACTION_PREFIXES = ("动作：", "动作:", "神态：", "神态:", "场景：", "场景:")
@@ -709,6 +722,24 @@ class DialogueSession:
         for message in messages:
             self.add_message(message["role"], message["content"])
 
+    def _extend_messages_with_hidden_format_reinjection(self, messages: list[Dict[str, Any]]) -> None:
+        if (
+            not HIDDEN_FORMAT_REINJECTION_ENABLED
+            or HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES <= 0
+        ):
+            messages.extend(self.history)
+            return
+
+        for index, message in enumerate(self.history, start=1):
+            messages.append(message)
+            if index % HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES == 0:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": _HIDDEN_FORMAT_REINJECTION_PROMPT,
+                    }
+                )
+
     def get_messages(self, text_only: bool = False) -> list:
         """获取完整消息列表（包含系统提示）"""
         response_instruction = _STRUCTURED_RESPONSE_FORMAT_INSTRUCTION
@@ -723,7 +754,7 @@ class DialogueSession:
         if _should_attach_prefix_cache(system_prompt):
             system_message["cache_control"] = {"type": "ephemeral"}
         messages = [system_message]
-        messages.extend(self.history)
+        self._extend_messages_with_hidden_format_reinjection(messages)
         return messages
 
 
