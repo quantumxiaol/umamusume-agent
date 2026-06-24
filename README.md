@@ -33,6 +33,12 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
 - 前端 UI：角色选择、提示词预览、音色试听、多轮对话、语音播放
 
+## 仓库
+
+Github：[https://github.com/quantumxiaol/umamusume-agent](https://github.com/quantumxiaol/umamusume-agent)
+
+HuggingFace：[https://huggingface.co/spaces/quantumxiaol/umamusume-agent/tree/main](https://huggingface.co/spaces/quantumxiaol/umamusume-agent/tree/main)
+
 ## 环境准备
 
 ### Python
@@ -117,7 +123,7 @@ characters/
 - 运行产物：`outputs/`
 - 其它资源：`resources/`（来源于旧项目，还未使用）
 
-## 后端使用说明（最新）
+## 后端使用说明
 
 ### 1) 可选：启动 IndexTTS MCP（仅在需要语音时）
 
