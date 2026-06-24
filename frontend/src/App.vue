@@ -7,6 +7,7 @@ const chatStore = useChatStore();
 const ttsEnabled = import.meta.env.VITE_ENABLE_TTS === 'true';
 
 const messageInput = ref('');
+const isComposingMessage = ref(false);
 const characterFilter = ref('');
 const promptOpen = ref(true);
 const audioRefs = ref({});
@@ -65,10 +66,21 @@ const handleSend = async () => {
 };
 
 const handleKeydown = async (event) => {
+  if (event.isComposing || isComposingMessage.value || event.keyCode === 229) {
+    return;
+  }
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     await handleSend();
   }
+};
+
+const handleCompositionStart = () => {
+  isComposingMessage.value = true;
+};
+
+const handleCompositionEnd = () => {
+  isComposingMessage.value = false;
 };
 
 const toggleStreamMode = () => {
@@ -455,6 +467,8 @@ onMounted(() => {
               rows="3"
               placeholder="输入对话内容，Enter 发送，Shift+Enter 换行"
               @keydown="handleKeydown"
+              @compositionstart="handleCompositionStart"
+              @compositionend="handleCompositionEnd"
               :disabled="!selectedCharacter || isLoading"
             ></textarea>
             <button
