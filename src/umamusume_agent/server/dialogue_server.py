@@ -1944,7 +1944,7 @@ def _reserve_voice_output(session: DialogueSession) -> Dict[str, Any]:
 
 async def _generate_voice_for_reply(
     session: DialogueSession,
-    text: str,
+    dialogue_text: str,
     voice_plan: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     try:
@@ -1956,11 +1956,13 @@ async def _generate_voice_for_reply(
         prompt_audio_path = voice_config["ref_audio_path"]
         output_name = voice_plan["output_name"]
         target_path = Path(voice_plan["audio_path"])
-        tts_text = _extract_dialogue_text(text)
+        raw_dialogue = dialogue_text or ""
+        tts_text = raw_dialogue.strip()
         if not tts_text:
-            tts_text = _strip_stage_directions(text)
+            tts_text = _strip_stage_directions(raw_dialogue)
         if not tts_text:
-            tts_text = text
+            logger.warning("Skipping TTS generation for session %s: empty dialogue text", session.session_id)
+            return None
 
         result = await tts_client.synthesize(
             text=tts_text,
