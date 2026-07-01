@@ -29,7 +29,7 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - 角色管理：从 `characters/` 加载角色配置
 - 对话服务：`/load_character`、`/chat`、`/chat_stream`
 - 历史落盘：按 `user_uuid/角色/时间戳/session` 写入 `jsonl` 对话日志（暂时不依赖数据库）
-- 对话格式：无论是否启用 TTS，回复都规范为“动作 + 对白”两行；`text_only=true` 仅用于禁用语音合成
+- 对话格式：后端主协议为 `{"action":"...","dialogue":"..."}` JSON；API 响应返回 `action`、`dialogue`、`message`，TTS 使用 `dialogue`；`text_only=true` 仅用于禁用语音合成
 - 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
 - 前端 UI：角色选择、提示词预览、音色试听、多轮对话、语音播放
 
@@ -76,6 +76,13 @@ cat .env.template > .env
 - 主要配置：`ROLEPLAY_LLM_MODEL_NAME/BASE_URL/API_KEY`
 - 若使用 Qwen，可直接填兼容 OpenAI 的 Base URL
 - 代理可选：如未启用代理，建议注释 `HTTP_PROXY/HTTPS_PROXY`
+- JSON 回复协议配置：
+  - `LLM_JSON_ENABLED`（默认 `true`，启用 JSON 回复主链路）
+  - `LLM_JSON_OUTPUT_MODE`（默认 `auto`，可选 `auto/response_format/prompt_only/disabled`）
+  - `LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR`（默认 `true`，auto 模式下遇到明确不支持 `response_format/json_object` 时本轮降级）
+  - `LLM_JSON_PARSE_LOOSE_JSON`（默认 `true`，允许解析代码块或嵌入文本中的 JSON object）
+  - `LLM_JSON_MAX_RETRIES`（默认 `1`，JSON 解析失败后的 prompt-only 修复次数）
+  - `LLM_JSON_TEMPERATURE` / `LLM_JSON_MAX_TOKENS`（JSON 回复请求参数）
 - 会话治理配置：
   - `DIALOGUE_SESSION_TTL_SECONDS`（默认 `3600`，会话空闲超时秒数，`<=0` 表示不启用 TTL）
   - `DIALOGUE_SESSION_HISTORY_MAX_MESSAGES`（默认 `0`，单会话最大历史消息数，`<=0` 表示不裁剪；DeepSeek 自动上下文缓存建议保持不裁剪）
@@ -200,8 +207,8 @@ pnpm run dev
 - 角色切换会重新调用 `/load_character`，并展示 `已恢复历史 N 条`。
 - 聊天窗口会显示当前用户与该角色的历史对话，不会在切角色时直接丢失历史能力。
 - 点击 `查看历史` 会调用 `/history` 刷新该角色历史。
-- 对话会同步写入当前浏览器的 `localStorage` 缓存，GitHub Pages 等静态前端也可以从浏览器缓存恢复当前角色历史。
-- 可将当前显示的对话复制或下载为 Markdown；也可从 Markdown/JSON 文件手动导入历史，导入后会替换当前 session 上下文并同步到后端。
+- 对话会以 v2 结构同步写入当前浏览器的 `localStorage` 缓存，并兼容迁移旧 v1 `role/content` 缓存。
+- 可将当前显示的对话复制或下载为 JSON/Markdown；JSON 是权威恢复格式，Markdown 末尾会附带 v2 JSON block；也可从 Markdown/JSON 文件手动导入历史，导入后会替换当前 session 上下文并同步到后端。
 - 点击 `清空本角色历史` 会调用 `DELETE /history` 清理该角色历史。
 
 ## 项目结构

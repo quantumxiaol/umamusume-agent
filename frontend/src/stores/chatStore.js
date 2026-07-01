@@ -12,7 +12,9 @@ import {
 } from '@/services/api';
 
 const USER_UUID_STORAGE_KEY = 'umamusume_user_uuid';
-const HISTORY_CACHE_PREFIX = 'umamusume_history_cache_v1';
+const HISTORY_CACHE_PREFIX_V1 = 'umamusume_history_cache_v1';
+const HISTORY_CACHE_PREFIX_V2 = 'umamusume_history_cache_v2';
+const HISTORY_SCHEMA_VERSION = 2;
 const TTS_ENABLED = import.meta.env.VITE_ENABLE_TTS === 'true';
 
 const getOrCreateUserUuid = () => {
@@ -31,10 +33,15 @@ const createMessage = (role, content, extra = {}) => ({
   id: extra.id || `${role}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   role,
   content,
+  action: extra.action || '',
+  dialogue: extra.dialogue || (role === 'assistant' ? content : ''),
+  legacyReply: extra.legacyReply || '',
   voice: extra.voice || null,
   status: extra.status || 'ready',
   renderMode: extra.renderMode || 'structured',
   createdAt: extra.createdAt || new Date().toISOString(),
+  schemaVersion: extra.schemaVersion || extra.schema_version || (role === 'assistant' ? HISTORY_SCHEMA_VERSION : undefined),
+  sourceFormat: extra.sourceFormat || extra.source_format || (role === 'assistant' ? 'legacy_text' : 'text'),
 });
 
 const resolveAudioUrl = (url) => {
@@ -94,8 +101,8 @@ const writeTextToClipboard = async (text) => {
   }
 };
 
-const downloadMarkdownFile = (filename, text) => {
-  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+const downloadTextFile = (filename, text, mimeType = 'text/plain;charset=utf-8') => {
+  const blob = new Blob([text], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -106,36 +113,200 @@ const downloadMarkdownFile = (filename, text) => {
   URL.revokeObjectURL(url);
 };
 
-const historyCacheKey = (userUuid, characterName) => (
-  `${HISTORY_CACHE_PREFIX}:${encodeURIComponent(userUuid || '')}:${encodeURIComponent(characterName || '')}`
+const historyCacheKey = (prefix, userUuid, characterName) => (
+  `${prefix}:${encodeURIComponent(userUuid || '')}:${encodeURIComponent(characterName || '')}`
 );
+
+const normalizeRole = (value) => {
+  const rawRole = String(value || '').trim().toLowerCase();
+  if (rawRole === 'assistant' || rawRole === '角色') {
+    return 'assistant';
+  }
+  if (rawRole === 'user' || rawRole === '训练员') {
+    return 'user';
+  }
+  return '';
+};
+
+const parseJsonObjectText = (text) => {
+  const rawText = String(text || '').trim();
+  if (!rawText) {
+    return null;
+  }
+
+  const candidates = [rawText];
+  const fenced = rawText.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced) {
+    candidates.push((fenced[1] || '').trim());
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const payload = JSON.parse(candidate);
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        return payload;
+      }
+    } catch (_err) {
+      // Try the next candidate.
+    }
+  }
+  return null;
+};
+
+const splitLegacyAssistantText = (text) => {
+  const rawText = String(text || '').trim();
+  if (!rawText) {
+    return { action: '无', dialogue: '', sourceFormat: 'empty' };
+  }
+
+  const actionLines = [];
+  const dialogueLines = [];
+  let captureDialogue = false;
+  const actionMarkers = ['动作：', '动作:', '神态：', '神态:', '场景：', '场景:'];
+  const dialogueMarkers = ['对白：', '对白:', '台词：', '台词:', '对话：', '对话:', 'TTS：', 'TTS:'];
+
+  rawText.split(/\n/).forEach((line) => {
+    const stripped = line.trim().replace(/^>\s*/, '');
+    if (!stripped) {
+      return;
+    }
+    const actionMarker = actionMarkers.find((marker) => stripped.startsWith(marker));
+    if (actionMarker) {
+      captureDialogue = false;
+      const content = stripped.slice(actionMarker.length).trim();
+      const inlineDialogueMarker = dialogueMarkers.find((marker) => content.includes(marker));
+      if (inlineDialogueMarker) {
+        const index = content.indexOf(inlineDialogueMarker);
+        actionLines.push(content.slice(0, index).trim());
+        dialogueLines.push(content.slice(index + inlineDialogueMarker.length).trim());
+        captureDialogue = true;
+      } else if (content) {
+        actionLines.push(content);
+      }
+      return;
+    }
+    const dialogueMarker = dialogueMarkers.find((marker) => stripped.startsWith(marker));
+    if (dialogueMarker) {
+      captureDialogue = true;
+      const content = stripped.slice(dialogueMarker.length).trim();
+      if (content) {
+        dialogueLines.push(content);
+      }
+      return;
+    }
+    if (captureDialogue) {
+      dialogueLines.push(stripped);
+    } else {
+      actionLines.push(stripped);
+    }
+  });
+
+  if (dialogueLines.length) {
+    return {
+      action: actionLines.join(' ').trim() || '无',
+      dialogue: dialogueLines.join(' ').trim(),
+      sourceFormat: 'legacy_text',
+    };
+  }
+
+  return {
+    action: '无',
+    dialogue: rawText,
+    sourceFormat: 'plain_text',
+  };
+};
+
+const toLegacyReply = ({ action, dialogue }) => (
+  `动作：${String(action || '无').trim() || '无'}\n对白：${String(dialogue || '').trim()}`
+);
+
+const parseAssistantRecord = (record) => {
+  const content = String(record?.content || record?.text || '').trim();
+  const explicitAction = typeof record?.action === 'string' ? record.action.trim() : '';
+  const explicitDialogue = typeof record?.dialogue === 'string' ? record.dialogue.trim() : '';
+  const explicitSource = record?.sourceFormat || record?.source_format || '';
+
+  if (explicitDialogue) {
+    return {
+      action: explicitAction || '无',
+      dialogue: explicitDialogue,
+      sourceFormat: explicitSource || 'json_v2',
+    };
+  }
+
+  const jsonPayload = parseJsonObjectText(content);
+  if (jsonPayload && typeof jsonPayload.dialogue === 'string' && jsonPayload.dialogue.trim()) {
+    return {
+      action: typeof jsonPayload.action === 'string' && jsonPayload.action.trim() ? jsonPayload.action.trim() : '无',
+      dialogue: jsonPayload.dialogue.trim(),
+      sourceFormat: explicitSource || 'json_v2',
+    };
+  }
+
+  return splitLegacyAssistantText(content);
+};
+
+const normalizeConversationRecord = (record) => {
+  const role = normalizeRole(record?.role || record?.speaker);
+  if (!role) {
+    return null;
+  }
+
+  const timestamp = record?.timestamp || record?.createdAt || record?.created_at || new Date().toISOString();
+  if (role === 'user') {
+    const content = String(record?.content || record?.text || '').trim();
+    if (!content) {
+      return null;
+    }
+    return {
+      role: 'user',
+      content,
+      timestamp,
+      schemaVersion: HISTORY_SCHEMA_VERSION,
+    };
+  }
+
+  const parsed = parseAssistantRecord(record);
+  if (!parsed.dialogue) {
+    return null;
+  }
+
+  return {
+    role: 'assistant',
+    content: parsed.dialogue,
+    action: parsed.action || '无',
+    dialogue: parsed.dialogue,
+    legacyReply: toLegacyReply(parsed),
+    timestamp,
+    schemaVersion: record?.schemaVersion || record?.schema_version || HISTORY_SCHEMA_VERSION,
+    sourceFormat: parsed.sourceFormat || 'legacy_text',
+  };
+};
 
 const normalizeConversationRecords = (records) => {
   if (!Array.isArray(records)) {
     return [];
   }
 
-  return records
-    .map((record) => {
-      const rawRole = String(record?.role || record?.speaker || '').trim().toLowerCase();
-      const role = rawRole === 'assistant' || rawRole === '角色' ? 'assistant' : rawRole === 'user' || rawRole === '训练员' ? 'user' : '';
-      const content = String(record?.content || record?.text || '').trim();
-      if (!role || !content) {
-        return null;
-      }
-      return {
-        role,
-        content,
-        timestamp: record?.timestamp || record?.createdAt || new Date().toISOString(),
-      };
-    })
-    .filter(Boolean);
+  return records.map(normalizeConversationRecord).filter(Boolean);
 };
 
 const messageToRecord = (message) => ({
   role: message.role === 'assistant' ? 'assistant' : 'user',
   content: message.content || '',
-  timestamp: message.createdAt || new Date().toISOString(),
+  ...(message.role === 'assistant' ? {
+    action: message.action || '无',
+    dialogue: message.dialogue || message.content || '',
+    legacyReply: message.legacyReply || toLegacyReply({
+      action: message.action || '无',
+      dialogue: message.dialogue || message.content || '',
+    }),
+    schemaVersion: message.schemaVersion || HISTORY_SCHEMA_VERSION,
+    sourceFormat: message.sourceFormat || 'json_v2',
+  } : {
+    schemaVersion: HISTORY_SCHEMA_VERSION,
+  }),
+  createdAt: message.createdAt || new Date().toISOString(),
 });
 
 const readHistoryCache = (userUuid, characterName) => {
@@ -144,15 +315,28 @@ const readHistoryCache = (userUuid, characterName) => {
   }
 
   try {
-    const raw = localStorage.getItem(historyCacheKey(userUuid, characterName));
-    if (!raw) {
-      return { savedAt: '', messages: [] };
+    const rawV2 = localStorage.getItem(historyCacheKey(HISTORY_CACHE_PREFIX_V2, userUuid, characterName));
+    if (rawV2) {
+      const payload = JSON.parse(rawV2);
+      return {
+        savedAt: payload?.savedAt || '',
+        messages: normalizeConversationRecords(payload?.messages || []),
+      };
     }
-    const payload = JSON.parse(raw);
-    return {
-      savedAt: payload?.savedAt || '',
-      messages: normalizeConversationRecords(payload?.messages || []),
-    };
+
+    const rawV1 = localStorage.getItem(historyCacheKey(HISTORY_CACHE_PREFIX_V1, userUuid, characterName));
+    if (rawV1) {
+      const payload = JSON.parse(rawV1);
+      const messages = normalizeConversationRecords(payload?.messages || []);
+      if (messages.length) {
+        writeHistoryCache(userUuid, characterName, messages);
+      }
+      return {
+        savedAt: payload?.savedAt || '',
+        messages,
+      };
+    }
+    return { savedAt: '', messages: [] };
   } catch (_err) {
     return { savedAt: '', messages: [] };
   }
@@ -164,20 +348,22 @@ const writeHistoryCache = (userUuid, characterName, messages) => {
   }
   const records = normalizeConversationRecords(messages);
   const payload = {
-    version: 1,
+    version: HISTORY_SCHEMA_VERSION,
+    schema_version: HISTORY_SCHEMA_VERSION,
     userUuid,
     characterName,
     savedAt: new Date().toISOString(),
     messages: records,
   };
-  localStorage.setItem(historyCacheKey(userUuid, characterName), JSON.stringify(payload));
+  localStorage.setItem(historyCacheKey(HISTORY_CACHE_PREFIX_V2, userUuid, characterName), JSON.stringify(payload));
 };
 
 const removeHistoryCache = (userUuid, characterName) => {
   if (!userUuid || !characterName) {
     return;
   }
-  localStorage.removeItem(historyCacheKey(userUuid, characterName));
+  localStorage.removeItem(historyCacheKey(HISTORY_CACHE_PREFIX_V1, userUuid, characterName));
+  localStorage.removeItem(historyCacheKey(HISTORY_CACHE_PREFIX_V2, userUuid, characterName));
 };
 
 const parseMarkdownConversation = (text) => {
@@ -195,6 +381,12 @@ const parseMarkdownConversation = (text) => {
   };
 
   lines.forEach((line) => {
+    if (/^##\s+JSON\s*$/i.test(line.trim())) {
+      pushCurrent();
+      currentRole = '';
+      return;
+    }
+
     const headingMatch = line.match(/^###\s+\d+\.\s+(.+?)(?:（[^）]*）)?\s*$/);
     if (headingMatch) {
       pushCurrent();
@@ -212,6 +404,30 @@ const parseMarkdownConversation = (text) => {
   return normalizeConversationRecords(records);
 };
 
+const parseJsonConversationPayload = (payload) => {
+  if (!payload) {
+    return [];
+  }
+  return normalizeConversationRecords(Array.isArray(payload) ? payload : payload.messages);
+};
+
+const parseMarkdownEmbeddedJson = (text) => {
+  const rawText = String(text || '');
+  const matches = [...rawText.matchAll(/```json\s*([\s\S]*?)```/gi)];
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    try {
+      const payload = JSON.parse(matches[index][1]);
+      const records = parseJsonConversationPayload(payload);
+      if (records.length) {
+        return records;
+      }
+    } catch (_err) {
+      // Try earlier JSON blocks or legacy Markdown parsing.
+    }
+  }
+  return [];
+};
+
 const parseImportedConversationText = (text) => {
   const rawText = String(text || '').trim();
   if (!rawText) {
@@ -220,12 +436,17 @@ const parseImportedConversationText = (text) => {
 
   try {
     const payload = JSON.parse(rawText);
-    const records = normalizeConversationRecords(Array.isArray(payload) ? payload : payload?.messages);
+    const records = parseJsonConversationPayload(payload);
     if (records.length) {
       return records;
     }
   } catch (_err) {
     // Fall through to Markdown parsing.
+  }
+
+  const embeddedRecords = parseMarkdownEmbeddedJson(rawText);
+  if (embeddedRecords.length) {
+    return embeddedRecords;
   }
 
   return parseMarkdownConversation(rawText);
@@ -403,19 +624,28 @@ export const useChatStore = defineStore('chat', {
       return records.map((record, index) => {
         const role = record.role === 'assistant' ? 'assistant' : 'user';
         const createdAt = record.timestamp || new Date().toISOString();
+        const normalized = normalizeConversationRecord(record);
+        if (!normalized) {
+          return null;
+        }
         const id = [
           'history',
           record.session_id || 'session',
           record.message_index ?? index,
           index,
         ].join('-');
-        return createMessage(role, record.content || '', {
+        return createMessage(role, normalized.content || '', {
           id,
           createdAt,
+          action: normalized.action,
+          dialogue: normalized.dialogue,
+          legacyReply: normalized.legacyReply,
+          schemaVersion: normalized.schemaVersion,
+          sourceFormat: normalized.sourceFormat,
           renderMode: role === 'assistant' ? 'structured' : 'structured',
           status: 'ready',
         });
-      });
+      }).filter(Boolean);
     },
 
     async refreshHistory(characterName = this.selectedCharacter) {
@@ -502,6 +732,21 @@ export const useChatStore = defineStore('chat', {
 
             if (type === 'token') {
               target.content += data || '';
+            } else if (type === 'structured_reply') {
+              const structured = normalizeConversationRecord(data?.message || {
+                role: 'assistant',
+                content: data?.dialogue || data?.reply || '',
+                action: data?.action,
+                dialogue: data?.dialogue,
+                sourceFormat: data?.message?.source_format || 'json_v2',
+              });
+              target.content = structured?.content || data?.dialogue || data?.reply || '';
+              target.action = structured?.action || data?.action || '无';
+              target.dialogue = structured?.dialogue || data?.dialogue || target.content;
+              target.legacyReply = data?.reply || structured?.legacyReply || '';
+              target.schemaVersion = structured?.schemaVersion || HISTORY_SCHEMA_VERSION;
+              target.sourceFormat = structured?.sourceFormat || 'json_v2';
+              target.renderMode = 'structured';
             } else if (type === 'voice_pending' && TTS_ENABLED) {
               target.voice = {
                 status: 'pending',
@@ -528,7 +773,19 @@ export const useChatStore = defineStore('chat', {
           if (data.error) {
             this.error = data.error;
           } else {
-            const assistantMessage = createMessage('assistant', data.reply || '', {
+            const structured = normalizeConversationRecord(data.message || {
+              role: 'assistant',
+              content: data.dialogue || data.reply || '',
+              action: data.action,
+              dialogue: data.dialogue,
+              sourceFormat: data.message?.source_format || 'json_v2',
+            });
+            const assistantMessage = createMessage('assistant', structured?.content || data.dialogue || data.reply || '', {
+              action: structured?.action || data.action || '无',
+              dialogue: structured?.dialogue || data.dialogue || data.reply || '',
+              legacyReply: data.reply || structured?.legacyReply || '',
+              schemaVersion: structured?.schemaVersion || HISTORY_SCHEMA_VERSION,
+              sourceFormat: structured?.sourceFormat || 'json_v2',
               renderMode: 'structured',
             });
             if (TTS_ENABLED && data.voice) {
@@ -579,6 +836,11 @@ export const useChatStore = defineStore('chat', {
       this.messages = normalizedRecords.map((record, index) => createMessage(record.role, record.content, {
         id: `import-${Date.now()}-${index}`,
         createdAt: record.timestamp,
+        action: record.action,
+        dialogue: record.dialogue,
+        legacyReply: record.legacyReply,
+        schemaVersion: record.schemaVersion,
+        sourceFormat: record.sourceFormat,
         renderMode: 'structured',
         status: 'ready',
       }));
@@ -619,13 +881,30 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
+    buildConversationJsonPayload() {
+      const characterName = this.selectedCharacter || '未选择角色';
+      return {
+        schema_version: HISTORY_SCHEMA_VERSION,
+        app: 'umamusume-agent',
+        character: characterName,
+        user_uuid: this.userUuid,
+        exported_at: new Date().toISOString(),
+        messages: normalizeConversationRecords(this.messages.map(messageToRecord)),
+      };
+    },
+
+    buildConversationJson() {
+      return `${JSON.stringify(this.buildConversationJsonPayload(), null, 2)}\n`;
+    },
+
     buildConversationMarkdown() {
       const characterName = this.selectedCharacter || '未选择角色';
-      const exportedAt = new Date().toLocaleString();
+      const payload = this.buildConversationJsonPayload();
       const lines = [
         `# ${characterName} 对话记录`,
         '',
-        `- 导出时间：${exportedAt}`,
+        `- schema_version: ${HISTORY_SCHEMA_VERSION}`,
+        `- exported_at: ${payload.exported_at}`,
         `- 角色：${characterName}`,
         `- 消息数：${this.messages.length}`,
         '',
@@ -638,11 +917,46 @@ export const useChatStore = defineStore('chat', {
         const status = message.status === 'streaming' ? '（生成中）' : '';
         lines.push(`### ${index + 1}. ${speaker}${status}`);
         lines.push('');
-        lines.push(normalizeMarkdownText(message.content));
+        if (message.role === 'assistant') {
+          const action = String(message.action || '').trim();
+          const dialogue = String(message.dialogue || message.content || '').trim();
+          if (action && action !== '无') {
+            lines.push(`> 动作：${action}`);
+            lines.push('');
+          }
+          lines.push(normalizeMarkdownText(dialogue));
+        } else {
+          lines.push(normalizeMarkdownText(message.content));
+        }
         lines.push('');
       });
 
+      lines.push('## JSON');
+      lines.push('');
+      lines.push('```json');
+      lines.push(JSON.stringify(payload, null, 2));
+      lines.push('```');
+      lines.push('');
+
       return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+    },
+
+    async copyConversationJson() {
+      this.error = null;
+      this.exportNotice = '';
+      if (!this.messages.length) {
+        this.exportNotice = '当前没有可复制的对话。';
+        return false;
+      }
+
+      try {
+        await writeTextToClipboard(this.buildConversationJson());
+        this.exportNotice = '已复制 JSON 到剪贴板。';
+        return true;
+      } catch (err) {
+        this.error = err.message || '复制 JSON 失败。';
+        return false;
+      }
     },
 
     async copyConversationMarkdown() {
@@ -663,6 +977,26 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
+    downloadConversationJson() {
+      this.error = null;
+      this.exportNotice = '';
+      if (!this.messages.length) {
+        this.exportNotice = '当前没有可下载的对话。';
+        return false;
+      }
+
+      try {
+        const filenameBase = sanitizeFilenamePart(this.selectedCharacter || 'umamusume-dialogue');
+        const filename = `${filenameBase}-${markdownTimestamp()}.json`;
+        downloadTextFile(filename, this.buildConversationJson(), 'application/json;charset=utf-8');
+        this.exportNotice = `已下载 ${filename}。`;
+        return true;
+      } catch (err) {
+        this.error = err.message || '下载 JSON 失败。';
+        return false;
+      }
+    },
+
     downloadConversationMarkdown() {
       this.error = null;
       this.exportNotice = '';
@@ -674,7 +1008,7 @@ export const useChatStore = defineStore('chat', {
       try {
         const filenameBase = sanitizeFilenamePart(this.selectedCharacter || 'umamusume-dialogue');
         const filename = `${filenameBase}-${markdownTimestamp()}.md`;
-        downloadMarkdownFile(filename, this.buildConversationMarkdown());
+        downloadTextFile(filename, this.buildConversationMarkdown(), 'text/markdown;charset=utf-8');
         this.exportNotice = `已下载 ${filename}。`;
         return true;
       } catch (err) {

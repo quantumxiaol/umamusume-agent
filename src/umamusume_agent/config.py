@@ -71,6 +71,16 @@ class Config:
     ROLEPLAY_LLM_MODEL_API_KEY: str = os.getenv("ROLEPLAY_LLM_MODEL_API_KEY", "")
     ROLEPLAY_LLM_TIMEOUT_SECONDS: float = float(os.getenv("ROLEPLAY_LLM_TIMEOUT_SECONDS", "60"))
     ROLEPLAY_LLM_MAX_RETRIES: int = int(os.getenv("ROLEPLAY_LLM_MAX_RETRIES", "2"))
+    LLM_JSON_ENABLED: bool = _env_bool("LLM_JSON_ENABLED", True)
+    LLM_JSON_OUTPUT_MODE: str = os.getenv("LLM_JSON_OUTPUT_MODE", "auto")
+    LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR: bool = _env_bool(
+        "LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR",
+        True,
+    )
+    LLM_JSON_PARSE_LOOSE_JSON: bool = _env_bool("LLM_JSON_PARSE_LOOSE_JSON", True)
+    LLM_JSON_MAX_RETRIES: int = int(os.getenv("LLM_JSON_MAX_RETRIES", "1"))
+    LLM_JSON_TEMPERATURE: float = float(os.getenv("LLM_JSON_TEMPERATURE", "0.35"))
+    LLM_JSON_MAX_TOKENS: int = int(os.getenv("LLM_JSON_MAX_TOKENS", "320"))
 
     # API protection
     API_ACCESS_KEY: str = os.getenv("API_ACCESS_KEY", "")

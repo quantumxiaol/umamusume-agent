@@ -36,6 +36,13 @@ const messageParts = computed(() => {
       map[message.id] = { action: '', dialogue: '' };
       return;
     }
+    if (message.role === 'assistant' && (message.action || message.dialogue)) {
+      map[message.id] = {
+        action: message.action && message.action !== '无' ? message.action : '',
+        dialogue: message.dialogue || message.content || '',
+      };
+      return;
+    }
     map[message.id] = formatMessage(message.content);
   });
   return map;
@@ -113,11 +120,25 @@ const handleCopyMarkdown = async () => {
   await chatStore.copyConversationMarkdown();
 };
 
+const handleCopyJson = async () => {
+  if (!canExportConversation.value) {
+    return;
+  }
+  await chatStore.copyConversationJson();
+};
+
 const handleDownloadMarkdown = () => {
   if (!canExportConversation.value) {
     return;
   }
   chatStore.downloadConversationMarkdown();
+};
+
+const handleDownloadJson = () => {
+  if (!canExportConversation.value) {
+    return;
+  }
+  chatStore.downloadConversationJson();
 };
 
 const confirmHistoryImport = (sourceLabel) => (
@@ -393,6 +414,8 @@ onMounted(() => {
             </label>
             <button class="tool-button" :disabled="!canExportConversation" @click="handleCopyMarkdown">复制 Markdown</button>
             <button class="tool-button" :disabled="!canExportConversation" @click="handleDownloadMarkdown">下载 Markdown</button>
+            <button class="tool-button" :disabled="!canExportConversation" @click="handleCopyJson">复制 JSON</button>
+            <button class="tool-button" :disabled="!canExportConversation" @click="handleDownloadJson">下载 JSON</button>
             <button class="tool-button" :disabled="!canImportBrowserCache" @click="handleImportBrowserCache">
               导入缓存<span v-if="cachedMessageCount"> {{ cachedMessageCount }}</span>
             </button>

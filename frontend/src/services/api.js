@@ -108,11 +108,11 @@ export const chatStream = async (sessionId, message, generateVoice = false, onEv
       }
       const data = dataLines.join('\n');
       const type = eventName || 'token';
-      if (type === 'voice_pending') {
+      if (type === 'voice_pending' || type === 'structured_reply') {
         try {
           emitEvent(onEvent, type, JSON.parse(data));
         } catch (err) {
-          emitEvent(onEvent, 'error', `voice_pending decode failed: ${data}`);
+          emitEvent(onEvent, 'error', `${type} decode failed: ${data}`);
         }
       } else {
         emitEvent(onEvent, type, data);

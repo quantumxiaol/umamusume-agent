@@ -71,8 +71,29 @@ API_AUTH_EXEMPT_PATHS = {"/", "/audio"}
 _CHAT_ENDPOINTS = {"/chat", "/chat_stream"}
 _rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
 _rate_limit_lock = asyncio.Lock()
+_response_format_unsupported: set[tuple[str, str]] = set()
 
-_STRUCTURED_RESPONSE_FORMAT_INSTRUCTION = (
+_JSON_OUTPUT_MODES = {"auto", "response_format", "prompt_only", "disabled"}
+_STRUCTURED_REPLY_SCHEMA_VERSION = 2
+
+_JSON_RESPONSE_FORMAT_INSTRUCTION = (
+    "【JSON 回复格式硬性规范】\n"
+    "你正在进行沉浸式角色扮演。你必须只输出一个合法 JSON object。\n"
+    "不要输出 Markdown，不要输出代码块，不要输出解释，不要输出 JSON 以外的任何文字。\n\n"
+    "JSON 格式必须是：\n"
+    "{\n"
+    '  "action": "角色动作、神态或心理描写；没有则写“无”",\n'
+    '  "dialogue": "角色对训练员说的话；自然口语；可直接用于 TTS"\n'
+    "}\n\n"
+    "字段要求：\n"
+    "1) action 必须是 string。\n"
+    "2) dialogue 必须是 string，不能为空。\n"
+    "3) 不要替训练员说话、行动、思考或决定关系进展。\n"
+    "4) dialogue 中不要混入动作描写。\n"
+    "5) action 中不要混入对白。"
+)
+
+_LEGACY_RESPONSE_FORMAT_INSTRUCTION = (
     "【回复格式硬性规范】\n"
     "你正在进行沉浸式角色扮演。请始终使用中文，并且只输出两行，顺序固定如下：\n"
     "动作：<描写角色动作、神态或心理活动；简洁；不写台词>\n"
@@ -88,16 +109,30 @@ _STRUCTURED_RESPONSE_FORMAT_INSTRUCTION = (
 )
 
 _PLAIN_TEXT_RESPONSE_FORMAT_INSTRUCTION = (
-    "本次不需要生成语音文件，但输出格式仍必须是“动作：”和“对白：”两行。"
+    "本次不需要生成语音文件，但仍必须遵守当前回复格式；dialogue/对白要自然可读。"
 )
 
-_HIDDEN_FORMAT_REINJECTION_PROMPT = (
+_HIDDEN_JSON_FORMAT_REINJECTION_PROMPT = (
+    "【后端隐藏 JSON 格式提醒】\n"
+    "继续只输出一个合法 JSON object，不要 Markdown，不要代码块。\n"
+    '格式固定为：{"action":"...","dialogue":"..."}'
+)
+
+_HIDDEN_LEGACY_FORMAT_REINJECTION_PROMPT = (
     "【后端隐藏格式约束提醒】\n"
     "继续严格遵守输出格式，只输出两行，且顺序固定：\n"
     "动作：<只写角色自己的动作、神态或心理；简短；不要写台词>\n"
     "对白：<只写角色对训练员说的话；自然口语；不要写动作或旁白>\n"
     "不要输出第三行、标题、解释、总结或列表；不要替训练员说话、行动、思考或决定关系进展。"
 )
+
+_REPAIR_JSON_PROMPT = (
+    "你刚才没有输出合法 JSON。\n"
+    "请只输出一个 JSON object，不要解释，不要 Markdown，不要代码块。\n"
+    '格式必须是：{"action":"...","dialogue":"..."}'
+)
+
+_SAFE_PARSE_FAILURE_REPLY = "光钻有点没听清，训练员可以再说一次吗？"
 
 _ACTION_PREFIXES = ("动作：", "动作:", "神态：", "神态:", "场景：", "场景:")
 _DIALOGUE_PREFIXES = (
@@ -162,8 +197,14 @@ class DialogueRequest(BaseModel):
 class HistoryImportMessage(BaseModel):
     """导入历史消息"""
     role: str
-    content: str
+    content: str = ""
+    action: Optional[str] = None
+    dialogue: Optional[str] = None
     timestamp: Optional[str] = None
+    schema_version: Optional[int] = None
+    schemaVersion: Optional[int] = None
+    source_format: Optional[str] = None
+    sourceFormat: Optional[str] = None
 
 
 class HistoryImportRequest(BaseModel):
@@ -185,6 +226,14 @@ class SessionInfo(BaseModel):
     history_size: int
     output_dir: Optional[str] = None
     history_file: Optional[str] = None
+
+
+class StructuredReply(BaseModel):
+    """服务端内部使用的 assistant 结构化回复。"""
+    action: str = "无"
+    dialogue: str
+    source_format: str = "json_v2"
+    schema_version: int = _STRUCTURED_REPLY_SCHEMA_VERSION
 
 
 # ============= 会话管理 =============
@@ -327,6 +376,106 @@ def _extract_completion_text(response: Any) -> str:
     if content is None:
         return ""
     return str(content)
+
+
+def _json_output_mode() -> str:
+    mode = (config.LLM_JSON_OUTPUT_MODE or "auto").strip().lower()
+    if mode not in _JSON_OUTPUT_MODES:
+        logger.warning("Invalid LLM_JSON_OUTPUT_MODE=%s, fallback to auto", config.LLM_JSON_OUTPUT_MODE)
+        return "auto"
+    return mode
+
+
+def _is_json_reply_enabled() -> bool:
+    return bool(config.LLM_JSON_ENABLED) and _json_output_mode() != "disabled"
+
+
+def _json_capability_key() -> tuple[str, str]:
+    return (
+        config.ROLEPLAY_LLM_MODEL_BASE_URL or "",
+        config.ROLEPLAY_LLM_MODEL_NAME or "",
+    )
+
+
+def _looks_like_unsupported_response_format(exc: Exception) -> bool:
+    if not isinstance(exc, APIStatusError):
+        return False
+    if exc.status_code not in {400, 422}:
+        return False
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            payload = response.json()
+            msg = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            msg = str(exc)
+    else:
+        msg = str(exc)
+
+    msg = msg.lower()
+    response_format_terms = ("response_format", "json_object")
+    unsupported_terms = (
+        "unsupported",
+        "unknown parameter",
+        "unrecognized",
+        "invalid parameter",
+        "not supported",
+    )
+    return (
+        any(term in msg for term in response_format_terms)
+        and any(term in msg for term in unsupported_terms)
+    )
+
+
+async def _create_json_completion(
+    messages: list[Dict[str, Any]],
+    *,
+    temperature: float,
+    max_tokens: int,
+    force_prompt_only: bool = False,
+) -> str:
+    mode = _json_output_mode()
+    key = _json_capability_key()
+    send_response_format = (
+        not force_prompt_only
+        and _is_json_reply_enabled()
+        and mode in {"auto", "response_format"}
+        and not (mode == "auto" and key in _response_format_unsupported)
+    )
+
+    kwargs: Dict[str, Any] = {
+        "model": config.ROLEPLAY_LLM_MODEL_NAME,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if send_response_format:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    try:
+        response = await llm_client.chat.completions.create(**kwargs)
+        return _extract_completion_text(response)
+    except Exception as exc:
+        if (
+            send_response_format
+            and mode == "auto"
+            and config.LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR
+            and _looks_like_unsupported_response_format(exc)
+        ):
+            _response_format_unsupported.add(key)
+            logger.warning(
+                "LLM response_format=json_object unsupported for base_url=%s model=%s; fallback to prompt-only JSON.",
+                key[0],
+                key[1],
+            )
+            return await _create_json_completion(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                force_prompt_only=True,
+            )
+        raise
 
 
 def _extract_stream_delta_text(chunk: Any) -> str:
@@ -474,10 +623,18 @@ def _parse_history_file(history_file: Path) -> tuple[list[Dict[str, Any]], set[s
             if record.get("event") != "message":
                 continue
             role = record.get("role")
-            content = record.get("content")
             if role not in {"user", "assistant"}:
                 continue
-            if not isinstance(content, str) or not content.strip():
+
+            if role == "assistant":
+                semantic_record = _normalize_assistant_record(record)
+            else:
+                content = record.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                semantic_record = {**record, "role": "user", "content": content.strip()}
+
+            if not str(semantic_record.get("content") or "").strip():
                 continue
 
             message_character_name = record.get("character_name_en")
@@ -492,7 +649,11 @@ def _parse_history_file(history_file: Path) -> tuple[list[Dict[str, Any]], set[s
                 {
                     "session_id": record.get("session_id"),
                     "role": role,
-                    "content": content,
+                    "content": semantic_record.get("content"),
+                    "action": semantic_record.get("action"),
+                    "dialogue": semantic_record.get("dialogue"),
+                    "schema_version": semantic_record.get("schema_version"),
+                    "source_format": semantic_record.get("source_format"),
                     "timestamp": record.get("timestamp"),
                     "message_index": record.get("message_index"),
                     "character_name_en": message_character_name,
@@ -536,18 +697,43 @@ def _collect_history_messages(user_uuid: str, character_name: Optional[str] = No
     return messages
 
 
-def _normalize_import_messages(raw_messages: list[HistoryImportMessage]) -> list[Dict[str, str]]:
-    messages: list[Dict[str, str]] = []
+def _normalize_import_messages(raw_messages: list[HistoryImportMessage]) -> list[Dict[str, Any]]:
+    messages: list[Dict[str, Any]] = []
     for index, item in enumerate(raw_messages, start=1):
         role = (item.role or "").strip().lower()
         if role not in {"user", "assistant"}:
             raise HTTPException(status_code=400, detail=f"Invalid role at message {index}: {item.role}")
 
         content = (item.content or "").strip()
-        if not content:
+        if role == "user":
+            if not content:
+                continue
+            messages.append(
+                {
+                    "role": role,
+                    "content": content,
+                    "timestamp": item.timestamp,
+                    "schema_version": item.schema_version or item.schemaVersion,
+                }
+            )
             continue
 
-        messages.append({"role": role, "content": content})
+        raw_record = {
+            "role": "assistant",
+            "content": content,
+            "action": item.action,
+            "dialogue": item.dialogue,
+            "timestamp": item.timestamp,
+            "schema_version": item.schema_version or item.schemaVersion,
+            "source_format": item.source_format or item.sourceFormat or "import",
+        }
+        if not content and not (isinstance(item.dialogue, str) and item.dialogue.strip()):
+            continue
+        semantic_record = _normalize_assistant_record(raw_record)
+        if not str(semantic_record.get("dialogue") or semantic_record.get("content") or "").strip():
+            continue
+
+        messages.append(semantic_record)
 
     if not messages:
         raise HTTPException(status_code=400, detail="No valid messages to import")
@@ -593,12 +779,20 @@ def _load_persistent_history(user_uuid: str, character: CharacterConfig) -> list
                     ):
                         continue
                     role = record.get("role")
-                    content = record.get("content")
                     if role not in {"user", "assistant"}:
                         continue
-                    if not isinstance(content, str) or not content.strip():
+
+                    if role == "assistant":
+                        semantic_record = _normalize_assistant_record(record)
+                    else:
+                        content = record.get("content")
+                        if not isinstance(content, str) or not content.strip():
+                            continue
+                        semantic_record = {"role": "user", "content": content.strip()}
+
+                    if not str(semantic_record.get("content") or "").strip():
                         continue
-                    messages.append({"role": role, "content": content})
+                    messages.append(_to_compact_context_message(semantic_record))
         except Exception:
             logger.exception("Failed to load history file: %s", history_file)
 
@@ -680,22 +874,56 @@ class DialogueSession:
         if overflow > 0:
             del self.history[:overflow]
 
-    def add_message(self, role: str, content: str):
+    def add_message(
+        self,
+        role: str,
+        content: str,
+        *,
+        action: Optional[str] = None,
+        dialogue: Optional[str] = None,
+        source_format: str = "text",
+        schema_version: Optional[int] = None,
+        imported_timestamp: Optional[str] = None,
+    ):
         """添加消息到历史"""
-        self.history.append({"role": role, "content": content})
+        if role == "assistant":
+            semantic_record = _normalize_assistant_record(
+                {
+                    "role": role,
+                    "content": content,
+                    "action": action,
+                    "dialogue": dialogue,
+                    "source_format": source_format,
+                    "schema_version": schema_version or _STRUCTURED_REPLY_SCHEMA_VERSION,
+                }
+            )
+        else:
+            semantic_record = {"role": role, "content": content}
+
+        self.history.append(_to_compact_context_message(semantic_record))
         self.message_count += 1
         self.touch()
         self._trim_history()
-        self._append_history_event(
-            {
-                "event": "message",
-                "role": role,
-                "content": content,
-                "message_index": self.message_count,
-            }
-        )
+        payload: Dict[str, Any] = {
+            "event": "message",
+            "role": role,
+            "content": semantic_record.get("content") or "",
+            "message_index": self.message_count,
+        }
+        if imported_timestamp:
+            payload["imported_timestamp"] = imported_timestamp
+        if role == "assistant":
+            payload.update(
+                {
+                    "action": semantic_record.get("action") or "无",
+                    "dialogue": semantic_record.get("dialogue") or semantic_record.get("content") or "",
+                    "source_format": semantic_record.get("source_format") or source_format,
+                    "schema_version": semantic_record.get("schema_version") or _STRUCTURED_REPLY_SCHEMA_VERSION,
+                }
+            )
+        self._append_history_event(payload)
 
-    def import_messages(self, messages: list[Dict[str, str]], replace_current: bool = True, source: str = "manual"):
+    def import_messages(self, messages: list[Dict[str, Any]], replace_current: bool = True, source: str = "manual"):
         """导入历史消息到当前会话上下文，并持久化到当前 session 的 history 文件。"""
         if replace_current:
             self.history.clear()
@@ -720,7 +948,15 @@ class DialogueSession:
             }
         )
         for message in messages:
-            self.add_message(message["role"], message["content"])
+            self.add_message(
+                message["role"],
+                message.get("content", ""),
+                action=message.get("action"),
+                dialogue=message.get("dialogue"),
+                source_format=message.get("source_format") or source,
+                schema_version=message.get("schema_version"),
+                imported_timestamp=message.get("timestamp"),
+            )
 
     def _extend_messages_with_hidden_format_reinjection(self, messages: list[Dict[str, Any]]) -> None:
         if (
@@ -736,13 +972,21 @@ class DialogueSession:
                 messages.append(
                     {
                         "role": "system",
-                        "content": _HIDDEN_FORMAT_REINJECTION_PROMPT,
+                        "content": (
+                            _HIDDEN_JSON_FORMAT_REINJECTION_PROMPT
+                            if _is_json_reply_enabled()
+                            else _HIDDEN_LEGACY_FORMAT_REINJECTION_PROMPT
+                        ),
                     }
                 )
 
     def get_messages(self, text_only: bool = False) -> list:
         """获取完整消息列表（包含系统提示）"""
-        response_instruction = _STRUCTURED_RESPONSE_FORMAT_INSTRUCTION
+        response_instruction = (
+            _JSON_RESPONSE_FORMAT_INSTRUCTION
+            if _is_json_reply_enabled()
+            else _LEGACY_RESPONSE_FORMAT_INSTRUCTION
+        )
         if text_only:
             # text_only 仅代表不生成语音，不改变输出结构
             response_instruction = f"{response_instruction}\n{_PLAIN_TEXT_RESPONSE_FORMAT_INSTRUCTION}"
@@ -980,6 +1224,195 @@ def _normalize_structured_reply(reply: str) -> str:
     return f"动作：{action_text}\n对白：{dialogue_text}"
 
 
+def _strip_json_code_fence(text: str) -> str:
+    stripped = text.strip()
+    fenced = re.fullmatch(r"```(?:json|JSON)?\s*(.*?)\s*```", stripped, flags=re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+
+    embedded = re.search(r"```(?:json|JSON)?\s*(.*?)\s*```", stripped, flags=re.DOTALL)
+    if embedded:
+        return embedded.group(1).strip()
+    return stripped
+
+
+def _load_json_object_from_text(text: str) -> Dict[str, Any]:
+    stripped = (text or "").strip()
+    if not stripped:
+        raise ValueError("empty model output")
+
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        if not config.LLM_JSON_PARSE_LOOSE_JSON:
+            raise
+
+        cleaned = _strip_json_code_fence(stripped)
+        if cleaned != stripped:
+            try:
+                payload = json.loads(cleaned)
+            except json.JSONDecodeError:
+                payload = None
+            else:
+                if isinstance(payload, dict):
+                    return payload
+
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", stripped):
+            try:
+                payload, _end = decoder.raw_decode(stripped[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        raise
+
+    if not isinstance(payload, dict):
+        raise ValueError("JSON output must be an object")
+    return payload
+
+
+def _parse_structured_reply(raw: str, *, source_format: str = "json_v2") -> StructuredReply:
+    payload = _load_json_object_from_text(raw)
+    action = payload.get("action", "无")
+    dialogue = payload.get("dialogue", "")
+
+    if not isinstance(action, str):
+        action = "无"
+    if not isinstance(dialogue, str) or not dialogue.strip():
+        raise ValueError("JSON output missing non-empty dialogue")
+
+    return StructuredReply(
+        action=action.strip() or "无",
+        dialogue=dialogue.strip(),
+        source_format=source_format,
+    )
+
+
+def _structured_reply_from_legacy_text(text: str, *, source_format: str = "legacy_text") -> StructuredReply:
+    normalized = _normalize_structured_reply(text)
+    action_text, dialogue_text = _split_action_dialogue(normalized)
+    if not dialogue_text:
+        dialogue_text = _strip_stage_directions(text) or text.strip()
+    return StructuredReply(
+        action=action_text.strip() or "无",
+        dialogue=dialogue_text.strip() or _SAFE_PARSE_FAILURE_REPLY,
+        source_format=source_format,
+    )
+
+
+def _structured_reply_message(reply: StructuredReply, *, role: str = "assistant") -> Dict[str, Any]:
+    return {
+        "schema_version": reply.schema_version,
+        "role": role,
+        "content": reply.dialogue,
+        "action": reply.action or "无",
+        "dialogue": reply.dialogue,
+        "source_format": reply.source_format,
+    }
+
+
+def _normalize_assistant_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    content = record.get("content")
+    if not isinstance(content, str):
+        content = ""
+
+    action = record.get("action")
+    dialogue = record.get("dialogue")
+    source_format = record.get("source_format") or record.get("sourceFormat") or "json_v2"
+
+    if isinstance(dialogue, str) and dialogue.strip():
+        return {
+            **record,
+            "role": "assistant",
+            "content": dialogue.strip(),
+            "action": action.strip() if isinstance(action, str) and action.strip() else "无",
+            "dialogue": dialogue.strip(),
+            "source_format": source_format,
+            "schema_version": record.get("schema_version") or record.get("schemaVersion") or _STRUCTURED_REPLY_SCHEMA_VERSION,
+        }
+
+    if content.strip():
+        try:
+            reply = _parse_structured_reply(content, source_format="json_v2")
+        except Exception:
+            reply = _structured_reply_from_legacy_text(content, source_format="legacy_text")
+        return {
+            **record,
+            "role": "assistant",
+            "content": reply.dialogue,
+            "action": reply.action,
+            "dialogue": reply.dialogue,
+            "source_format": reply.source_format,
+            "schema_version": reply.schema_version,
+        }
+
+    return {
+        **record,
+        "role": "assistant",
+        "content": _SAFE_PARSE_FAILURE_REPLY,
+        "action": "无",
+        "dialogue": _SAFE_PARSE_FAILURE_REPLY,
+        "source_format": "parse_error",
+        "schema_version": _STRUCTURED_REPLY_SCHEMA_VERSION,
+    }
+
+
+def _to_compact_context_message(record: Dict[str, Any]) -> Dict[str, str]:
+    role = record.get("role")
+    if role == "user":
+        return {"role": "user", "content": str(record.get("content") or "").strip()}
+
+    assistant_record = _normalize_assistant_record({**record, "role": "assistant"})
+    action = str(assistant_record.get("action") or "").strip()
+    dialogue = str(assistant_record.get("dialogue") or assistant_record.get("content") or "").strip()
+    if action and action != "无":
+        content = f"角色动作：{action}\n角色对白：{dialogue}"
+    else:
+        content = f"角色对白：{dialogue}"
+    return {"role": "assistant", "content": content}
+
+
+async def _complete_structured_reply(messages: list[Dict[str, Any]]) -> StructuredReply:
+    if not _is_json_reply_enabled():
+        response = await llm_client.chat.completions.create(
+            model=config.ROLEPLAY_LLM_MODEL_NAME,
+            messages=messages,
+            temperature=0.7,
+        )
+        return _structured_reply_from_legacy_text(_extract_completion_text(response))
+
+    raw = await _create_json_completion(
+        messages,
+        temperature=config.LLM_JSON_TEMPERATURE,
+        max_tokens=config.LLM_JSON_MAX_TOKENS,
+    )
+    try:
+        return _parse_structured_reply(raw)
+    except Exception as first_error:
+        logger.warning("Failed to parse JSON reply, retry=%s: %s", config.LLM_JSON_MAX_RETRIES, first_error)
+
+    retries = max(0, config.LLM_JSON_MAX_RETRIES)
+    for _attempt in range(retries):
+        repair_messages = [
+            *messages,
+            {"role": "assistant", "content": raw},
+            {"role": "user", "content": _REPAIR_JSON_PROMPT},
+        ]
+        raw = await _create_json_completion(
+            repair_messages,
+            temperature=config.LLM_JSON_TEMPERATURE,
+            max_tokens=config.LLM_JSON_MAX_TOKENS,
+            force_prompt_only=True,
+        )
+        try:
+            return _parse_structured_reply(raw)
+        except Exception as repair_error:
+            logger.warning("Failed to parse repaired JSON reply: %s", repair_error)
+
+    return StructuredReply(action="无", dialogue=_SAFE_PARSE_FAILURE_REPLY, source_format="parse_error")
+
+
 def _extract_dialogue_text(text: str) -> str:
     _, dialogue_text = _split_action_dialogue(text)
     if dialogue_text:
@@ -1144,7 +1577,7 @@ async def chat(request: DialogueRequest):
     """
     发送消息并获取回复（非流式）
     
-    返回: {reply: str, voice_url: str (optional)}
+    返回: {action: str, dialogue: str, message: object, voice: object (optional)}
     """
     session = get_session(request.session_id)
     if not session:
@@ -1154,25 +1587,29 @@ async def chat(request: DialogueRequest):
         # 添加用户消息
         session.add_message("user", request.message)
         
-        # 调用 LLM
-        response = await llm_client.chat.completions.create(
-            model=config.ROLEPLAY_LLM_MODEL_NAME,
-            messages=session.get_messages(text_only=request.text_only),
-            temperature=0.7
-        )
-        
-        reply_raw = _extract_completion_text(response)
-        reply = _normalize_structured_reply(reply_raw)
+        # 调用 LLM 并解析为结构化回复
+        structured_reply = await _complete_structured_reply(session.get_messages(text_only=request.text_only))
         
         # 添加助手回复
-        session.add_message("assistant", reply)
+        session.add_message(
+            "assistant",
+            structured_reply.dialogue,
+            action=structured_reply.action,
+            dialogue=structured_reply.dialogue,
+            source_format=structured_reply.source_format,
+            schema_version=structured_reply.schema_version,
+        )
         
-        result = {"reply": reply}
+        result = {
+            "action": structured_reply.action,
+            "dialogue": structured_reply.dialogue,
+            "message": _structured_reply_message(structured_reply),
+        }
         
         # 生成语音（如果需要）
         if _should_generate_voice(request, session):
             voice_plan = _reserve_voice_output(session)
-            voice_info = await _generate_voice_for_reply(session, reply, voice_plan)
+            voice_info = await _generate_voice_for_reply(session, structured_reply.dialogue, voice_plan)
             if voice_info:
                 result["voice"] = voice_info
         
@@ -1198,6 +1635,36 @@ async def chat_stream(request: DialogueRequest):
         try:
             # 添加用户消息
             session.add_message("user", request.message)
+
+            if _is_json_reply_enabled():
+                structured_reply = await _complete_structured_reply(session.get_messages(text_only=request.text_only))
+
+                session.add_message(
+                    "assistant",
+                    structured_reply.dialogue,
+                    action=structured_reply.action,
+                    dialogue=structured_reply.dialogue,
+                    source_format=structured_reply.source_format,
+                    schema_version=structured_reply.schema_version,
+                )
+
+                payload = json.dumps(
+                    {
+                        "action": structured_reply.action,
+                        "dialogue": structured_reply.dialogue,
+                        "message": _structured_reply_message(structured_reply),
+                    },
+                    ensure_ascii=False,
+                )
+                yield f"event: structured_reply\ndata: {payload}\n\n"
+                yield f"event: done\ndata: {{}}\n\n"
+
+                if _should_generate_voice(request, session):
+                    voice_plan = _reserve_voice_output(session)
+                    voice_payload = json.dumps(voice_plan, ensure_ascii=False)
+                    yield f"event: voice_pending\ndata: {voice_payload}\n\n"
+                    asyncio.create_task(_generate_voice_for_reply(session, structured_reply.dialogue, voice_plan))
+                return
             
             # 流式调用 LLM
             stream = await llm_client.chat.completions.create(
@@ -1218,9 +1685,17 @@ async def chat_stream(request: DialogueRequest):
                 yield f"data: {content}\n\n"
 
             full_reply = _normalize_structured_reply(full_reply_raw)
+            structured_reply = _structured_reply_from_legacy_text(full_reply, source_format="legacy_text")
             
             # 添加完整回复到历史
-            session.add_message("assistant", full_reply)
+            session.add_message(
+                "assistant",
+                structured_reply.dialogue,
+                action=structured_reply.action,
+                dialogue=structured_reply.dialogue,
+                source_format=structured_reply.source_format,
+                schema_version=structured_reply.schema_version,
+            )
             
             # 发送完成事件
             yield f"event: done\ndata: {{}}\n\n"
@@ -1229,7 +1704,7 @@ async def chat_stream(request: DialogueRequest):
                 voice_plan = _reserve_voice_output(session)
                 payload = json.dumps(voice_plan, ensure_ascii=False)
                 yield f"event: voice_pending\ndata: {payload}\n\n"
-                asyncio.create_task(_generate_voice_for_reply(session, full_reply, voice_plan))
+                asyncio.create_task(_generate_voice_for_reply(session, structured_reply.dialogue, voice_plan))
         
         except Exception as e:
             logger.error(f"Stream chat failed: {e}")
