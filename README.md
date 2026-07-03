@@ -19,7 +19,7 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 构建一个赛马娘角色对话 Agent：
 - 角色人格来自 prompt（本地 `result-prompts/`）
 - 角色音色来自 voice 数据（本地 `result-voices/`）
-- 对话支持流式/非流式
+- 对话支持非流式请求与 SSE 流式请求；JSON 模式下不会把半截 JSON token 直接推给前端
 - 默认仅文本回复；当 `generate_voice=true` 时才会调用 IndexTTS MCP 合成语音，音频保存在 `outputs/<角色>_<时间戳>/reply_###.wav`
 
 角色人格可以通过项目[umamusume-agent-prompt](https://github.com/quantumxiaol/umamusume-agent-prompt)获取，角色音色可以通过项目[umamusume-voice-data](https://github.com/quantumxiaol/umamusume-voice-data)在bilibili wiki上爬取，角色音色当前是通过[index-TTS mcp](https://github.com/quantumxiaol/index-tts)实现的。
@@ -28,8 +28,8 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 
 - 角色管理：从 `characters/` 加载角色配置
 - 对话服务：`/load_character`、`/chat`、`/chat_stream`
-- 历史落盘：按 `user_uuid/角色/时间戳/session` 写入 `jsonl` 对话日志（暂时不依赖数据库）
-- 对话格式：后端主协议为 `{"action":"...","dialogue":"..."}` JSON；API 响应返回 `action`、`dialogue`、`message`，TTS 使用 `dialogue`；`text_only=true` 仅用于禁用语音合成
+- 历史落盘：按 `user_uuid/角色/时间戳/session` 写入 `jsonl` 对话日志；assistant 消息使用 v2 结构字段保存
+- 对话格式：后端主协议为 `{"action":"...","dialogue":"..."}` JSON；API 响应返回 `action`、`dialogue`、`message`，不再返回旧两行 `reply`
 - 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
 - 前端 UI：角色选择、提示词预览、音色试听、多轮对话、语音播放
 
@@ -82,6 +82,8 @@ cat .env.template > .env
   - `LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR`（默认 `true`，auto 模式下遇到明确不支持 `response_format/json_object` 时本轮降级）
   - `LLM_JSON_PARSE_LOOSE_JSON`（默认 `true`，允许解析代码块或嵌入文本中的 JSON object）
   - `LLM_JSON_MAX_RETRIES`（默认 `1`，JSON 解析失败后的 prompt-only 修复次数）
+  - `LLM_JSON_REGENERATE_ON_PARSE_FAILURE`（默认 `true`，修复仍失败时基于最近训练员发言重新生成）
+  - `LLM_JSON_MAX_REGENERATE_ATTEMPTS`（默认 `1`，最终安全降级前的重新生成次数）
   - `LLM_JSON_TEMPERATURE` / `LLM_JSON_MAX_TOKENS`（JSON 回复请求参数）
 - 会话治理配置：
   - `DIALOGUE_SESSION_TTL_SECONDS`（默认 `3600`，会话空闲超时秒数，`<=0` 表示不启用 TTL）
@@ -91,7 +93,7 @@ cat .env.template > .env
   - `DIALOGUE_PREFIX_CACHE_ENABLED`（默认 `true`，是否启用前缀缓存注入）
   - `DIALOGUE_PREFIX_CACHE_MIN_CHARS`（默认 `1000`，System Prompt 最小字符数阈值）
   - `DIALOGUE_HIDDEN_FORMAT_REINJECTION_ENABLED`（默认 `true`，是否启用后端隐藏格式约束再注入；不写入历史、不导出到前端）
-  - `DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES`（默认 `100`，每隔多少条 user/assistant 历史消息插入一次隐藏格式约束）
+  - `DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES`（默认 `100`，每隔多少条 user/assistant 历史消息插入一次隐藏格式约束；约等于每 50 轮对话提醒一次）
 当前主链路主要依赖 `ROLEPLAY_LLM_*` 与 `INDEXTTS_MCP_*`；RAG/Web/旧模块需要安装 `extras` 后再配置。
 
 ## 数据准备（角色导入）
@@ -149,6 +151,69 @@ uvicorn umamusume_agent.server.dialogue_server:app --host 0.0.0.0 --port 1111
 ```bash
 curl -s http://127.0.0.1:1111/
 ```
+
+## 对话协议与流式行为
+
+### JSON 回复协议
+
+默认启用 JSON 回复主链路。模型被要求只输出：
+
+```json
+{"action":"角色动作、神态或心理描写；没有则写“无”","dialogue":"角色对训练员说的话"}
+```
+
+`/chat` 返回结构化字段：
+
+```json
+{
+  "action": "光钻轻轻点头。",
+  "dialogue": "训练员，我们开始今天的训练吧。",
+  "message": {
+    "schema_version": 2,
+    "role": "assistant",
+    "content": "训练员，我们开始今天的训练吧。",
+    "action": "光钻轻轻点头。",
+    "dialogue": "训练员，我们开始今天的训练吧。",
+    "source_format": "json_v2"
+  }
+}
+```
+
+`/chat_stream` 在 JSON 模式下不会把模型生成中的半截 JSON 逐 token 发给前端，而是等后端完整解析并校验后发送：
+
+```text
+event: structured_reply
+data: {"action":"...","dialogue":"...","message":{...}}
+
+event: done
+data: {}
+```
+
+如果关闭 JSON 主链路（`LLM_JSON_OUTPUT_MODE=disabled`），服务会退回旧两行文本协议，仅作为兼容/调试模式。
+
+### response_format 降级
+
+`LLM_JSON_OUTPUT_MODE=auto` 时，后端会优先尝试 `response_format={"type":"json_object"}`。如果上游返回明确的 `response_format/json_object unsupported/unknown/unrecognized` 类 400/422 错误，本轮会自动重试 prompt-only JSON，并在当前运行期记住该 base URL + model 不支持 `response_format`。API key、模型名、base URL 等普通错误不会被吞掉。
+
+### 解析失败与自动重生成
+
+安全提示 `光钻有点没听清，训练员可以再说一次吗？` 只会在 JSON 主链路无法得到可用 `dialogue` 时出现，例如上游返回空内容、不是 JSON object、JSON 缺少非空 `dialogue`，并且修复与重生成都失败。
+
+默认失败处理顺序：
+
+1. 正常 JSON 请求。
+2. 解析失败后进行一次 prompt-only JSON 修复（`LLM_JSON_MAX_RETRIES=1`）。
+3. 修复仍失败时，忽略失败输出，基于最近训练员发言重新生成一次（`LLM_JSON_REGENERATE_ON_PARSE_FAILURE=true`、`LLM_JSON_MAX_REGENERATE_ATTEMPTS=1`）。
+4. 仍失败才返回安全提示，并以 `source_format=parse_error` 写入历史。
+
+长上下文对话中如果频繁出现安全提示，优先尝试：缩短/裁剪历史、提高隐藏格式提醒频率、降低温度，或使用前端的“编辑上一句 / 重生成上一轮”从最近一轮重新生成。
+
+### 历史与 TTS
+
+- 历史文件中 assistant 消息保存 `schema_version=2`、`content`、`action`、`dialogue`、`source_format`。
+- 传给 LLM 的历史上下文不会塞 raw JSON，而是压成自然语言：`角色动作：...` / `角色对白：...`。
+- `/history/import` 可导入 v2 JSON，也兼容旧 `role/content`、旧“动作：/对白：”文本和 Markdown 导出；`replace_current=true` 且 `messages=[]` 会清空当前 session 上下文。
+- TTS 只消费解析后的 `dialogue` 字段；`action` 不参与合成。
 
 ## 部署说明（GitHub Pages + HF Space）
 
@@ -209,6 +274,8 @@ pnpm run dev
 - 点击 `查看历史` 会调用 `/history` 刷新该角色历史。
 - 对话会以 v2 结构同步写入当前浏览器的 `localStorage` 缓存，并兼容迁移旧 v1 `role/content` 缓存。
 - 可将当前显示的对话复制或下载为 JSON/Markdown；JSON 是权威恢复格式，Markdown 末尾会附带 v2 JSON block；也可从 Markdown/JSON 文件手动导入历史，导入后会替换当前 session 上下文并同步到后端。
+- 可点击 `重生成上一轮` 直接删除最近一条训练员发言及其后的回复，按原文重新生成。
+- 可点击 `编辑上一句` 将最近一条训练员发言放回输入框，修改后发送；前端会先截断该轮之后的历史并同步后端，再重新生成。
 - 点击 `清空本角色历史` 会调用 `DELETE /history` 清理该角色历史。
 
 ## 项目结构

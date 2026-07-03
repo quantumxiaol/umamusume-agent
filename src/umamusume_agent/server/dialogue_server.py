@@ -132,6 +132,13 @@ _REPAIR_JSON_PROMPT = (
     '格式必须是：{"action":"...","dialogue":"..."}'
 )
 
+_REGENERATE_JSON_PROMPT = (
+    "上一条 assistant 回复没有通过后端 JSON 解析。\n"
+    "请忽略那次失败输出，基于最近一条训练员发言重新生成角色回复。\n"
+    "必须只输出一个合法 JSON object，不要解释，不要 Markdown，不要代码块。\n"
+    '格式必须是：{"action":"...","dialogue":"..."}'
+)
+
 _SAFE_PARSE_FAILURE_REPLY = "光钻有点没听清，训练员可以再说一次吗？"
 
 _ACTION_PREFIXES = ("动作：", "动作:", "神态：", "神态:", "场景：", "场景:")
@@ -1406,9 +1413,27 @@ async def _complete_structured_reply(messages: list[Dict[str, Any]]) -> Structur
             force_prompt_only=True,
         )
         try:
-            return _parse_structured_reply(raw)
+            return _parse_structured_reply(raw, source_format="json_v2_repaired")
         except Exception as repair_error:
             logger.warning("Failed to parse repaired JSON reply: %s", repair_error)
+
+    if config.LLM_JSON_REGENERATE_ON_PARSE_FAILURE:
+        regenerate_attempts = max(0, config.LLM_JSON_MAX_REGENERATE_ATTEMPTS)
+        for _attempt in range(regenerate_attempts):
+            regenerate_messages = [
+                *messages,
+                {"role": "user", "content": _REGENERATE_JSON_PROMPT},
+            ]
+            raw = await _create_json_completion(
+                regenerate_messages,
+                temperature=config.LLM_JSON_TEMPERATURE,
+                max_tokens=config.LLM_JSON_MAX_TOKENS,
+                force_prompt_only=True,
+            )
+            try:
+                return _parse_structured_reply(raw, source_format="json_v2_regenerated")
+            except Exception as regenerate_error:
+                logger.warning("Failed to parse regenerated JSON reply: %s", regenerate_error)
 
     return StructuredReply(action="无", dialogue=_SAFE_PARSE_FAILURE_REPLY, source_format="parse_error")
 
@@ -1806,7 +1831,12 @@ async def import_history(request: HistoryImportRequest):
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    messages = _normalize_import_messages(request.messages)
+    if request.messages:
+        messages = _normalize_import_messages(request.messages)
+    elif request.replace_current:
+        messages = []
+    else:
+        raise HTTPException(status_code=400, detail="No valid messages to import")
     source = (request.source or "manual").strip()[:80] or "manual"
     session.import_messages(messages, replace_current=request.replace_current, source=source)
 

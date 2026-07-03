@@ -692,6 +692,67 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
+    _lastUserMessageIndex() {
+      for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+        if (this.messages[index]?.role === 'user') {
+          return index;
+        }
+      }
+      return -1;
+    },
+
+    getLastUserMessage() {
+      const index = this._lastUserMessageIndex();
+      return index >= 0 ? this.messages[index] : null;
+    },
+
+    async _replaceCurrentSessionHistory(messages, source = 'regenerate') {
+      if (!this.sessionId) {
+        throw new Error('请先加载角色。');
+      }
+      const records = normalizeConversationRecords(messages.map(messageToRecord));
+      await importHistory(this.sessionId, records, true, source);
+      this.messages = messages;
+      this.restoredHistoryMessages = this.messages.length;
+      if (this.messages.length) {
+        this._cacheCurrentConversation();
+      } else {
+        this._removeCurrentConversationCache();
+      }
+    },
+
+    async regenerateFromLastUser(editedText = '') {
+      if (this.isLoading) {
+        return false;
+      }
+      const userIndex = this._lastUserMessageIndex();
+      if (userIndex < 0) {
+        this.error = '没有可重生成的训练员发言。';
+        return false;
+      }
+
+      const original = this.messages[userIndex];
+      const text = String(editedText || original.content || '').trim();
+      if (!text) {
+        this.error = '重生成内容不能为空。';
+        return false;
+      }
+
+      this.error = null;
+      this.exportNotice = '';
+      const keptMessages = this.messages.slice(0, userIndex);
+
+      try {
+        await this._replaceCurrentSessionHistory(keptMessages, 'regenerate_last_user');
+      } catch (err) {
+        this.error = err.message || '同步重生成上下文失败。';
+        return false;
+      }
+
+      await this.sendMessage(text);
+      return !this.error;
+    },
+
     async sendMessage(text) {
       if (!text.trim()) {
         this.error = '请输入内容。';

@@ -53,6 +53,9 @@ class DialogueJsonProtocolTests(unittest.TestCase):
             "LLM_JSON_ENABLED",
             "LLM_JSON_OUTPUT_MODE",
             "LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR",
+            "LLM_JSON_MAX_RETRIES",
+            "LLM_JSON_REGENERATE_ON_PARSE_FAILURE",
+            "LLM_JSON_MAX_REGENERATE_ATTEMPTS",
             "ROLEPLAY_LLM_MODEL_BASE_URL",
             "ROLEPLAY_LLM_MODEL_NAME",
         ]
@@ -69,6 +72,9 @@ class DialogueJsonProtocolTests(unittest.TestCase):
         ds.config.LLM_JSON_ENABLED = True
         ds.config.LLM_JSON_OUTPUT_MODE = "auto"
         ds.config.LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR = True
+        ds.config.LLM_JSON_MAX_RETRIES = 1
+        ds.config.LLM_JSON_REGENERATE_ON_PARSE_FAILURE = True
+        ds.config.LLM_JSON_MAX_REGENERATE_ATTEMPTS = 1
         ds.config.ROLEPLAY_LLM_MODEL_BASE_URL = "https://llm.example.test/v1"
         ds.config.ROLEPLAY_LLM_MODEL_NAME = "test-model"
 
@@ -162,6 +168,34 @@ class DialogueJsonProtocolTests(unittest.TestCase):
 
         self.assertEqual(len(completions.calls), 1)
         self.assertIn("response_format", completions.calls[0])
+
+    def test_complete_structured_reply_regenerates_before_safe_fallback(self):
+        self._configure_json_auto()
+        completions = _FakeCompletions(
+            [
+                _FakeResponse("not json"),
+                _FakeResponse('{"action":"无"}'),
+                _FakeResponse('{"action":"米浴抬起头。","dialogue":"训练员，我听见了。"}'),
+            ]
+        )
+        ds.llm_client = _FakeLlmClient(completions)
+
+        reply = asyncio.run(
+            ds._complete_structured_reply(
+                [
+                    {"role": "system", "content": "只输出 JSON"},
+                    {"role": "user", "content": "怎么回事"},
+                ]
+            )
+        )
+
+        self.assertEqual(reply.action, "米浴抬起头。")
+        self.assertEqual(reply.dialogue, "训练员，我听见了。")
+        self.assertEqual(reply.source_format, "json_v2_regenerated")
+        self.assertEqual(len(completions.calls), 3)
+        self.assertIn("response_format", completions.calls[0])
+        self.assertNotIn("response_format", completions.calls[1])
+        self.assertNotIn("response_format", completions.calls[2])
 
 
 if __name__ == "__main__":

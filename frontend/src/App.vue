@@ -1,12 +1,14 @@
 <!-- frontend/src/App.vue -->
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, nextTick } from 'vue';
 import { useChatStore } from '@/stores/chatStore';
 
 const chatStore = useChatStore();
 const ttsEnabled = import.meta.env.VITE_ENABLE_TTS === 'true';
 
 const messageInput = ref('');
+const messageInputRef = ref(null);
+const isEditingLastUser = ref(false);
 const isComposingMessage = ref(false);
 const characterFilter = ref('');
 const promptOpen = ref(true);
@@ -29,6 +31,15 @@ const canExportConversation = computed(() => Boolean(selectedCharacter.value && 
 const cachedMessageCount = computed(() => chatStore.cachedMessageCount);
 const canImportBrowserCache = computed(() => Boolean(selectedCharacter.value && cachedMessageCount.value && !isLoading.value));
 const canImportFile = computed(() => Boolean(selectedCharacter.value && !isLoading.value));
+const lastUserMessage = computed(() => {
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    if (messages.value[index]?.role === 'user') {
+      return messages.value[index];
+    }
+  }
+  return null;
+});
+const canRegenerateLast = computed(() => Boolean(selectedCharacter.value && lastUserMessage.value && !isLoading.value));
 const messageParts = computed(() => {
   const map = {};
   messages.value.forEach((message) => {
@@ -60,6 +71,7 @@ const handleSelectCharacter = async (name) => {
   if (!name || name === selectedCharacter.value) {
     return;
   }
+  isEditingLastUser.value = false;
   await chatStore.selectCharacter(name);
 };
 
@@ -69,6 +81,11 @@ const handleSend = async () => {
   }
   const text = messageInput.value;
   messageInput.value = '';
+  if (isEditingLastUser.value) {
+    isEditingLastUser.value = false;
+    await chatStore.regenerateFromLastUser(text);
+    return;
+  }
   await chatStore.sendMessage(text);
 };
 
@@ -110,7 +127,31 @@ const handleClearHistory = async () => {
   if (!confirmed) {
     return;
   }
+  isEditingLastUser.value = false;
   await chatStore.clearCurrentCharacterHistory();
+};
+
+const handleRegenerateLast = async () => {
+  if (!canRegenerateLast.value) {
+    return;
+  }
+  isEditingLastUser.value = false;
+  messageInput.value = '';
+  await chatStore.regenerateFromLastUser(lastUserMessage.value.content);
+};
+
+const handleEditLastUser = async () => {
+  if (!canRegenerateLast.value) {
+    return;
+  }
+  messageInput.value = lastUserMessage.value.content || '';
+  isEditingLastUser.value = true;
+  await nextTick();
+  messageInputRef.value?.focus();
+};
+
+const handleCancelEditLastUser = () => {
+  isEditingLastUser.value = false;
 };
 
 const handleCopyMarkdown = async () => {
@@ -152,6 +193,7 @@ const handleImportBrowserCache = async () => {
   if (!confirmHistoryImport('导入浏览器缓存')) {
     return;
   }
+  isEditingLastUser.value = false;
   await chatStore.importFromBrowserCache();
 };
 
@@ -171,6 +213,7 @@ const handleImportFileChange = async (event) => {
   if (!confirmHistoryImport(`导入「${file.name}」`)) {
     return;
   }
+  isEditingLastUser.value = false;
   await chatStore.importConversationFile(file);
 };
 
@@ -427,6 +470,8 @@ onMounted(() => {
               accept=".md,.markdown,.json,text/markdown,application/json"
               @change="handleImportFileChange"
             />
+            <button class="tool-button" :disabled="!canRegenerateLast" @click="handleRegenerateLast">重生成上一轮</button>
+            <button class="tool-button" :disabled="!canRegenerateLast" @click="handleEditLastUser">编辑上一句</button>
             <button class="tool-button" :disabled="!selectedCharacter || isLoading" @click="handleRefreshHistory">查看历史</button>
             <button class="tool-button danger" :disabled="!selectedCharacter || isLoading" @click="handleClearHistory">清空本角色历史</button>
           </div>
@@ -486,6 +531,7 @@ onMounted(() => {
         <section class="chat-input">
           <div class="input-box">
             <textarea
+              ref="messageInputRef"
               v-model="messageInput"
               rows="3"
               placeholder="输入对话内容，Enter 发送，Shift+Enter 换行"
@@ -505,6 +551,10 @@ onMounted(() => {
           <div class="meta-row">
             <span v-if="error" class="error">{{ error }}</span>
             <span v-else-if="exportNotice" class="success">{{ exportNotice }}</span>
+            <span v-else-if="isEditingLastUser" class="hint">
+              正在编辑上一句，发送后会从该轮重新生成。
+              <button class="inline-link" type="button" @click="handleCancelEditLastUser">取消</button>
+            </span>
             <span v-else class="hint">支持多轮文本对话；历史为临时保存，不保证长期保留。</span>
           </div>
         </section>
@@ -708,6 +758,16 @@ h1 {
   color: var(--accent);
   cursor: pointer;
   font-size: 12px;
+}
+
+.inline-link {
+  border: none;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 0 0 6px;
 }
 
 .prompt-preview {
