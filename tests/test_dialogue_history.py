@@ -101,6 +101,39 @@ class DialogueHistoryAndSessionTests(unittest.TestCase):
             self.assertEqual(records[0]["event"], "session_start")
             self.assertEqual(records[-1]["schema_version"], 2)
 
+            session.add_message(
+                "user",
+                "天色渐渐暗了下来。",
+                actor={
+                    "actor_id": "narrator",
+                    "actor_type": "narrator",
+                    "display_name": "环境",
+                },
+                event_type="scene_event",
+                target_actor_ids=["test_character"],
+                event_schema_version=1,
+            )
+
+            event_messages, _ = parse_history_file(history_file)
+            self.assertEqual(event_messages[-1]["event_type"], "scene_event")
+            self.assertEqual(
+                event_messages[-1]["actor"]["actor_id"],
+                "narrator",
+            )
+            restored_with_event = load_persistent_history(
+                history_dir,
+                user_uuid,
+                character,
+                history_max_messages=0,
+            )
+            self.assertEqual(
+                restored_with_event[-1],
+                {
+                    "role": "user",
+                    "content": "【环境变化】天色渐渐暗了下来。",
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

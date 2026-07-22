@@ -1,6 +1,7 @@
 import unittest
 
 from umamusume_agent.dialogue.context import LegacyDialogueContextBuilder
+from umamusume_agent.dialogue.protocol import to_compact_context_message
 
 
 class _Settings:
@@ -43,6 +44,47 @@ class LegacyDialogueContextBuilderTests(unittest.TestCase):
         self.assertEqual(context.messages[1:3], history)
         self.assertEqual(context.messages[3]["role"], "system")
         self.assertIn("JSON 格式提醒", context.messages[3]["content"])
+
+    def test_story_event_types_render_without_changing_legacy_messages(self):
+        legacy = to_compact_context_message(
+            {"role": "user", "content": "你好"}
+        )
+        action = to_compact_context_message(
+            {
+                "role": "user",
+                "content": "把毛巾递了过去。",
+                "actor": {
+                    "actor_id": "player",
+                    "actor_type": "trainer",
+                    "display_name": "训练员",
+                },
+                "event_type": "action",
+                "event_schema_version": 1,
+            }
+        )
+        scene_event = to_compact_context_message(
+            {
+                "role": "user",
+                "content": "开始下雨了。",
+                "actor": {
+                    "actor_id": "narrator",
+                    "actor_type": "narrator",
+                    "display_name": "环境",
+                },
+                "event_type": "scene_event",
+                "event_schema_version": 1,
+            }
+        )
+
+        self.assertEqual(legacy, {"role": "user", "content": "你好"})
+        self.assertEqual(
+            action,
+            {"role": "user", "content": "【训练员动作】把毛巾递了过去。"},
+        )
+        self.assertEqual(
+            scene_event,
+            {"role": "user", "content": "【环境变化】开始下雨了。"},
+        )
 
 
 if __name__ == "__main__":

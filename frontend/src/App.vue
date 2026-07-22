@@ -1,7 +1,7 @@
 <!-- frontend/src/App.vue -->
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue';
-import { useChatStore } from '@/stores/chatStore';
+import { DIALOGUE_INPUT_MODES, useChatStore } from '@/stores/chatStore';
 
 const chatStore = useChatStore();
 const ttsEnabled = import.meta.env.VITE_ENABLE_TTS === 'true';
@@ -22,11 +22,22 @@ const voicePreviewUrl = computed(() => chatStore.voicePreviewUrl);
 const outputDir = computed(() => chatStore.outputDir);
 const restoredHistoryMessages = computed(() => chatStore.restoredHistoryMessages);
 const messages = computed(() => chatStore.messages);
+const queuedEvents = computed(() => chatStore.queuedEvents);
 const isLoading = computed(() => chatStore.isLoading);
 const error = computed(() => chatStore.error);
 const exportNotice = computed(() => chatStore.exportNotice);
 const streamMode = computed(() => chatStore.streamMode);
 const voiceEnabled = computed(() => chatStore.voiceEnabled);
+const dialogueEventsEnabled = computed(() => chatStore.dialogueEventsEnabled);
+const contextEventBatchEnabled = computed(() => chatStore.contextEventBatchEnabled);
+const inputMode = computed(() => chatStore.inputMode);
+const inputModeOptions = Object.entries(DIALOGUE_INPUT_MODES).map(([value, preset]) => ({
+  value,
+  ...preset,
+}));
+const activeInputPreset = computed(() => (
+  DIALOGUE_INPUT_MODES[inputMode.value] || DIALOGUE_INPUT_MODES.dialogue
+));
 const canExportConversation = computed(() => Boolean(selectedCharacter.value && messages.value.length && !isLoading.value));
 const cachedMessageCount = computed(() => chatStore.cachedMessageCount);
 const canImportBrowserCache = computed(() => Boolean(selectedCharacter.value && cachedMessageCount.value && !isLoading.value));
@@ -76,17 +87,46 @@ const handleSelectCharacter = async (name) => {
 };
 
 const handleSend = async () => {
-  if (!messageInput.value.trim()) {
+  if (!messageInput.value.trim() && !queuedEvents.value.length) {
     return;
   }
   const text = messageInput.value;
   messageInput.value = '';
   if (isEditingLastUser.value) {
+    if (!text.trim()) {
+      return;
+    }
     isEditingLastUser.value = false;
-    await chatStore.regenerateFromLastUser(text);
+    await chatStore.regenerateFromLastUser(text, inputMode.value);
     return;
   }
-  await chatStore.sendMessage(text);
+  await chatStore.sendMessage(text, inputMode.value);
+};
+
+const handleQueueMessage = async () => {
+  if (isEditingLastUser.value) {
+    return;
+  }
+  const queued = chatStore.queueMessage(messageInput.value, inputMode.value);
+  if (!queued) {
+    return;
+  }
+  messageInput.value = '';
+  await nextTick();
+  messageInputRef.value?.focus();
+};
+
+const handleRemoveQueuedEvent = (eventId) => {
+  chatStore.removeQueuedEvent(eventId);
+};
+
+const handleClearQueuedEvents = () => {
+  chatStore.clearQueuedEvents();
+};
+
+const handleInputMode = (value) => {
+  chatStore.setInputMode(value);
+  nextTick(() => messageInputRef.value?.focus());
 };
 
 const handleKeydown = async (event) => {
@@ -144,7 +184,9 @@ const handleEditLastUser = async () => {
   if (!canRegenerateLast.value) {
     return;
   }
+  chatStore.clearQueuedEvents();
   messageInput.value = lastUserMessage.value.content || '';
+  chatStore.setInputMode(lastUserMessage.value.inputMode || 'dialogue');
   isEditingLastUser.value = true;
   await nextTick();
   messageInputRef.value?.focus();
@@ -222,6 +264,21 @@ const playAudio = (messageId) => {
   if (audio) {
     audio.play();
   }
+};
+
+const messageActorName = (message) => (
+  message.actor?.display_name
+  || (message.role === 'user' ? '训练员' : selectedCharacter.value || '角色')
+);
+
+const messageEventLabel = (message) => {
+  if (!message.eventType) {
+    return '';
+  }
+  if (message.eventType === 'narration') {
+    return '旁白';
+  }
+  return DIALOGUE_INPUT_MODES[message.inputMode]?.shortLabel || message.eventType;
 };
 
 const formatMessage = (text) => {
@@ -483,9 +540,18 @@ onMounted(() => {
             <p>输入一句话，角色会用指定人格与你对话。</p>
           </div>
 
-          <div v-for="message in messages" :key="message.id" :class="['message', message.role]">
+          <div
+            v-for="message in messages"
+            :key="message.id"
+            :class="['message', message.role, message.inputMode]"
+          >
             <div class="message-meta">
-              <span>{{ message.role === 'user' ? '训练员' : selectedCharacter || '角色' }}</span>
+              <span>
+                {{ messageActorName(message) }}
+                <span v-if="messageEventLabel(message)" class="event-label">
+                  · {{ messageEventLabel(message) }}
+                </span>
+              </span>
               <span class="status" v-if="message.status === 'streaming'">生成中…</span>
             </div>
             <div class="message-body">
@@ -529,24 +595,68 @@ onMounted(() => {
         </section>
 
         <section class="chat-input">
+          <div v-if="dialogueEventsEnabled" class="input-mode-selector" aria-label="消息类型">
+            <button
+              v-for="option in inputModeOptions"
+              :key="option.value"
+              type="button"
+              :class="['input-mode-button', { active: inputMode === option.value }]"
+              :disabled="!selectedCharacter || isLoading"
+              @click="handleInputMode(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <div v-if="queuedEvents.length" class="queued-events">
+            <div class="queued-events-header">
+              <span>待发送事件 {{ queuedEvents.length }} 条</span>
+              <button type="button" class="inline-link" @click="handleClearQueuedEvents">全部清除</button>
+            </div>
+            <div class="queued-event-list">
+              <div v-for="event in queuedEvents" :key="event.id" class="queued-event">
+                <span class="queued-event-type">
+                  {{ DIALOGUE_INPUT_MODES[event.inputMode]?.shortLabel || event.event_type }}
+                </span>
+                <span class="queued-event-content">{{ event.content }}</span>
+                <button
+                  type="button"
+                  class="queued-event-remove"
+                  :aria-label="`删除${event.content}`"
+                  @click="handleRemoveQueuedEvent(event.id)"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          </div>
           <div class="input-box">
             <textarea
               ref="messageInputRef"
               v-model="messageInput"
               rows="3"
-              placeholder="输入对话内容，Enter 发送，Shift+Enter 换行"
+              :placeholder="dialogueEventsEnabled ? activeInputPreset.placeholder : '输入对话内容，Enter 发送，Shift+Enter 换行'"
               @keydown="handleKeydown"
               @compositionstart="handleCompositionStart"
               @compositionend="handleCompositionEnd"
               :disabled="!selectedCharacter || isLoading"
             ></textarea>
-            <button
-              class="send-button"
-              :disabled="!selectedCharacter || isLoading || !messageInput.trim()"
-              @click="handleSend"
-            >
-              发送
-            </button>
+            <div class="input-actions">
+              <button
+                v-if="contextEventBatchEnabled"
+                class="queue-button"
+                :disabled="!selectedCharacter || isLoading || isEditingLastUser || !messageInput.trim()"
+                @click="handleQueueMessage"
+              >
+                加入
+              </button>
+              <button
+                class="send-button"
+                :disabled="!selectedCharacter || isLoading || (!messageInput.trim() && !queuedEvents.length)"
+                @click="handleSend"
+              >
+                发送
+              </button>
+            </div>
           </div>
           <div class="meta-row">
             <span v-if="error" class="error">{{ error }}</span>
@@ -555,7 +665,17 @@ onMounted(() => {
               正在编辑上一句，发送后会从该轮重新生成。
               <button class="inline-link" type="button" @click="handleCancelEditLastUser">取消</button>
             </span>
-            <span v-else class="hint">支持多轮文本对话；历史为临时保存，不保证长期保留。</span>
+            <span v-else-if="queuedEvents.length" class="hint">
+              “加入”不会调用模型；点击“发送”后会把这些事件按顺序加入上下文，并只生成一次回复。
+            </span>
+            <span v-else-if="dialogueEventsEnabled" class="hint">
+              {{ inputMode === 'scene_event'
+                ? '环境变化会作为共享剧情信息发送，当前角色会观察并主动回应。'
+                : inputMode === 'action'
+                  ? '动作会明确标记为训练员行为，避免被误认为对白。'
+                  : '对白会明确标记为训练员发言。' }}
+            </span>
+            <span v-else class="hint">支持多轮文本对话；当前后端使用兼容对话协议。</span>
           </div>
         </section>
       </main>
@@ -879,6 +999,16 @@ h1 {
   border-color: var(--border);
 }
 
+.message.user.action {
+  border-left: 4px solid var(--accent-warm);
+}
+
+.message.user.scene_event {
+  background: rgba(64, 91, 127, 0.08);
+  border-color: rgba(64, 91, 127, 0.24);
+  border-left: 4px solid #546d8c;
+}
+
 .message.assistant {
   background: rgba(26, 111, 107, 0.08);
   border-color: rgba(26, 111, 107, 0.2);
@@ -890,6 +1020,11 @@ h1 {
   font-size: 12px;
   color: var(--muted);
   margin-bottom: 6px;
+}
+
+.event-label {
+  color: var(--accent-strong);
+  font-weight: 600;
 }
 
 .message-body {
@@ -977,9 +1112,111 @@ h1 {
   box-shadow: var(--shadow);
 }
 
+.input-mode-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.input-mode-button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  padding: 7px 13px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+
+.input-mode-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.input-mode-button.active {
+  border-color: var(--accent);
+  background: rgba(26, 111, 107, 0.12);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.input-mode-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.queued-events {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px dashed rgba(26, 111, 107, 0.38);
+  border-radius: 14px;
+  background: rgba(26, 111, 107, 0.05);
+}
+
+.queued-events-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.queued-event-list {
+  display: grid;
+  gap: 7px;
+}
+
+.queued-event {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.queued-event-type {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(26, 111, 107, 0.13);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.queued-event-content {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queued-event-remove {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .input-box {
   display: flex;
   gap: 12px;
+}
+
+.input-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 textarea {
@@ -999,11 +1236,28 @@ textarea {
   border-radius: 14px;
   cursor: pointer;
   font-weight: 600;
+  flex: 1;
 }
 
 .send-button:disabled {
   background: #d6b59f;
   cursor: not-allowed;
+}
+
+.queue-button {
+  flex: 1;
+  min-width: 72px;
+  border: 1px solid rgba(26, 111, 107, 0.38);
+  border-radius: 14px;
+  background: rgba(26, 111, 107, 0.08);
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.queue-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .meta-row {
@@ -1038,7 +1292,12 @@ textarea {
     flex-direction: column;
   }
 
-  .send-button {
+  .input-actions {
+    flex-direction: row;
+  }
+
+  .send-button,
+  .queue-button {
     height: 44px;
   }
 }

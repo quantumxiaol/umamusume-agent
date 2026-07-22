@@ -71,6 +71,7 @@ class _FakeLlmClient:
 
 
 class _FakeCharacter:
+    id = "test_character"
     name_zh = "测试角色"
     name_en = "test_character"
     name_jp = "テスト"
@@ -125,7 +126,11 @@ class _FakeSession:
             }
             self.history.append(ds._to_compact_context_message(record))
         else:
-            self.history.append({"role": role, "content": content})
+            self.history.append(
+                ds._to_compact_context_message(
+                    {"role": role, "content": content, **metadata}
+                )
+            )
         self.message_count += 1
         self.touch()
 
@@ -202,6 +207,121 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             [item[0] for item in session.added_messages],
             ["user", "assistant"],
         )
+
+    async def test_scene_event_is_structured_and_rendered_for_model(self):
+        session = self._prepare_session("scene-event-test")
+
+        response = await self.client.post(
+            "/chat",
+            json={
+                "session_id": session.session_id,
+                "message": "夜幕降临，训练场的灯依次亮了起来。",
+                "speaker": {
+                    "actor_id": "narrator",
+                    "actor_type": "narrator",
+                    "display_name": "环境",
+                },
+                "event_type": "scene_event",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["event_schema_version"], 1)
+        self.assertEqual(payload["speaker"]["actor_id"], "test_character")
+        self.assertEqual(payload["event_type"], "dialogue")
+        self.assertEqual(payload["target_actor_ids"], [])
+        self.assertEqual(
+            payload["message"]["actor"]["display_name"],
+            "测试角色",
+        )
+
+        completion_call = ds.llm_client.completions.calls[0]
+        self.assertEqual(
+            completion_call["messages"][-1],
+            {
+                "role": "user",
+                "content": "【环境变化】夜幕降临，训练场的灯依次亮了起来。",
+            },
+        )
+        self.assertEqual(
+            session.added_messages[0][2]["event_type"],
+            "scene_event",
+        )
+        self.assertEqual(
+            session.added_messages[1][2]["actor"]["actor_id"],
+            "test_character",
+        )
+
+    async def test_context_events_are_added_before_one_generated_reply(self):
+        session = self._prepare_session("context-events-test")
+
+        response = await self.client.post(
+            "/chat",
+            json={
+                "session_id": session.session_id,
+                "context_events": [
+                    {
+                        "content": "把毛巾放在长椅上。",
+                        "speaker": {
+                            "actor_id": "player",
+                            "actor_type": "trainer",
+                            "display_name": "训练员",
+                        },
+                        "event_type": "action",
+                    },
+                    {
+                        "content": "训练场的灯亮了起来。",
+                        "speaker": {
+                            "actor_id": "narrator",
+                            "actor_type": "narrator",
+                            "display_name": "环境",
+                        },
+                        "event_type": "scene_event",
+                    },
+                ],
+                "message": "今天就练到这里吧。",
+                "speaker": {
+                    "actor_id": "player",
+                    "actor_type": "trainer",
+                    "display_name": "训练员",
+                },
+                "event_type": "dialogue",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(ds.llm_client.completions.calls), 1)
+        completion_messages = ds.llm_client.completions.calls[0]["messages"]
+        self.assertEqual(
+            completion_messages[-3:],
+            [
+                {
+                    "role": "user",
+                    "content": "【训练员动作】把毛巾放在长椅上。",
+                },
+                {
+                    "role": "user",
+                    "content": "【环境变化】训练场的灯亮了起来。",
+                },
+                {
+                    "role": "user",
+                    "content": "【训练员对白】今天就练到这里吧。",
+                },
+            ],
+        )
+        self.assertEqual(
+            [message[0] for message in session.added_messages],
+            ["user", "user", "user", "assistant"],
+        )
+
+    async def test_capabilities_advertise_dialogue_events(self):
+        response = await self.client.get("/capabilities")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["dialogue_events"], 1)
+        self.assertEqual(response.json()["context_event_batch"], 1)
+        self.assertEqual(response.json()["director_mode"], 0)
 
     async def test_json_stream_event_order_remains_compatible(self):
         session = self._prepare_session("stream-test")

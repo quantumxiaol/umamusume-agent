@@ -118,6 +118,10 @@ class DialogueSession:
         source_format: str = "text",
         schema_version: Optional[int] = None,
         imported_timestamp: Optional[str] = None,
+        actor: Optional[Dict[str, Any]] = None,
+        event_type: Optional[str] = None,
+        target_actor_ids: Optional[list[str]] = None,
+        event_schema_version: Optional[int] = None,
     ):
         """Add a message to model history and append its JSONL event."""
 
@@ -132,10 +136,21 @@ class DialogueSession:
                     "schema_version": (
                         schema_version or STRUCTURED_REPLY_SCHEMA_VERSION
                     ),
+                    "actor": actor,
+                    "event_type": event_type,
+                    "target_actor_ids": target_actor_ids,
+                    "event_schema_version": event_schema_version,
                 }
             )
         else:
-            semantic_record = {"role": role, "content": content}
+            semantic_record = {
+                "role": role,
+                "content": content,
+                "actor": actor,
+                "event_type": event_type,
+                "target_actor_ids": target_actor_ids,
+                "event_schema_version": event_schema_version,
+            }
 
         self.history.append(to_compact_context_message(semantic_record))
         self.message_count += 1
@@ -149,6 +164,23 @@ class DialogueSession:
         }
         if imported_timestamp:
             payload["imported_timestamp"] = imported_timestamp
+        if any(
+            value is not None
+            for value in (
+                actor,
+                event_type,
+                target_actor_ids,
+                event_schema_version,
+            )
+        ):
+            payload.update(
+                {
+                    "actor": actor,
+                    "event_type": event_type or "dialogue",
+                    "target_actor_ids": list(target_actor_ids or []),
+                    "event_schema_version": event_schema_version or 1,
+                }
+            )
         if role == "assistant":
             payload.update(
                 {
@@ -208,6 +240,10 @@ class DialogueSession:
                 source_format=message.get("source_format") or source,
                 schema_version=message.get("schema_version"),
                 imported_timestamp=message.get("timestamp"),
+                actor=message.get("actor") or message.get("speaker"),
+                event_type=message.get("event_type"),
+                target_actor_ids=message.get("target_actor_ids"),
+                event_schema_version=message.get("event_schema_version"),
             )
 
     def get_messages(self, text_only: bool = False) -> list:

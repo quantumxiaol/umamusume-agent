@@ -37,7 +37,15 @@ from ..dialogue.history import (
     resolve_character_query_names,
     slugify,
 )
-from ..dialogue.models import CharacterReplyContext
+from ..dialogue.models import (
+    EVENT_SCHEMA_VERSION,
+    ActorRef,
+    CharacterReplyContext,
+    DialogueEventType,
+    DialogueInputEvent,
+    actor_from_character,
+    default_player_actor,
+)
 from ..dialogue.protocol import (
     SAFE_PARSE_FAILURE_REPLY as _SAFE_PARSE_FAILURE_REPLY,
     STRUCTURED_REPLY_SCHEMA_VERSION as _STRUCTURED_REPLY_SCHEMA_VERSION,
@@ -145,6 +153,10 @@ class DialogueRequest(BaseModel):
     message: str
     generate_voice: bool = False  # 是否生成语音
     text_only: bool = False  # 兼容字段：true 时仅禁用语音生成，回复格式仍为动作/对白
+    speaker: Optional[ActorRef] = None
+    target_actor_ids: Optional[list[str]] = None
+    event_type: Optional[DialogueEventType] = None
+    context_events: Optional[list[DialogueInputEvent]] = None
 
 
 class HistoryImportMessage(BaseModel):
@@ -158,6 +170,11 @@ class HistoryImportMessage(BaseModel):
     schemaVersion: Optional[int] = None
     source_format: Optional[str] = None
     sourceFormat: Optional[str] = None
+    actor: Optional[ActorRef] = None
+    speaker: Optional[ActorRef] = None
+    event_type: Optional[DialogueEventType] = None
+    target_actor_ids: Optional[list[str]] = None
+    event_schema_version: Optional[int] = None
 
 
 class HistoryImportRequest(BaseModel):
@@ -179,6 +196,74 @@ class SessionInfo(BaseModel):
     history_size: int
     output_dir: Optional[str] = None
     history_file: Optional[str] = None
+
+
+def _story_event_metadata(
+    request: DialogueRequest,
+    session: DialogueSession,
+) -> Dict[str, Any]:
+    if not request.context_events and all(
+        value is None
+        for value in (
+            request.speaker,
+            request.event_type,
+            request.target_actor_ids,
+        )
+    ):
+        return {}
+
+    speaker = request.speaker or default_player_actor()
+    return {
+        "actor": speaker.model_dump(),
+        "event_type": request.event_type or "dialogue",
+        "target_actor_ids": list(
+            request.target_actor_ids
+            if request.target_actor_ids is not None
+            else [session.character.id]
+        ),
+        "event_schema_version": EVENT_SCHEMA_VERSION,
+    }
+
+
+def _append_context_events(
+    session: DialogueSession,
+    events: Optional[list[DialogueInputEvent]],
+) -> None:
+    for event in events or []:
+        speaker = event.speaker or default_player_actor()
+        session.add_message(
+            "user",
+            event.content,
+            actor=speaker.model_dump(),
+            event_type=event.event_type or "dialogue",
+            target_actor_ids=list(
+                event.target_actor_ids
+                if event.target_actor_ids is not None
+                else [session.character.id]
+            ),
+            event_schema_version=EVENT_SCHEMA_VERSION,
+        )
+
+
+def _character_reply_event_metadata(
+    request: DialogueRequest,
+    session: DialogueSession,
+) -> Dict[str, Any]:
+    input_metadata = _story_event_metadata(request, session)
+    if not input_metadata:
+        return {}
+    speaker = request.speaker or default_player_actor()
+    event_type = request.event_type or "dialogue"
+    return {
+        "actor": actor_from_character(session.character).model_dump(),
+        "event_type": "dialogue",
+        "target_actor_ids": (
+            []
+            if event_type in {"scene_event", "narration"}
+            else [speaker.actor_id]
+        ),
+        "event_schema_version": EVENT_SCHEMA_VERSION,
+    }
 
 
 # ============= 会话管理 =============
@@ -606,6 +691,23 @@ async def root():
     }
 
 
+@app.get("/capabilities")
+async def capabilities():
+    """Expose additive protocol features for independently deployed clients."""
+    return {
+        "dialogue_api_version": 2,
+        "dialogue_events": EVENT_SCHEMA_VERSION,
+        "context_event_batch": 1,
+        "director_mode": 0,
+        "supported_event_types": [
+            "dialogue",
+            "action",
+            "narration",
+            "scene_event",
+        ],
+    }
+
+
 @app.post("/load_character")
 async def load_character(request: LoadCharacterRequest):
     """
@@ -628,6 +730,7 @@ async def load_character(request: LoadCharacterRequest):
         return {
             "session_id": session.session_id,
             "user_uuid": session.user_uuid,
+            "character_id": character.id,
             "character_name": character.name_zh,
             "character_name_jp": character.name_jp,
             "system_prompt": character.get_system_prompt(),
@@ -669,6 +772,10 @@ async def chat(request: DialogueRequest):
             session=session,
             message=request.message,
             text_only=request.text_only,
+            speaker=request.speaker,
+            event_type=request.event_type,
+            target_actor_ids=request.target_actor_ids,
+            context_events=request.context_events,
         )
         result = turn_result.to_api_dict()
         
@@ -709,6 +816,10 @@ async def chat_stream(request: DialogueRequest):
                     session=session,
                     message=request.message,
                     text_only=request.text_only,
+                    speaker=request.speaker,
+                    event_type=request.event_type,
+                    target_actor_ids=request.target_actor_ids,
+                    context_events=request.context_events,
                 )
 
                 payload = json.dumps(
@@ -732,7 +843,12 @@ async def chat_stream(request: DialogueRequest):
                 return
 
             # 旧两行协议仍保持 token 流式行为。
-            session.add_message("user", request.message)
+            _append_context_events(session, request.context_events)
+            session.add_message(
+                "user",
+                request.message,
+                **_story_event_metadata(request, session),
+            )
             
             # 流式调用 LLM
             stream = await llm_client.chat.completions.create(
@@ -763,6 +879,7 @@ async def chat_stream(request: DialogueRequest):
                 dialogue=structured_reply.dialogue,
                 source_format=structured_reply.source_format,
                 schema_version=structured_reply.schema_version,
+                **_character_reply_event_metadata(request, session),
             )
             
             # 发送完成事件

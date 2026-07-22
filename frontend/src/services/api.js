@@ -54,12 +54,36 @@ export const loadCharacter = async (characterName, forceRebuild = false, userUui
   }
 };
 
-export const chatOnce = async (sessionId, message, generateVoice = false) => {
+export const fetchCapabilities = async () => {
+  try {
+    const response = await apiClient.get('/capabilities');
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+const buildDialogueEventFields = (dialogueEvent) => {
+  if (!dialogueEvent) {
+    return {};
+  }
+  return {
+    speaker: dialogueEvent.speaker || undefined,
+    event_type: dialogueEvent.event_type || undefined,
+    target_actor_ids: dialogueEvent.target_actor_ids || undefined,
+    context_events: dialogueEvent.context_events?.length
+      ? dialogueEvent.context_events
+      : undefined,
+  };
+};
+
+export const chatOnce = async (sessionId, message, generateVoice = false, dialogueEvent = null) => {
   try {
     const response = await apiClient.post('/chat', {
       session_id: sessionId,
       message,
       generate_voice: generateVoice,
+      ...buildDialogueEventFields(dialogueEvent),
     });
     return response.data || {};
   } catch (error) {
@@ -74,7 +98,13 @@ const emitEvent = (onEvent, type, data) => {
   onEvent({ type, data });
 };
 
-export const chatStream = async (sessionId, message, generateVoice = false, onEvent) => {
+export const chatStream = async (
+  sessionId,
+  message,
+  generateVoice = false,
+  onEvent,
+  dialogueEvent = null,
+) => {
   try {
     const url = `${API_BASE_URL}/chat_stream`;
     const response = await fetch(url, {
@@ -86,6 +116,7 @@ export const chatStream = async (sessionId, message, generateVoice = false, onEv
         session_id: sessionId,
         message,
         generate_voice: generateVoice,
+        ...buildDialogueEventFields(dialogueEvent),
       }),
     });
 

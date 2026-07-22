@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..character import CharacterConfig, CharacterManager
-from .protocol import normalize_assistant_record, to_compact_context_message
+from .protocol import (
+    normalize_actor_payload,
+    normalize_assistant_record,
+    to_compact_context_message,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -188,6 +192,30 @@ def parse_history_file(
                     else fallback_safe_name
                 )
 
+            event_metadata: Dict[str, Any] = {}
+            actor = normalize_actor_payload(
+                record.get("actor") or record.get("speaker")
+            )
+            if any(
+                value is not None
+                for value in (
+                    actor,
+                    record.get("event_type"),
+                    record.get("target_actor_ids"),
+                    record.get("event_schema_version"),
+                )
+            ):
+                event_metadata = {
+                    "actor": actor,
+                    "event_type": record.get("event_type") or "dialogue",
+                    "target_actor_ids": list(
+                        record.get("target_actor_ids") or []
+                    ),
+                    "event_schema_version": (
+                        record.get("event_schema_version") or 1
+                    ),
+                }
+
             messages.append(
                 {
                     "session_id": record.get("session_id"),
@@ -200,6 +228,7 @@ def parse_history_file(
                     "timestamp": record.get("timestamp"),
                     "message_index": record.get("message_index"),
                     "character_name_en": message_character_name,
+                    **event_metadata,
                 }
             )
 
@@ -260,6 +289,28 @@ def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
             )
 
         content = (item.content or "").strip()
+        actor = normalize_actor_payload(
+            getattr(item, "actor", None) or getattr(item, "speaker", None)
+        )
+        event_type = getattr(item, "event_type", None)
+        target_actor_ids = getattr(item, "target_actor_ids", None)
+        event_schema_version = getattr(item, "event_schema_version", None)
+        event_metadata: Dict[str, Any] = {}
+        if any(
+            value is not None
+            for value in (
+                actor,
+                event_type,
+                target_actor_ids,
+                event_schema_version,
+            )
+        ):
+            event_metadata = {
+                "actor": actor,
+                "event_type": event_type or "dialogue",
+                "target_actor_ids": list(target_actor_ids or []),
+                "event_schema_version": event_schema_version or 1,
+            }
         if role == "user":
             if not content:
                 continue
@@ -269,6 +320,7 @@ def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
                     "content": content,
                     "timestamp": item.timestamp,
                     "schema_version": item.schema_version or item.schemaVersion,
+                    **event_metadata,
                 }
             )
             continue
@@ -283,6 +335,7 @@ def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
             "source_format": (
                 item.source_format or item.sourceFormat or "import"
             ),
+            **event_metadata,
         }
         if not content and not (
             isinstance(item.dialogue, str) and item.dialogue.strip()
@@ -370,6 +423,17 @@ def load_persistent_history(
                         semantic_record = {
                             "role": "user",
                             "content": content.strip(),
+                            "actor": normalize_actor_payload(
+                                record.get("actor")
+                                or record.get("speaker")
+                            ),
+                            "event_type": record.get("event_type"),
+                            "target_actor_ids": record.get(
+                                "target_actor_ids"
+                            ),
+                            "event_schema_version": record.get(
+                                "event_schema_version"
+                            ),
                         }
 
                     if not str(
@@ -388,4 +452,3 @@ def load_persistent_history(
     if history_max_messages > 0 and len(messages) > history_max_messages:
         messages = messages[-history_max_messages:]
     return messages
-

@@ -380,8 +380,42 @@ def structured_reply_from_legacy_text(
     )
 
 
-def structured_reply_message(reply: StructuredReply, *, role: str = "assistant") -> Dict[str, Any]:
-    return {
+def normalize_actor_payload(value: Any) -> Dict[str, Any] | None:
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    if not isinstance(value, dict):
+        return None
+
+    actor_id = str(value.get("actor_id") or "").strip()
+    actor_type = str(value.get("actor_type") or "").strip()
+    display_name = str(value.get("display_name") or "").strip()
+    if not actor_id or not actor_type or not display_name:
+        return None
+
+    payload: Dict[str, Any] = {
+        "actor_id": actor_id,
+        "actor_type": actor_type,
+        "display_name": display_name,
+    }
+    for key in ("character_id", "role_in_scene"):
+        field_value = value.get(key)
+        if isinstance(field_value, str) and field_value.strip():
+            payload[key] = field_value.strip()
+    return payload
+
+
+def structured_reply_message(
+    reply: StructuredReply,
+    *,
+    role: str = "assistant",
+    actor: Any = None,
+    event_type: str | None = None,
+    target_actor_ids: list[str] | tuple[str, ...] | None = None,
+    event_schema_version: int | None = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
         "schema_version": reply.schema_version,
         "role": role,
         "content": reply.dialogue,
@@ -389,6 +423,17 @@ def structured_reply_message(reply: StructuredReply, *, role: str = "assistant")
         "dialogue": reply.dialogue,
         "source_format": reply.source_format,
     }
+    actor_payload = normalize_actor_payload(actor)
+    if actor_payload is not None:
+        payload.update(
+            {
+                "event_schema_version": event_schema_version or 1,
+                "actor": actor_payload,
+                "event_type": event_type or "dialogue",
+                "target_actor_ids": list(target_actor_ids or []),
+            }
+        )
+    return payload
 
 
 def normalize_assistant_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -441,10 +486,51 @@ def normalize_assistant_record(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def render_story_event_content(record: Dict[str, Any]) -> str:
+    """Render structured world metadata only when it is explicitly present."""
+
+    content = str(record.get("content") or "").strip()
+    actor = normalize_actor_payload(record.get("actor") or record.get("speaker"))
+    event_type = str(record.get("event_type") or "").strip().lower()
+    has_event_metadata = bool(
+        actor
+        or event_type
+        or record.get("event_schema_version")
+    )
+    if not has_event_metadata:
+        return content
+
+    display_name = (
+        str(actor.get("display_name") or "").strip()
+        if actor
+        else "训练员"
+    )
+    actor_type = (
+        str(actor.get("actor_type") or "").strip().lower()
+        if actor
+        else "trainer"
+    )
+
+    if event_type == "scene_event":
+        label = "环境变化"
+    elif event_type == "narration":
+        label = "旁白"
+    elif event_type == "action":
+        label = f"{display_name}动作"
+    elif actor_type == "narrator":
+        label = "环境"
+    else:
+        label = f"{display_name}对白"
+    return f"【{label}】{content}"
+
+
 def to_compact_context_message(record: Dict[str, Any]) -> Dict[str, str]:
     role = record.get("role")
     if role == "user":
-        return {"role": "user", "content": str(record.get("content") or "").strip()}
+        return {
+            "role": "user",
+            "content": render_story_event_content(record),
+        }
 
     assistant_record = normalize_assistant_record({**record, "role": "assistant"})
     action = str(assistant_record.get("action") or "").strip()
@@ -461,4 +547,3 @@ def extract_dialogue_text(text: str) -> str:
     if dialogue_text:
         return dialogue_text
     return strip_stage_directions(text).strip()
-

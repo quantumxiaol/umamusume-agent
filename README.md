@@ -28,6 +28,7 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 
 - 角色管理：从 `characters/` 加载角色配置
 - 对话服务：`/load_character`、`/chat`、`/chat_stream`
+- 剧情事件：单角色页面可发送训练员对白、训练员动作或环境事件，角色会基于明确的说话者与事件类型回应
 - 历史落盘：按 `user_uuid/角色/时间戳/session` 写入 `jsonl` 对话日志；assistant 消息使用 v2 结构字段保存
 - 对话格式：后端主协议为 `{"action":"...","dialogue":"..."}` JSON；API 响应返回 `action`、`dialogue`、`message`，不再返回旧两行 `reply`
 - 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
@@ -154,6 +155,43 @@ curl -s http://127.0.0.1:1111/
 
 ## 对话协议与流式行为
 
+### 可选剧情事件协议（v1）
+
+`GET /capabilities` 用于前后端独立部署时协商能力。`dialogue_events >= 1`
+表示后端支持剧情事件；旧后端没有该接口时，前端会自动隐藏消息类型选择并继续发送旧请求。
+`context_event_batch >= 1` 表示支持“加入”队列后一次生成回复。
+
+原有 `/chat` 和 `/chat_stream` 请求不变。只有选择消息类型后，前端才追加以下可选字段：
+
+```json
+{
+  "session_id": "...",
+  "message": "夜幕降临，窗外开始下雨。",
+  "speaker": {
+    "actor_id": "narrator",
+    "actor_type": "narrator",
+    "display_name": "环境",
+    "role_in_scene": "environment"
+  },
+  "event_type": "scene_event"
+}
+```
+
+当前单角色页面提供三种输入：
+
+- `dialogue`：训练员对白。
+- `action`：训练员动作。
+- `scene_event`：时间、天气、地点等环境变化；当前赛马娘会观察并主动回应。
+
+输入框的“加入”按钮只把当前事件暂存在浏览器中，不会请求 LLM。“发送”会把待发送
+事件作为 `context_events` 按顺序提交，最后一个事件作为本轮 `message`，整组只生成一次
+赛马娘回复。待发送列表支持逐条删除或全部清除。
+
+启用事件协议后，请求与角色回复会把 `actor`、`event_type`、
+`target_actor_ids`、`event_schema_version` 写入 JSONL 历史、浏览器缓存和导出文件。
+构造 LLM 上下文时会渲染为 `【训练员对白】`、`【训练员动作】`、
+`【环境变化】` 等明确标签。未携带事件字段的旧请求、旧响应和旧历史保持原样。
+
 ### JSON 回复协议
 
 默认启用 JSON 回复主链路。模型被要求只输出：
@@ -258,6 +296,9 @@ Pages 目标地址将是：
 
 如果 Space 上不启用 TTS，可以不配置 `INDEXTTS_MCP_*`，前端默认也是关闭语音生成。
 
+剧情事件升级建议先发布 Hugging Face 后端，再发布 GitHub Pages 前端。新后端兼容旧前端；
+新前端也会通过 `/capabilities` 自动兼容尚未升级的旧后端，因此两个部署不要求同时完成。
+
 ## 前端使用说明（最新）
 
 ```bash
@@ -270,9 +311,10 @@ pnpm run dev
 
 前端功能与当前后端已同步：
 - 角色切换会重新调用 `/load_character`，并展示 `已恢复历史 N 条`。
+- 新后端启用剧情事件能力时，输入框上方可切换“训练员对白 / 训练员动作 / 环境事件”；旧后端下自动回退旧界面。
 - 聊天窗口会显示当前用户与该角色的历史对话，不会在切角色时直接丢失历史能力。
 - 点击 `查看历史` 会调用 `/history` 刷新该角色历史。
-- 对话会以 v2 结构同步写入当前浏览器的 `localStorage` 缓存，并兼容迁移旧 v1 `role/content` 缓存。
+- 对话会以 v2 结构同步写入当前浏览器的 `localStorage` 缓存；剧情事件使用独立的 `event_schema_version=1`，并兼容迁移旧 v1 `role/content` 缓存。
 - 可将当前显示的对话复制或下载为 JSON/Markdown；JSON 是权威恢复格式，Markdown 末尾会附带 v2 JSON block；也可从 Markdown/JSON 文件手动导入历史，导入后会替换当前 session 上下文并同步到后端。
 - 可点击 `重生成上一轮` 直接删除最近一条训练员发言及其后的回复，按原文重新生成。
 - 可点击 `编辑上一句` 将最近一条训练员发言放回输入框，修改后发送；前端会先截断该轮之后的历史并同步后端，再重新生成。

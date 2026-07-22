@@ -3,6 +3,7 @@ import { defineStore } from 'pinia';
 import {
   API_BASE_URL,
   fetchCharacters,
+  fetchCapabilities,
   loadCharacter,
   chatOnce,
   chatStream,
@@ -15,7 +16,108 @@ const USER_UUID_STORAGE_KEY = 'umamusume_user_uuid';
 const HISTORY_CACHE_PREFIX_V1 = 'umamusume_history_cache_v1';
 const HISTORY_CACHE_PREFIX_V2 = 'umamusume_history_cache_v2';
 const HISTORY_SCHEMA_VERSION = 2;
+const EVENT_SCHEMA_VERSION = 1;
 const TTS_ENABLED = import.meta.env.VITE_ENABLE_TTS === 'true';
+
+export const DIALOGUE_INPUT_MODES = Object.freeze({
+  dialogue: {
+    eventType: 'dialogue',
+    label: '训练员对白',
+    shortLabel: '对白',
+    placeholder: '输入训练员要说的话，Enter 发送，Shift+Enter 换行',
+    speaker: {
+      actor_id: 'player',
+      actor_type: 'trainer',
+      display_name: '训练员',
+      role_in_scene: 'trainer',
+    },
+  },
+  action: {
+    eventType: 'action',
+    label: '训练员动作',
+    shortLabel: '动作',
+    placeholder: '描述训练员的动作，例如：把毛巾递给她。',
+    speaker: {
+      actor_id: 'player',
+      actor_type: 'trainer',
+      display_name: '训练员',
+      role_in_scene: 'trainer',
+    },
+  },
+  scene_event: {
+    eventType: 'scene_event',
+    label: '环境事件',
+    shortLabel: '环境',
+    placeholder: '描述时间、天气或环境变化，例如：夜幕降临，开始下起小雨。',
+    speaker: {
+      actor_id: 'narrator',
+      actor_type: 'narrator',
+      display_name: '环境',
+      role_in_scene: 'environment',
+    },
+  },
+});
+
+const normalizeActor = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const actorId = String(value.actor_id || value.actorId || '').trim();
+  const actorType = String(value.actor_type || value.actorType || '').trim();
+  const displayName = String(value.display_name || value.displayName || '').trim();
+  if (!actorId || !actorType || !displayName) {
+    return null;
+  }
+  return {
+    actor_id: actorId,
+    actor_type: actorType,
+    display_name: displayName,
+    ...(value.character_id || value.characterId ? {
+      character_id: value.character_id || value.characterId,
+    } : {}),
+    ...(value.role_in_scene || value.roleInScene ? {
+      role_in_scene: value.role_in_scene || value.roleInScene,
+    } : {}),
+  };
+};
+
+const inputModeFromEvent = (actor, eventType) => {
+  if (eventType === 'scene_event' || eventType === 'narration' || actor?.actor_type === 'narrator') {
+    return 'scene_event';
+  }
+  if (eventType === 'action') {
+    return 'action';
+  }
+  return 'dialogue';
+};
+
+const createDialogueEvent = (inputMode) => {
+  const normalizedMode = DIALOGUE_INPUT_MODES[inputMode] ? inputMode : 'dialogue';
+  const preset = DIALOGUE_INPUT_MODES[normalizedMode];
+  return {
+    inputMode: normalizedMode,
+    speaker: { ...preset.speaker },
+    event_type: preset.eventType,
+  };
+};
+
+const createQueuedEvent = (content, inputMode) => {
+  const event = createDialogueEvent(inputMode);
+  return {
+    id: `queued-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    content: String(content || '').trim(),
+    ...event,
+  };
+};
+
+const queuedEventToRequest = (event) => ({
+  content: event.content,
+  speaker: event.speaker,
+  event_type: event.event_type,
+  ...(event.target_actor_ids?.length ? {
+    target_actor_ids: [...event.target_actor_ids],
+  } : {}),
+});
 
 const getOrCreateUserUuid = () => {
   const cached = localStorage.getItem(USER_UUID_STORAGE_KEY);
@@ -42,6 +144,16 @@ const createMessage = (role, content, extra = {}) => ({
   createdAt: extra.createdAt || new Date().toISOString(),
   schemaVersion: extra.schemaVersion || extra.schema_version || (role === 'assistant' ? HISTORY_SCHEMA_VERSION : undefined),
   sourceFormat: extra.sourceFormat || extra.source_format || (role === 'assistant' ? 'legacy_text' : 'text'),
+  actor: normalizeActor(extra.actor || extra.speaker),
+  eventType: extra.eventType || extra.event_type || '',
+  targetActorIds: Array.isArray(extra.targetActorIds || extra.target_actor_ids)
+    ? [...(extra.targetActorIds || extra.target_actor_ids)]
+    : [],
+  eventSchemaVersion: extra.eventSchemaVersion || extra.event_schema_version || undefined,
+  inputMode: extra.inputMode || inputModeFromEvent(
+    normalizeActor(extra.actor || extra.speaker),
+    extra.eventType || extra.event_type || '',
+  ),
 });
 
 const resolveAudioUrl = (url) => {
@@ -126,6 +238,24 @@ const normalizeRole = (value) => {
     return 'user';
   }
   return '';
+};
+
+const eventMetadataFromRecord = (record) => {
+  const speaker = typeof record?.speaker === 'object' ? record.speaker : null;
+  const actor = normalizeActor(record?.actor || speaker);
+  const eventType = String(record?.eventType || record?.event_type || '').trim();
+  const rawTargetActorIds = record?.targetActorIds || record?.target_actor_ids;
+  const targetActorIds = Array.isArray(rawTargetActorIds)
+    ? rawTargetActorIds.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  const eventSchemaVersion = record?.eventSchemaVersion || record?.event_schema_version;
+
+  return {
+    ...(actor ? { actor } : {}),
+    ...(eventType ? { event_type: eventType } : {}),
+    ...(targetActorIds.length ? { target_actor_ids: targetActorIds } : {}),
+    ...(eventSchemaVersion ? { event_schema_version: eventSchemaVersion } : {}),
+  };
 };
 
 const parseJsonObjectText = (text) => {
@@ -247,12 +377,14 @@ const parseAssistantRecord = (record) => {
 };
 
 const normalizeConversationRecord = (record) => {
-  const role = normalizeRole(record?.role || record?.speaker);
+  const legacySpeaker = typeof record?.speaker === 'string' ? record.speaker : '';
+  const role = normalizeRole(record?.role || legacySpeaker);
   if (!role) {
     return null;
   }
 
   const timestamp = record?.timestamp || record?.createdAt || record?.created_at || new Date().toISOString();
+  const eventMetadata = eventMetadataFromRecord(record);
   if (role === 'user') {
     const content = String(record?.content || record?.text || '').trim();
     if (!content) {
@@ -263,6 +395,7 @@ const normalizeConversationRecord = (record) => {
       content,
       timestamp,
       schemaVersion: HISTORY_SCHEMA_VERSION,
+      ...eventMetadata,
     };
   }
 
@@ -280,6 +413,7 @@ const normalizeConversationRecord = (record) => {
     timestamp,
     schemaVersion: record?.schemaVersion || record?.schema_version || HISTORY_SCHEMA_VERSION,
     sourceFormat: parsed.sourceFormat || 'legacy_text',
+    ...eventMetadata,
   };
 };
 
@@ -307,6 +441,10 @@ const messageToRecord = (message) => ({
     schemaVersion: HISTORY_SCHEMA_VERSION,
   }),
   createdAt: message.createdAt || new Date().toISOString(),
+  ...(message.actor ? { actor: message.actor } : {}),
+  ...(message.eventType ? { event_type: message.eventType } : {}),
+  ...(message.targetActorIds?.length ? { target_actor_ids: [...message.targetActorIds] } : {}),
+  ...(message.eventSchemaVersion ? { event_schema_version: message.eventSchemaVersion } : {}),
 });
 
 const readHistoryCache = (userUuid, characterName) => {
@@ -455,8 +593,13 @@ const parseImportedConversationText = (text) => {
 export const useChatStore = defineStore('chat', {
   state: () => ({
     characters: [],
+    capabilities: {},
+    dialogueEventsEnabled: false,
+    contextEventBatchEnabled: false,
+    inputMode: 'dialogue',
     userUuid: '',
     selectedCharacter: '',
+    characterId: '',
     sessionId: '',
     systemPrompt: '',
     voicePreviewUrl: '',
@@ -464,6 +607,7 @@ export const useChatStore = defineStore('chat', {
     restoredHistoryMessages: 0,
     historyCharacters: [],
     messages: [],
+    queuedEvents: [],
     isLoading: false,
     error: null,
     exportNotice: '',
@@ -478,11 +622,27 @@ export const useChatStore = defineStore('chat', {
   actions: {
     async initCharacters() {
       this.userUuid = getOrCreateUserUuid();
-      try {
-        const data = await fetchCharacters();
-        this.characters = data.characters || [];
-      } catch (err) {
-        this.error = err.message || '获取角色失败。';
+      const [charactersResult, capabilitiesResult] = await Promise.allSettled([
+        fetchCharacters(),
+        fetchCapabilities(),
+      ]);
+
+      if (charactersResult.status === 'fulfilled') {
+        this.characters = charactersResult.value.characters || [];
+      } else {
+        this.error = charactersResult.reason?.message || '获取角色失败。';
+      }
+
+      if (capabilitiesResult.status === 'fulfilled') {
+        const capabilities = capabilitiesResult.value || {};
+        this.capabilities = capabilities;
+        this.dialogueEventsEnabled = Number(capabilities.dialogue_events || 0) >= EVENT_SCHEMA_VERSION;
+        this.contextEventBatchEnabled = Number(capabilities.context_event_batch || 0) >= 1;
+      } else {
+        // 前后端可独立部署：旧后端没有能力接口时，前端自动退回旧对话协议。
+        this.capabilities = {};
+        this.dialogueEventsEnabled = false;
+        this.contextEventBatchEnabled = false;
       }
     },
 
@@ -502,12 +662,14 @@ export const useChatStore = defineStore('chat', {
         this.userUuid = data.user_uuid || userUuid;
         localStorage.setItem(USER_UUID_STORAGE_KEY, this.userUuid);
         this.selectedCharacter = name;
+        this.characterId = data.character_id || '';
         this.sessionId = data.session_id || '';
         this.systemPrompt = data.system_prompt || '';
         this.voicePreviewUrl = TTS_ENABLED ? resolveAudioUrl(data.voice_preview_url || '') : '';
         this.outputDir = data.output_dir || '';
         this.restoredHistoryMessages = Number(data.restored_history_messages || 0);
         this.exportNotice = '';
+        this.queuedEvents = [];
         this._refreshCacheInfo(name);
         this._clearVoicePollers();
         await this.refreshHistory(name);
@@ -524,6 +686,40 @@ export const useChatStore = defineStore('chat', {
 
     setVoiceEnabled(value) {
       this.voiceEnabled = TTS_ENABLED ? value : false;
+    },
+
+    setInputMode(value) {
+      if (DIALOGUE_INPUT_MODES[value]) {
+        this.inputMode = value;
+      }
+    },
+
+    queueMessage(text, requestedInputMode = this.inputMode) {
+      const content = String(text || '').trim();
+      if (!content) {
+        this.error = '请输入要加入的内容。';
+        return false;
+      }
+      if (!this.sessionId) {
+        this.error = '请先加载角色。';
+        return false;
+      }
+      if (!this.contextEventBatchEnabled) {
+        this.error = '当前后端不支持剧情事件队列。';
+        return false;
+      }
+      this.queuedEvents.push(createQueuedEvent(content, requestedInputMode));
+      this.error = null;
+      this.exportNotice = '';
+      return true;
+    },
+
+    removeQueuedEvent(eventId) {
+      this.queuedEvents = this.queuedEvents.filter((event) => event.id !== eventId);
+    },
+
+    clearQueuedEvents() {
+      this.queuedEvents = [];
     },
 
     _refreshCacheInfo(characterName = this.selectedCharacter) {
@@ -642,6 +838,10 @@ export const useChatStore = defineStore('chat', {
           legacyReply: normalized.legacyReply,
           schemaVersion: normalized.schemaVersion,
           sourceFormat: normalized.sourceFormat,
+          actor: normalized.actor,
+          eventType: normalized.event_type,
+          targetActorIds: normalized.target_actor_ids,
+          eventSchemaVersion: normalized.event_schema_version,
           renderMode: role === 'assistant' ? 'structured' : 'structured',
           status: 'ready',
         });
@@ -681,6 +881,7 @@ export const useChatStore = defineStore('chat', {
           return;
         }
         this.messages = [];
+        this.queuedEvents = [];
         this.restoredHistoryMessages = 0;
         this.exportNotice = '';
         this._removeCurrentConversationCache();
@@ -721,7 +922,7 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
-    async regenerateFromLastUser(editedText = '') {
+    async regenerateFromLastUser(editedText = '', requestedInputMode = '') {
       if (this.isLoading) {
         return false;
       }
@@ -732,6 +933,7 @@ export const useChatStore = defineStore('chat', {
       }
 
       const original = this.messages[userIndex];
+      this.queuedEvents = [];
       const text = String(editedText || original.content || '').trim();
       if (!text) {
         this.error = '重生成内容不能为空。';
@@ -749,12 +951,16 @@ export const useChatStore = defineStore('chat', {
         return false;
       }
 
-      await this.sendMessage(text);
+      await this.sendMessage(text, requestedInputMode || original.inputMode || this.inputMode);
       return !this.error;
     },
 
-    async sendMessage(text) {
-      if (!text.trim()) {
+    async sendMessage(text, requestedInputMode = this.inputMode) {
+      const content = String(text || '').trim();
+      const pendingEvents = this.dialogueEventsEnabled
+        ? [...this.queuedEvents]
+        : [];
+      if (!content && !pendingEvents.length) {
         this.error = '请输入内容。';
         return;
       }
@@ -763,8 +969,36 @@ export const useChatStore = defineStore('chat', {
         return;
       }
 
-      const userMessage = createMessage('user', text);
-      this.messages.push(userMessage);
+      let finalText = content;
+      let dialogueEvent = null;
+      if (this.dialogueEventsEnabled) {
+        const outgoingEvents = [...pendingEvents];
+        if (content) {
+          outgoingEvents.push(createQueuedEvent(content, requestedInputMode));
+        }
+        const finalEvent = outgoingEvents[outgoingEvents.length - 1];
+        const contextEvents = outgoingEvents.slice(0, -1);
+        finalText = finalEvent.content;
+        dialogueEvent = {
+          inputMode: finalEvent.inputMode,
+          speaker: finalEvent.speaker,
+          event_type: finalEvent.event_type,
+          target_actor_ids: finalEvent.target_actor_ids,
+          context_events: contextEvents.map(queuedEventToRequest),
+        };
+        outgoingEvents.forEach((event) => {
+          this.messages.push(createMessage('user', event.content, {
+            actor: event.speaker,
+            eventType: event.event_type,
+            targetActorIds: event.target_actor_ids,
+            eventSchemaVersion: EVENT_SCHEMA_VERSION,
+            inputMode: event.inputMode,
+          }));
+        });
+        this.queuedEvents = [];
+      } else {
+        this.messages.push(createMessage('user', content));
+      }
       this.error = null;
       this.exportNotice = '';
 
@@ -779,7 +1013,7 @@ export const useChatStore = defineStore('chat', {
 
         await chatStream(
           this.sessionId,
-          text,
+          finalText,
           TTS_ENABLED && this.voiceEnabled,
           (event) => {
             const { type, data } = event;
@@ -807,6 +1041,11 @@ export const useChatStore = defineStore('chat', {
               target.legacyReply = data?.reply || structured?.legacyReply || '';
               target.schemaVersion = structured?.schemaVersion || HISTORY_SCHEMA_VERSION;
               target.sourceFormat = structured?.sourceFormat || 'json_v2';
+              target.actor = structured?.actor || null;
+              target.eventType = structured?.event_type || '';
+              target.targetActorIds = structured?.target_actor_ids || [];
+              target.eventSchemaVersion = structured?.event_schema_version || undefined;
+              target.inputMode = inputModeFromEvent(target.actor, target.eventType);
               target.renderMode = 'structured';
             } else if (type === 'voice_pending' && TTS_ENABLED) {
               target.voice = {
@@ -825,12 +1064,18 @@ export const useChatStore = defineStore('chat', {
               target.status = 'ready';
               this.isLoading = false;
             }
-          }
+          },
+          dialogueEvent,
         );
       } else {
         this.isLoading = true;
         try {
-          const data = await chatOnce(this.sessionId, text, TTS_ENABLED && this.voiceEnabled);
+          const data = await chatOnce(
+            this.sessionId,
+            finalText,
+            TTS_ENABLED && this.voiceEnabled,
+            dialogueEvent,
+          );
           if (data.error) {
             this.error = data.error;
           } else {
@@ -847,6 +1092,10 @@ export const useChatStore = defineStore('chat', {
               legacyReply: data.reply || structured?.legacyReply || '',
               schemaVersion: structured?.schemaVersion || HISTORY_SCHEMA_VERSION,
               sourceFormat: structured?.sourceFormat || 'json_v2',
+              actor: structured?.actor,
+              eventType: structured?.event_type,
+              targetActorIds: structured?.target_actor_ids,
+              eventSchemaVersion: structured?.event_schema_version,
               renderMode: 'structured',
             });
             if (TTS_ENABLED && data.voice) {
@@ -869,6 +1118,7 @@ export const useChatStore = defineStore('chat', {
 
     clearMessages() {
       this.messages = [];
+      this.queuedEvents = [];
       this._clearVoicePollers();
     },
 
@@ -885,6 +1135,7 @@ export const useChatStore = defineStore('chat', {
         this.exportNotice = '未找到可导入的对话消息。';
         return false;
       }
+      this.queuedEvents = [];
 
       let backendSynced = false;
       try {
@@ -902,6 +1153,10 @@ export const useChatStore = defineStore('chat', {
         legacyReply: record.legacyReply,
         schemaVersion: record.schemaVersion,
         sourceFormat: record.sourceFormat,
+        actor: record.actor,
+        eventType: record.event_type,
+        targetActorIds: record.target_actor_ids,
+        eventSchemaVersion: record.event_schema_version,
         renderMode: 'structured',
         status: 'ready',
       }));
@@ -946,6 +1201,9 @@ export const useChatStore = defineStore('chat', {
       const characterName = this.selectedCharacter || '未选择角色';
       return {
         schema_version: HISTORY_SCHEMA_VERSION,
+        ...(this.messages.some((message) => message.eventSchemaVersion) ? {
+          event_schema_version: EVENT_SCHEMA_VERSION,
+        } : {}),
         app: 'umamusume-agent',
         character: characterName,
         user_uuid: this.userUuid,
@@ -974,9 +1232,13 @@ export const useChatStore = defineStore('chat', {
       ];
 
       this.messages.forEach((message, index) => {
-        const speaker = message.role === 'assistant' ? characterName : '训练员';
+        const speaker = message.actor?.display_name
+          || (message.role === 'assistant' ? characterName : '训练员');
+        const eventLabel = message.eventType
+          ? ` · ${DIALOGUE_INPUT_MODES[message.inputMode]?.shortLabel || message.eventType}`
+          : '';
         const status = message.status === 'streaming' ? '（生成中）' : '';
-        lines.push(`### ${index + 1}. ${speaker}${status}`);
+        lines.push(`### ${index + 1}. ${speaker}${eventLabel}${status}`);
         lines.push('');
         if (message.role === 'assistant') {
           const action = String(message.action || '').trim();

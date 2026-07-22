@@ -44,12 +44,34 @@ responses.
 
 - `POST /chat` accepts the original payload and returns
   `action`, `dialogue`, and `message`.
+- Story event fields are additive. Requests without `speaker`, `event_type`,
+  and `target_actor_ids` keep the exact legacy response shape.
+- `GET /capabilities` lets a separately deployed frontend enable story events
+  only after the Hugging Face backend advertises `dialogue_events=1`.
 - JSON-mode `POST /chat_stream` emits `structured_reply` before `done`.
 - Disabled JSON mode preserves the legacy token stream.
 - Assistant history remains schema version 2 and restores legacy records.
 - TTS receives only the parsed `dialogue` field.
 - The Hugging Face entry point remains the root `app.py` importing
   `umamusume_agent.server.dialogue_server:app` on port 7860.
+
+## Story events (phase 2)
+
+`ActorRef` identifies the trainer, current Umamusume, narrator/environment, or
+a future NPC/director. `event_type` describes whether content is dialogue, an
+action, narration, or a scene event. Metadata is stored alongside semantic
+history, while the character model receives stable natural-language labels
+such as `【训练员动作】` and `【环境变化】`.
+
+The current UI remains a single-character session: environment events cause
+the selected character to react. Multi-character scheduling and shared scene
+memory remain phase 3 concerns and do not live in `DialogueService`.
+
+The phase-2 composer may stage several events locally. On final send, earlier
+items are submitted as `context_events` and the last item remains the ordinary
+request message. `DialogueService` appends every input in order, builds context
+once, and invokes the character runtime once. Staging alone never mutates the
+server session or calls the model.
 
 ## Regression tests
 
