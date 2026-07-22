@@ -103,6 +103,32 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.director_runtime.calls), 1)
         self.assertEqual(len(self.character_runtime.contexts), 2)
 
+    async def test_create_custom_scene_with_multiple_characters(self):
+        response = await self.client.post(
+            "/director/sessions",
+            json={
+                "custom_scene": {
+                    "name": "河边散步",
+                    "initial_state": {
+                        "location": "河边",
+                        "time": "黄昏",
+                        "weather": "微风",
+                    },
+                    "opening_narration": "夕阳落在河面上。",
+                },
+                "story_outline": "聊到下一场比赛，但不强制进度。",
+                "character_names": ["角色A", "角色B"],
+                "user_uuid": "00000000-0000-4000-8000-000000000001",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["scene_state"]["location"], "河边")
+        self.assertEqual(payload["story_outline"], "聊到下一场比赛，但不强制进度。")
+        self.assertEqual(len(payload["participants"]), 3)
+        self.assertTrue(payload["template"]["template_id"].startswith("custom_"))
+
     async def test_stream_emits_scene_events_then_done(self):
         created = await self._create_session()
         response = await self.client.post(

@@ -1,0 +1,17 @@
+{
+  "template_id": "city_park_afternoon",
+  "name": "城市公园·午后",
+  "description": "树荫、长椅和开阔草地组成的日常地点，适合散步、偶遇、休息和轻松交谈。",
+  "initial_state": {
+    "location": "城市公园",
+    "sub_location": "湖畔步道附近",
+    "time": "午后",
+    "weather": "晴朗",
+    "lighting": "阳光穿过树叶，在步道上留下斑驳光影",
+    "atmosphere": "悠闲而开放",
+    "ambient_sound": "树叶沙沙作响，远处偶尔传来孩童和自行车的声音",
+    "props": ["长椅", "自动贩卖机", "草地", "公园地图"]
+  },
+  "opening_narration": "午后的公园吹着轻柔的风，湖畔步道上来往的人并不多。",
+  "tags": ["公园", "日常", "散步", "午后"]
+}

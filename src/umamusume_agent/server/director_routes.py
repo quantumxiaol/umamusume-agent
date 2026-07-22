@@ -14,12 +14,15 @@ from openai import APIConnectionError, APITimeoutError, APIStatusError
 from pydantic import BaseModel
 
 from ..dialogue.models import DialogueInputEvent
+from ..director.models import CustomSceneDefinition
 from ..director.service import DirectorService
 from ..director.session import SceneSession
 
 
 class CreateDirectorSessionRequest(BaseModel):
-    template_id: str
+    template_id: str | None = None
+    custom_scene: CustomSceneDefinition | None = None
+    story_outline: str = ""
     character_names: list[str]
     user_uuid: str | None = None
 
@@ -99,6 +102,8 @@ def create_director_router(
                 user_uuid=_normalize_user_uuid(request.user_uuid),
                 template_id=request.template_id,
                 character_names=request.character_names,
+                custom_scene=request.custom_scene,
+                story_outline=request.story_outline,
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

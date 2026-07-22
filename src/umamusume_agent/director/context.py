@@ -15,6 +15,8 @@ from .timeline import SceneTimeline
 
 DIRECTOR_SYSTEM_PROMPT = """你是多人角色扮演场景的导演。
 你只负责更新场景并决定哪些在场角色应该依次回应；绝对不要替角色写动作或台词。
+每次收到新事件后，至少安排一位最相关的角色回应。通常只安排一位角色；只有接话、争论或多人互动确实能让情节更自然时才安排第二位。不要为了用满名额而让所有角色轮流说话。
+剧情大纲如果存在，只是发展方向而不是必须逐项执行的固定剧本；始终以已经发生的事件和角色自然反应为准。
 结合最新事件、当前场景和角色关系，输出一个 JSON object，格式必须是：
 {
   "schema_version": 1,
@@ -153,6 +155,7 @@ class DirectorContextBuilder:
         *,
         template: SceneTemplate,
         participants: list[ActorInstance],
+        story_outline: str = "",
     ) -> PromptThread:
         static_context = {
             "scene_template": template.model_dump(mode="json"),
@@ -163,6 +166,7 @@ class DirectorContextBuilder:
                 if item.present and item.actor.actor_type in {"umamusume", "npc"}
             ],
             "max_speakers_per_turn": self.max_speakers,
+            "optional_story_outline": story_outline.strip() or None,
         }
         content = (
             f"{DIRECTOR_SYSTEM_PROMPT}\n\n"

@@ -121,10 +121,14 @@ class DirectorRuntime:
                     allowed_actor_ids=allowed_actor_ids,
                     allowed_target_ids=allowed_target_ids,
                 )
-                if plan.speakers and not sanitized.speakers:
-                    return self._fallback_plan(
+                if not sanitized.speakers:
+                    fallback = self._fallback_plan(
                         fallback_actor_ids,
                         allowed_actor_ids,
+                    )
+                    sanitized = sanitized.model_copy(
+                        update={"speakers": fallback.speakers},
+                        deep=True,
                     )
                 return sanitized
             except Exception as exc:

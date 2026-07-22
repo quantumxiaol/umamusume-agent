@@ -60,6 +60,16 @@ class SceneTemplate(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class CustomSceneDefinition(BaseModel):
+    """User-authored opening environment; it is not persisted as a preset."""
+
+    name: str = "自定义场景"
+    description: str = ""
+    initial_state: SceneState
+    opening_narration: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+
 class ActorInstance(BaseModel):
     actor: ActorRef
     position: str = ""
@@ -94,4 +104,3 @@ class DirectorPlan(BaseModel):
     scene_patch: SceneStatePatch = Field(default_factory=SceneStatePatch)
     narration: str = ""
     speakers: list[DirectorSpeakerPlan] = Field(default_factory=list)
-

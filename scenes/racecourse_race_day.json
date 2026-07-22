@@ -1,0 +1,17 @@
+{
+  "template_id": "racecourse_race_day",
+  "name": "赛马场·比赛日",
+  "description": "观众逐渐聚集的正式赛场，适合赛前准备、观赛、赛后交流和临场事件。",
+  "initial_state": {
+    "location": "赛马场",
+    "sub_location": "选手通道与看台之间",
+    "time": "比赛日下午",
+    "weather": "晴间多云",
+    "lighting": "明亮日光照在草地与跑道上",
+    "atmosphere": "热闹中带着赛前的紧张感",
+    "ambient_sound": "广播、观众交谈和远处的欢呼声交织在一起",
+    "props": ["赛程表", "看台", "草地跑道", "选手通道"]
+  },
+  "opening_narration": "比赛日的赛马场比平时喧闹许多，广播声从看台上方清晰地传来。",
+  "tags": ["赛马场", "比赛", "观赛", "正式场合"]
+}

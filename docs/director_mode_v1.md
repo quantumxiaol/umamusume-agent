@@ -7,9 +7,12 @@ Director mode is a separate multi-character scene layer. It reuses
 ## V1 scope
 
 - The player is the trainer.
-- A scene starts from one JSON template and 1–3 selected characters.
+- A scene starts from one location preset or a transient custom environment,
+  plus 1–3 selected characters.
+- A story outline is optional and remains separate from the location preset.
 - One director plan is generated for each submitted event batch.
-- At most two distinct characters reply per turn.
+- At least one character replies to each submitted batch. The director normally
+  schedules one and uses a second only when interaction benefits the scene.
 - Character replies are sequential; later speakers see earlier replies.
 - Public events are visible to every participant.
 - The director may patch scene state and add narration, but cannot author
@@ -35,6 +38,7 @@ Only these invariants are enforced in Python:
 - target IDs must exist;
 - a character may speak only once per turn;
 - the number of speakers is bounded;
+- an empty/invalid speaker plan falls back to one targeted character;
 - a turn always terminates after the planned replies.
 
 Semantic scheduling remains the director model's responsibility.
@@ -55,6 +59,11 @@ assistant(...)
 Dynamic state snapshots, unseen events, and one-turn instructions are appended
 at the tail. Earlier messages are never reordered or rewritten, so the entire
 previous request is an exact prefix of the next request for that runtime.
+
+The selected location or custom opening environment, initial cast, and optional
+story outline are fixed when the session is created and therefore stay in the
+director's static prefix. The outline guides scheduling but is not exposed to
+characters as hidden knowledge and is not treated as a mandatory script.
 
 Each character uses its full character card in its own static system prefix.
 The director uses only actor IDs and compact cast metadata. A compact role
@@ -77,3 +86,6 @@ uncompacted.
 
 The streaming endpoint emits `scene_event`, `character_reply`, `scene_state`,
 and finally `done`.
+
+`POST /director/sessions` accepts either `template_id` or `custom_scene`, never
+both. `story_outline` is independent and optional for either form.

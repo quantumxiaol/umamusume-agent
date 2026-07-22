@@ -37,6 +37,14 @@ const inputModes = Object.entries(DIALOGUE_INPUT_MODES).map(([value, item]) => (
 const selectedTemplate = computed(() => store.templates.find(
   (item) => item.template_id === store.selectedTemplateId,
 ));
+const canCreateScene = computed(() => {
+  const sceneReady = store.sceneSource === 'custom'
+    ? Boolean(store.customScene.location.trim())
+    : Boolean(store.selectedTemplateId);
+  return sceneReady
+    && Boolean(store.selectedCharacterNames.length)
+    && !store.isLoading;
+});
 const filteredCharacters = computed(() => {
   const keyword = characterFilter.value.trim().toLowerCase();
   return keyword
@@ -116,29 +124,101 @@ onMounted(() => store.init());
       <section class="director-setup-card">
         <div class="section-heading">
           <div>
-            <p class="section-kicker">Scene Template</p>
-            <h2>选择预制场景</h2>
+            <p class="section-kicker">Scene Location</p>
+            <h2>选择场景地点</h2>
           </div>
-          <span>{{ store.templates.length }} 个</span>
+          <span>{{ store.templates.length }} 个预设</span>
         </div>
-        <div class="template-grid">
+        <div class="scene-source-tabs">
           <button
-            v-for="template in store.templates"
-            :key="template.template_id"
             type="button"
-            :class="['template-option', { active: store.selectedTemplateId === template.template_id }]"
-            @click="store.setTemplate(template.template_id)"
+            :class="{ active: store.sceneSource === 'preset' }"
+            @click="store.setSceneSource('preset')"
           >
-            <strong>{{ template.name }}</strong>
-            <span>{{ template.description }}</span>
+            常见场景
+          </button>
+          <button
+            type="button"
+            :class="{ active: store.sceneSource === 'custom' }"
+            @click="store.setSceneSource('custom')"
+          >
+            自定义场景
           </button>
         </div>
-        <div v-if="selectedTemplate" class="initial-state">
-          <span>{{ selectedTemplate.initial_state.location }}</span>
-          <span v-if="selectedTemplate.initial_state.sub_location">{{ selectedTemplate.initial_state.sub_location }}</span>
-          <span>{{ selectedTemplate.initial_state.time }}</span>
-          <span>{{ selectedTemplate.initial_state.weather }}</span>
+
+        <template v-if="store.sceneSource === 'preset'">
+          <div class="template-grid">
+            <button
+              v-for="template in store.templates"
+              :key="template.template_id"
+              type="button"
+              :class="['template-option', { active: store.selectedTemplateId === template.template_id }]"
+              @click="store.setTemplate(template.template_id)"
+            >
+              <strong>{{ template.name }}</strong>
+              <span>{{ template.description }}</span>
+            </button>
+          </div>
+          <div v-if="selectedTemplate" class="initial-state">
+            <span>{{ selectedTemplate.initial_state.location }}</span>
+            <span v-if="selectedTemplate.initial_state.sub_location">{{ selectedTemplate.initial_state.sub_location }}</span>
+            <span v-if="selectedTemplate.initial_state.time">{{ selectedTemplate.initial_state.time }}</span>
+            <span v-if="selectedTemplate.initial_state.weather">{{ selectedTemplate.initial_state.weather }}</span>
+          </div>
+        </template>
+
+        <div v-else class="custom-scene-form">
+          <label class="wide-field">
+            <span>场景名称</span>
+            <input v-model="store.customScene.name" type="text" placeholder="例如：雨后的河边" />
+          </label>
+          <label>
+            <span>地点 *</span>
+            <input v-model="store.customScene.location" type="text" placeholder="例如：河边" />
+          </label>
+          <label>
+            <span>具体位置</span>
+            <input v-model="store.customScene.subLocation" type="text" placeholder="例如：堤岸步道" />
+          </label>
+          <label>
+            <span>时间</span>
+            <input v-model="store.customScene.time" type="text" placeholder="例如：黄昏" />
+          </label>
+          <label>
+            <span>天气</span>
+            <input v-model="store.customScene.weather" type="text" placeholder="例如：小雨刚停" />
+          </label>
+          <label>
+            <span>光线</span>
+            <input v-model="store.customScene.lighting" type="text" placeholder="例如：路灯刚刚亮起" />
+          </label>
+          <label>
+            <span>氛围</span>
+            <input v-model="store.customScene.atmosphere" type="text" placeholder="例如：安静、放松" />
+          </label>
+          <label class="wide-field">
+            <span>环境声</span>
+            <input v-model="store.customScene.ambientSound" type="text" placeholder="例如：河水声和远处的车声" />
+          </label>
+          <label class="wide-field">
+            <span>场景物品</span>
+            <input v-model="store.customScene.props" type="text" placeholder="用逗号分隔，例如：长椅、自动贩卖机、雨伞" />
+          </label>
+          <label class="wide-field">
+            <span>开场环境描述</span>
+            <textarea v-model="store.customScene.openingNarration" rows="2" placeholder="场景开始时首先展示的环境旁白，可留空。"></textarea>
+          </label>
         </div>
+
+        <label class="story-outline-field">
+          <span>剧情大纲（可选）</span>
+          <textarea
+            v-model="store.storyOutline"
+            rows="3"
+            placeholder="例如：训练结束后偶遇，逐渐聊到下一场比赛。留空则由角色和事件自由发展。"
+          ></textarea>
+          <small>大纲只引导演员调度，不是必须逐项执行的固定剧本。</small>
+        </label>
       </section>
 
       <section class="director-setup-card">
@@ -146,6 +226,7 @@ onMounted(() => store.init());
           <div>
             <p class="section-kicker">Cast</p>
             <h2>选择参加角色</h2>
+            <p class="cast-help">可同时选择 1～{{ maxParticipants }} 位；点击角色可以选择或取消。</p>
           </div>
           <span>{{ store.selectedCharacterNames.length }}/{{ maxParticipants }}</span>
         </div>
@@ -170,7 +251,7 @@ onMounted(() => store.init());
         <button
           type="button"
           class="create-scene-button"
-          :disabled="store.isLoading || !store.selectedTemplateId || !store.selectedCharacterNames.length"
+          :disabled="!canCreateScene"
           @click="createScene"
         >
           {{ store.isLoading ? '正在创建…' : '开始导演场景' }}
@@ -183,7 +264,7 @@ onMounted(() => store.init());
       <section class="scene-toolbar">
         <div>
           <p class="section-kicker">Director Session · Turn {{ store.turnIndex }}</p>
-          <h2>{{ selectedTemplate?.name || '导演场景' }}</h2>
+          <h2>{{ store.activeTemplate?.name || selectedTemplate?.name || '导演场景' }}</h2>
           <div class="cast-line">
             <span v-for="participant in store.participants" :key="participant.actor.actor_id">
               {{ participant.actor.display_name }}
@@ -266,7 +347,7 @@ onMounted(() => store.init());
           </div>
         </div>
         <p v-if="store.error" class="director-error">{{ store.error }}</p>
-        <p v-else class="director-hint">导演每轮最多调度 {{ maxSpeakers }} 位角色；后发言的角色能听到前一位角色的公开发言。</p>
+        <p v-else class="director-hint">导演通常安排 1 位角色回应，确有互动需要时最多调度 {{ maxSpeakers }} 位；后发言者能听到前一位的公开发言。</p>
       </section>
     </template>
   </div>
@@ -332,6 +413,30 @@ onMounted(() => store.init());
   gap: 9px;
 }
 
+.template-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.scene-source-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.scene-source-tabs button {
+  padding: 8px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+}
+
+.scene-source-tabs button.active {
+  border-color: var(--accent);
+  background: rgba(26, 111, 107, 0.1);
+  color: var(--accent-strong);
+}
+
 .template-option,
 .director-character {
   border: 1px solid var(--border);
@@ -375,6 +480,60 @@ onMounted(() => store.init());
   background: var(--panel-strong);
   color: var(--accent-strong);
   font-size: 11px;
+}
+
+.custom-scene-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.custom-scene-form label,
+.story-outline-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.custom-scene-form .wide-field {
+  grid-column: 1 / -1;
+}
+
+.custom-scene-form input,
+.custom-scene-form textarea,
+.story-outline-field textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.story-outline-field {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.story-outline-field > span {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.story-outline-field small,
+.cast-help {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.cast-help {
+  margin: 5px 0 0;
 }
 
 .director-search {
@@ -634,6 +793,18 @@ button:disabled {
 @media (max-width: 900px) {
   .director-shell {
     grid-template-columns: 1fr;
+  }
+
+  .custom-scene-form {
+    grid-template-columns: 1fr;
+  }
+
+  .template-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .custom-scene-form .wide-field {
+    grid-column: auto;
   }
 
   .scene-toolbar,

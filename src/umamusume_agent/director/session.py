@@ -27,6 +27,7 @@ class SceneSession:
         director_thread: PromptThread,
         actor_threads: dict[str, PromptThread],
         history_file: Path,
+        story_outline: str = "",
     ):
         self.session_id = session_id
         self.user_uuid = user_uuid
@@ -36,6 +37,7 @@ class SceneSession:
         self.characters = characters
         self.director_thread = director_thread
         self.actor_threads = actor_threads
+        self.story_outline = story_outline.strip()
         self.timeline = SceneTimeline(initial_state=template.initial_state)
         self.turn_index = 0
         self.created_at = datetime.now()
@@ -58,6 +60,7 @@ class SceneSession:
                     participant.model_dump(mode="json")
                     for participant in participants
                 ],
+                "story_outline": self.story_outline,
             }
         )
 
@@ -84,6 +87,7 @@ class SceneSession:
             "session_id": self.session_id,
             "user_uuid": self.user_uuid,
             "template": self.template.model_dump(mode="json"),
+            "story_outline": self.story_outline,
             "player": self.player.model_dump(mode="json"),
             "participants": [
                 participant.model_dump(mode="json")

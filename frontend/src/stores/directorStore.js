@@ -9,6 +9,20 @@ import {
 import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
 
 
+const defaultCustomScene = () => ({
+  name: '自定义场景',
+  location: '',
+  subLocation: '',
+  time: '',
+  weather: '',
+  lighting: '',
+  atmosphere: '',
+  ambientSound: '',
+  props: '',
+  openingNarration: '',
+});
+
+
 const queuedEvent = (content, inputMode) => {
   const mode = DIALOGUE_INPUT_MODES[inputMode]
     ? inputMode
@@ -27,9 +41,13 @@ const queuedEvent = (content, inputMode) => {
 export const useDirectorStore = defineStore('director', {
   state: () => ({
     templates: [],
+    sceneSource: 'preset',
     selectedTemplateId: '',
+    customScene: defaultCustomScene(),
+    storyOutline: '',
     selectedCharacterNames: [],
     sessionId: '',
+    activeTemplate: null,
     participants: [],
     sceneState: {},
     events: [],
@@ -59,6 +77,14 @@ export const useDirectorStore = defineStore('director', {
     setTemplate(templateId) {
       if (!this.sessionId) {
         this.selectedTemplateId = templateId;
+        this.sceneSource = 'preset';
+      }
+    },
+
+    setSceneSource(source) {
+      if (!this.sessionId && ['preset', 'custom'].includes(source)) {
+        this.sceneSource = source;
+        this.error = null;
       }
     },
 
@@ -106,8 +132,12 @@ export const useDirectorStore = defineStore('director', {
     },
 
     async createScene(userUuid) {
-      if (!this.selectedTemplateId) {
-        this.error = '请选择预制场景。';
+      if (this.sceneSource === 'preset' && !this.selectedTemplateId) {
+        this.error = '请选择场景预设。';
+        return false;
+      }
+      if (this.sceneSource === 'custom' && !this.customScene.location.trim()) {
+        this.error = '自定义场景必须填写地点。';
         return false;
       }
       if (!this.selectedCharacterNames.length) {
@@ -117,12 +147,35 @@ export const useDirectorStore = defineStore('director', {
       this.isLoading = true;
       this.error = null;
       try {
+        const customScene = this.sceneSource === 'custom'
+          ? {
+            name: this.customScene.name.trim() || '自定义场景',
+            initial_state: {
+              location: this.customScene.location.trim(),
+              sub_location: this.customScene.subLocation.trim() || null,
+              time: this.customScene.time.trim(),
+              weather: this.customScene.weather.trim(),
+              lighting: this.customScene.lighting.trim(),
+              atmosphere: this.customScene.atmosphere.trim(),
+              ambient_sound: this.customScene.ambientSound.trim(),
+              props: this.customScene.props
+                .split(/[，,、]/)
+                .map((item) => item.trim())
+                .filter(Boolean),
+            },
+            opening_narration: this.customScene.openingNarration.trim(),
+            tags: ['自定义'],
+          }
+          : null;
         const data = await createDirectorSession(
-          this.selectedTemplateId,
+          this.sceneSource === 'preset' ? this.selectedTemplateId : '',
           this.selectedCharacterNames,
           userUuid,
+          customScene,
+          this.storyOutline.trim(),
         );
         this.sessionId = data.session_id || '';
+        this.activeTemplate = data.template || null;
         this.participants = data.participants || [];
         this.sceneState = data.scene_state || {};
         this.events = data.events || [];
@@ -140,6 +193,7 @@ export const useDirectorStore = defineStore('director', {
     async resetScene() {
       const sessionId = this.sessionId;
       this.sessionId = '';
+      this.activeTemplate = null;
       this.participants = [];
       this.sceneState = {};
       this.events = [];

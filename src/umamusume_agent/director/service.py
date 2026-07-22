@@ -17,7 +17,14 @@ from ..dialogue.models import (
 from ..dialogue.runtime import CharacterRuntime
 from .context import CharacterSceneContextBuilder, DirectorContextBuilder
 from .history import create_scene_history_path
-from .models import ActorInstance, SceneEvent, SceneStatePatch
+from .models import (
+    ActorInstance,
+    CustomSceneDefinition,
+    SceneEvent,
+    SceneState,
+    SceneStatePatch,
+    SceneTemplate,
+)
 from .runtime import DirectorRuntime
 from .session import SceneSession
 from .templates import SceneTemplateRepository
@@ -49,8 +56,10 @@ class DirectorService:
         self,
         *,
         user_uuid: str,
-        template_id: str,
+        template_id: str | None,
         character_names: list[str],
+        custom_scene: CustomSceneDefinition | None = None,
+        story_outline: str = "",
     ) -> SceneSession:
         normalized_names = [name.strip() for name in character_names if name.strip()]
         if not normalized_names:
@@ -69,7 +78,10 @@ class DirectorService:
         if not characters:
             raise ValueError("没有可用角色")
 
-        template = self.template_repository.get(template_id)
+        template = self._resolve_scene_template(
+            template_id=template_id,
+            custom_scene=custom_scene,
+        )
         player = default_player_actor()
         participants = [ActorInstance(actor=player, position="场景内")]
         character_map = {}
@@ -81,6 +93,7 @@ class DirectorService:
         director_thread = self.director_context_builder.create_thread(
             template=template,
             participants=participants,
+            story_outline=story_outline,
         )
         actor_threads = {
             character.id: self.character_context_builder.create_thread(
@@ -109,6 +122,7 @@ class DirectorService:
             director_thread=director_thread,
             actor_threads=actor_threads,
             history_file=history_file,
+            story_outline=story_outline,
         )
         if template.opening_narration.strip():
             session.append_event(
@@ -119,6 +133,44 @@ class DirectorService:
                 )
             )
         return session
+
+    def _resolve_scene_template(
+        self,
+        *,
+        template_id: str | None,
+        custom_scene: CustomSceneDefinition | None,
+    ) -> SceneTemplate:
+        normalized_template_id = (template_id or "").strip()
+        if custom_scene is not None and normalized_template_id:
+            raise ValueError("场景预设和自定义场景只能选择一种")
+        if custom_scene is None:
+            if not normalized_template_id:
+                raise ValueError("请选择场景预设或填写自定义场景")
+            return self.template_repository.get(normalized_template_id)
+
+        state = custom_scene.initial_state
+        location = state.location.strip()
+        if not location:
+            raise ValueError("自定义场景必须填写地点")
+        normalized_state = SceneState(
+            location=location,
+            sub_location=(state.sub_location or "").strip() or None,
+            time=state.time.strip(),
+            weather=state.weather.strip(),
+            lighting=state.lighting.strip(),
+            atmosphere=state.atmosphere.strip(),
+            ambient_sound=state.ambient_sound.strip(),
+            props=[item.strip() for item in state.props if item.strip()],
+        )
+        tags = [item.strip() for item in custom_scene.tags if item.strip()]
+        return SceneTemplate(
+            template_id=f"custom_{uuid4().hex[:12]}",
+            name=custom_scene.name.strip() or "自定义场景",
+            description=custom_scene.description.strip(),
+            initial_state=normalized_state,
+            opening_narration=custom_scene.opening_narration.strip(),
+            tags=list(dict.fromkeys(["自定义", *tags])),
+        )
 
     @staticmethod
     def _narrator_actor() -> ActorRef:

@@ -3,6 +3,7 @@
 from .models import (
     DIRECTOR_SCHEMA_VERSION,
     ActorInstance,
+    CustomSceneDefinition,
     DirectorPlan,
     DirectorSpeakerPlan,
     SceneEvent,
@@ -15,6 +16,7 @@ from .timeline import SceneTimeline, reduce_scene_state
 __all__ = [
     "DIRECTOR_SCHEMA_VERSION",
     "ActorInstance",
+    "CustomSceneDefinition",
     "DirectorPlan",
     "DirectorSpeakerPlan",
     "SceneEvent",

@@ -253,10 +253,14 @@ export const createDirectorSession = async (
   templateId,
   characterNames,
   userUuid = '',
+  customScene = null,
+  storyOutline = '',
 ) => {
   try {
     const response = await apiClient.post('/director/sessions', {
-      template_id: templateId,
+      template_id: templateId || undefined,
+      custom_scene: customScene || undefined,
+      story_outline: storyOutline || '',
       character_names: characterNames,
       user_uuid: userUuid || undefined,
     });

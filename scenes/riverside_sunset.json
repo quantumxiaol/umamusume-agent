@@ -1,0 +1,17 @@
+{
+  "template_id": "riverside_sunset",
+  "name": "河边步道·黄昏",
+  "description": "沿河延伸的安静步道，适合放学后散步、训练途中休息和较私密的交流。",
+  "initial_state": {
+    "location": "河边",
+    "sub_location": "堤岸步道",
+    "time": "黄昏",
+    "weather": "微风",
+    "lighting": "夕阳把河面染成温暖的橙金色",
+    "atmosphere": "安静而舒缓",
+    "ambient_sound": "河水流动声与偶尔经过的脚步声",
+    "props": ["堤岸护栏", "长椅", "路灯", "饮料自动贩卖机"]
+  },
+  "opening_narration": "夕阳贴近河岸尽头，沿河的路灯还没有完全亮起。",
+  "tags": ["河边", "散步", "黄昏", "安静"]
+}

@@ -119,11 +119,13 @@ class DirectorFoundationTests(unittest.TestCase):
         thread = builder.create_thread(
             template=_template(),
             participants=[participant],
+            story_outline="训练结束后自然聊到下一场比赛。",
         )
         self.assertEqual(
             thread.messages[0]["cache_control"],
             {"type": "ephemeral"},
         )
+        self.assertIn("训练结束后自然聊到下一场比赛", thread.messages[0]["content"])
 
         timeline.append(
             SceneEvent(
