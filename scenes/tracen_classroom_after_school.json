@@ -1,0 +1,17 @@
+{
+  "template_id": "tracen_classroom_after_school",
+  "name": "特雷森教室·放学后",
+  "description": "放学后的安静教室，适合多人闲谈、学习安排和临时约定。",
+  "initial_state": {
+    "location": "特雷森学院",
+    "sub_location": "教学楼教室",
+    "time": "放学后",
+    "weather": "晴朗",
+    "lighting": "金色阳光透过窗户落在课桌上",
+    "atmosphere": "安静而松弛",
+    "ambient_sound": "走廊偶尔传来学生离校的说话声",
+    "props": ["课桌", "黑板", "课程表", "窗帘"]
+  },
+  "opening_narration": "放学后的教室渐渐安静下来，斜阳在课桌之间拉出长长的影子。",
+  "tags": ["学院", "教室", "日常", "放学后"]
+}

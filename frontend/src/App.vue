@@ -1,6 +1,7 @@
 <!-- frontend/src/App.vue -->
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue';
+import DirectorMode from '@/components/DirectorMode.vue';
 import { DIALOGUE_INPUT_MODES, useChatStore } from '@/stores/chatStore';
 
 const chatStore = useChatStore();
@@ -14,8 +15,10 @@ const characterFilter = ref('');
 const promptOpen = ref(true);
 const audioRefs = ref({});
 const historyFileInput = ref(null);
+const appMode = ref('dialogue');
 
 const characters = computed(() => chatStore.characters);
+const userUuid = computed(() => chatStore.userUuid);
 const selectedCharacter = computed(() => chatStore.selectedCharacter);
 const systemPrompt = computed(() => chatStore.systemPrompt);
 const voicePreviewUrl = computed(() => chatStore.voicePreviewUrl);
@@ -30,6 +33,13 @@ const streamMode = computed(() => chatStore.streamMode);
 const voiceEnabled = computed(() => chatStore.voiceEnabled);
 const dialogueEventsEnabled = computed(() => chatStore.dialogueEventsEnabled);
 const contextEventBatchEnabled = computed(() => chatStore.contextEventBatchEnabled);
+const directorEnabled = computed(() => Number(chatStore.capabilities?.director_mode || 0) >= 1);
+const directorMaxParticipants = computed(() => Number(
+  chatStore.capabilities?.director_max_participants || 3,
+));
+const directorMaxSpeakers = computed(() => Number(
+  chatStore.capabilities?.director_max_speakers_per_turn || 2,
+));
 const inputMode = computed(() => chatStore.inputMode);
 const inputModeOptions = Object.entries(DIALOGUE_INPUT_MODES).map(([value, preset]) => ({
   value,
@@ -436,17 +446,37 @@ onMounted(() => {
     <header class="topbar">
       <div>
         <p class="eyebrow">Umamusume Voice Agent</p>
-        <h1>赛马娘对话控制台</h1>
-        <p class="subtitle">选择角色、查看人格提示词，开启多轮文本对话。</p>
+        <h1>{{ appMode === 'director' ? '赛马娘导演模式' : '赛马娘对话控制台' }}</h1>
+        <p class="subtitle">
+          {{ appMode === 'director'
+            ? '选择场景和参加角色，让导演安排环境变化与依次回应。'
+            : '选择角色、查看人格提示词，开启多轮文本对话。' }}
+        </p>
       </div>
       <div class="status-panel">
+        <div v-if="directorEnabled" class="app-mode-switch">
+          <button
+            type="button"
+            :class="{ active: appMode === 'dialogue' }"
+            @click="appMode = 'dialogue'"
+          >
+            单角色
+          </button>
+          <button
+            type="button"
+            :class="{ active: appMode === 'director' }"
+            @click="appMode = 'director'"
+          >
+            导演模式
+          </button>
+        </div>
         <div class="status-pill">{{ streamMode ? '流式' : '非流式' }}</div>
         <div class="status-pill">{{ ttsEnabled ? `TTS ${voiceEnabled ? '开启' : '关闭'}` : '文本模式' }}</div>
         <div class="status-pill" v-if="outputDir">{{ outputDir.split('/').slice(-1)[0] }}</div>
       </div>
     </header>
 
-    <div class="layout">
+    <div v-if="appMode === 'dialogue'" class="layout">
       <aside class="sidebar">
         <section class="card">
           <div class="card-header">
@@ -680,6 +710,13 @@ onMounted(() => {
         </section>
       </main>
     </div>
+    <DirectorMode
+      v-else
+      :characters="characters"
+      :user-uuid="userUuid"
+      :max-participants="directorMaxParticipants"
+      :max-speakers="directorMaxSpeakers"
+    />
   </div>
 </template>
 
@@ -760,6 +797,31 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.app-mode-switch {
+  display: flex;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-strong);
+}
+
+.app-mode-switch button {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 11px;
+}
+
+.app-mode-switch button.active {
+  background: #fff;
+  color: var(--accent-strong);
+  box-shadow: 0 2px 8px rgba(33, 41, 38, 0.08);
 }
 
 .status-pill {

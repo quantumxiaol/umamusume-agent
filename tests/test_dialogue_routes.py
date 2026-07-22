@@ -321,7 +321,18 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["dialogue_events"], 1)
         self.assertEqual(response.json()["context_event_batch"], 1)
-        self.assertEqual(response.json()["director_mode"], 0)
+        self.assertEqual(response.json()["director_mode"], 1)
+        self.assertEqual(response.json()["director_schema_version"], 1)
+
+    async def test_director_templates_are_available_from_main_app(self):
+        response = await self.client.get("/director/templates")
+
+        self.assertEqual(response.status_code, 200)
+        template_ids = {
+            item["template_id"]
+            for item in response.json()["templates"]
+        }
+        self.assertIn("tracen_training_ground_evening", template_ids)
 
     async def test_json_stream_event_order_remains_compatible(self):
         session = self._prepare_session("stream-test")

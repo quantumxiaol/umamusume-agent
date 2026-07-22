@@ -53,6 +53,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _resolve_project_path(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    return str(path.resolve())
+
 class Config:
     """
     配置类：集中管理所有环境变量
@@ -172,6 +179,20 @@ class Config:
     DIALOGUE_HIDDEN_FORMAT_REINJECTION_ENABLED: bool = _env_bool("DIALOGUE_HIDDEN_FORMAT_REINJECTION_ENABLED", True)
     DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES: int = int(
         os.getenv("DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES", "100")
+    )
+    DIRECTOR_MAX_PARTICIPANTS: int = int(os.getenv("DIRECTOR_MAX_PARTICIPANTS", "3"))
+    DIRECTOR_MAX_SPEAKERS_PER_TURN: int = int(os.getenv("DIRECTOR_MAX_SPEAKERS_PER_TURN", "2"))
+    DIRECTOR_LLM_TEMPERATURE: float = float(os.getenv("DIRECTOR_LLM_TEMPERATURE", "0.2"))
+    DIRECTOR_LLM_MAX_TOKENS: int = int(os.getenv("DIRECTOR_LLM_MAX_TOKENS", "600"))
+    DIRECTOR_JSON_REPAIR_ATTEMPTS: int = int(os.getenv("DIRECTOR_JSON_REPAIR_ATTEMPTS", "1"))
+    DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES: int = int(
+        os.getenv("DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES", "25")
+    )
+    DIRECTOR_SESSION_TTL_SECONDS: int = int(os.getenv("DIRECTOR_SESSION_TTL_SECONDS", "3600"))
+    _scene_templates_dir = os.getenv("SCENE_TEMPLATES_DIRECTORY", "./scenes")
+    SCENE_TEMPLATES_DIRECTORY: str = _resolve_project_path(_scene_templates_dir)
+    DIRECTOR_HISTORY_DIRECTORY: str = _resolve_project_path(
+        os.getenv("DIRECTOR_HISTORY_DIRECTORY", "./outputs/director")
     )
     # ================== Character Settings ==================
     _characters_dir = os.getenv("CHARACTERS_DIRECTORY", "./characters")

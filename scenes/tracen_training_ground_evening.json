@@ -1,0 +1,17 @@
+{
+  "template_id": "tracen_training_ground_evening",
+  "name": "特雷森训练场·傍晚",
+  "description": "一天训练结束前后的开放场景，适合自然交谈、收尾训练或发展临时事件。",
+  "initial_state": {
+    "location": "特雷森学院",
+    "sub_location": "室外训练场",
+    "time": "傍晚",
+    "weather": "晴朗",
+    "lighting": "夕阳从看台后方斜照进训练场",
+    "atmosphere": "训练即将结束，气氛逐渐放松",
+    "ambient_sound": "远处仍有零星的脚步声和器材收纳声",
+    "props": ["长椅", "训练器材", "饮水台", "跑道"]
+  },
+  "opening_narration": "傍晚的训练场仍留着夕阳的余温，远处偶尔传来尚未结束训练的脚步声。",
+  "tags": ["学院", "训练场", "日常", "傍晚"]
+}

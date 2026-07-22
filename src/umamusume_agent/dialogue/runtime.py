@@ -65,6 +65,32 @@ class CharacterRuntime:
             return ""
         return str(content)
 
+    @staticmethod
+    def log_usage(response: Any) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+
+        def read(source: Any, key: str) -> Any:
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        prompt_tokens = read(usage, "prompt_tokens")
+        completion_tokens = read(usage, "completion_tokens")
+        details = (
+            read(usage, "prompt_tokens_details")
+            or read(usage, "input_tokens_details")
+        )
+        cached_tokens = read(details, "cached_tokens") if details else None
+        logger.info(
+            "LLM usage model=%s prompt_tokens=%s completion_tokens=%s cached_tokens=%s",
+            getattr(response, "model", None) or "unknown",
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+        )
+
     def _json_capability_key(self) -> tuple[str, str]:
         return (
             self.settings.ROLEPLAY_LLM_MODEL_BASE_URL or "",
@@ -133,6 +159,7 @@ class CharacterRuntime:
 
         try:
             response = await self.llm_client.chat.completions.create(**kwargs)
+            self.log_usage(response)
             return self.extract_completion_text(response)
         except Exception as exc:
             if (
@@ -166,6 +193,7 @@ class CharacterRuntime:
                 messages=messages,
                 temperature=0.7,
             )
+            self.log_usage(response)
             return structured_reply_from_legacy_text(
                 self.extract_completion_text(response)
             )
@@ -240,4 +268,3 @@ class CharacterRuntime:
             dialogue=SAFE_PARSE_FAILURE_REPLY,
             source_format="parse_error",
         )
-

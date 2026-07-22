@@ -29,6 +29,7 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - 角色管理：从 `characters/` 加载角色配置
 - 对话服务：`/load_character`、`/chat`、`/chat_stream`
 - 剧情事件：单角色页面可发送训练员对白、训练员动作或环境事件，角色会基于明确的说话者与事件类型回应
+- 导演模式：选择预制场景和 1～3 位角色，由导演 LLM 更新环境并安排最多两位角色顺序回应
 - 历史落盘：按 `user_uuid/角色/时间戳/session` 写入 `jsonl` 对话日志；assistant 消息使用 v2 结构字段保存
 - 对话格式：后端主协议为 `{"action":"...","dialogue":"..."}` JSON；API 响应返回 `action`、`dialogue`、`message`，不再返回旧两行 `reply`
 - 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
@@ -95,6 +96,11 @@ cat .env.template > .env
   - `DIALOGUE_PREFIX_CACHE_MIN_CHARS`（默认 `1000`，System Prompt 最小字符数阈值）
   - `DIALOGUE_HIDDEN_FORMAT_REINJECTION_ENABLED`（默认 `true`，是否启用后端隐藏格式约束再注入；不写入历史、不导出到前端）
   - `DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES`（默认 `100`，每隔多少条 user/assistant 历史消息插入一次隐藏格式约束；约等于每 50 轮对话提醒一次）
+  - `DIRECTOR_MAX_PARTICIPANTS`（默认 `3`，导演场景最多选择角色数）
+  - `DIRECTOR_MAX_SPEAKERS_PER_TURN`（默认 `2`，每轮最多顺序回应角色数）
+  - `DIRECTOR_LLM_TEMPERATURE` / `DIRECTOR_LLM_MAX_TOKENS`（导演计划 JSON 的生成参数）
+  - `DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES`（默认 `25`，按导演或单个角色自己的回复次数重新注入约束）
+  - `SCENE_TEMPLATES_DIRECTORY` / `DIRECTOR_HISTORY_DIRECTORY`（预制场景与独立场景历史目录）
 当前主链路主要依赖 `ROLEPLAY_LLM_*` 与 `INDEXTTS_MCP_*`；RAG/Web/旧模块需要安装 `extras` 后再配置。
 
 ## 数据准备（角色导入）
@@ -296,6 +302,9 @@ Pages 目标地址将是：
 
 如果 Space 上不启用 TTS，可以不配置 `INDEXTTS_MCP_*`，前端默认也是关闭语音生成。
 
+导演模式复用现有 `ROLEPLAY_LLM_*` 模型配置，不需要增加第二套模型密钥。详细协议、
+范围和前缀复用约束见 [`docs/director_mode_v1.md`](docs/director_mode_v1.md)。
+
 剧情事件升级建议先发布 Hugging Face 后端，再发布 GitHub Pages 前端。新后端兼容旧前端；
 新前端也会通过 `/capabilities` 自动兼容尚未升级的旧后端，因此两个部署不要求同时完成。
 
@@ -312,6 +321,7 @@ pnpm run dev
 前端功能与当前后端已同步：
 - 角色切换会重新调用 `/load_character`，并展示 `已恢复历史 N 条`。
 - 新后端启用剧情事件能力时，输入框上方可切换“训练员对白 / 训练员动作 / 环境事件”；旧后端下自动回退旧界面。
+- 后端声明 `director_mode=1` 时，顶部可进入独立导演页面，选择预制场景和参加角色后开始共享场景。
 - 聊天窗口会显示当前用户与该角色的历史对话，不会在切角色时直接丢失历史能力。
 - 点击 `查看历史` 会调用 `/history` 刷新该角色历史。
 - 对话会以 v2 结构同步写入当前浏览器的 `localStorage` 缓存；剧情事件使用独立的 `event_schema_version=1`，并兼容迁移旧 v1 `role/content` 缓存。

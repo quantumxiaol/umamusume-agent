@@ -239,3 +239,106 @@ export const clearHistory = async (userUuid, characterName) => {
     throw parseError(error);
   }
 };
+
+export const fetchDirectorTemplates = async () => {
+  try {
+    const response = await apiClient.get('/director/templates');
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const createDirectorSession = async (
+  templateId,
+  characterNames,
+  userUuid = '',
+) => {
+  try {
+    const response = await apiClient.post('/director/sessions', {
+      template_id: templateId,
+      character_names: characterNames,
+      user_uuid: userUuid || undefined,
+    });
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const deleteDirectorSession = async (sessionId) => {
+  try {
+    const response = await apiClient.delete(`/director/sessions/${encodeURIComponent(sessionId)}`);
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const directorTurnStream = async (sessionId, events, onEvent) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/director/turn_stream`, {
+      method: 'POST',
+      headers: buildAuthHeaders({
+        'Content-Type': 'application/json',
+      }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        events,
+      }),
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Server Error: ${response.status} - ${errorText}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let eventName = null;
+    let dataLines = [];
+
+    const flushEvent = () => {
+      if (!dataLines.length) {
+        eventName = null;
+        return;
+      }
+      const type = eventName || 'scene_event';
+      const rawData = dataLines.join('\n');
+      try {
+        emitEvent(onEvent, type, JSON.parse(rawData));
+      } catch (_err) {
+        emitEvent(onEvent, 'error', { detail: `${type} decode failed` });
+      }
+      eventName = null;
+      dataLines = [];
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      lines.forEach((rawLine) => {
+        const line = rawLine.replace(/\r$/, '');
+        if (!line) {
+          flushEvent();
+        } else if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+      });
+    }
+    if (buffer.trim()) {
+      dataLines.push(buffer.trim());
+    }
+    flushEvent();
+  } catch (error) {
+    emitEvent(onEvent, 'error', { detail: error.message || 'Director stream error' });
+    throw error;
+  }
+};

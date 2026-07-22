@@ -66,8 +66,14 @@ from ..dialogue.protocol import (
 from ..dialogue.runtime import CharacterRuntime
 from ..dialogue.service import DialogueService
 from ..dialogue.session import DialogueSession
+from ..director.context import CharacterSceneContextBuilder, DirectorContextBuilder
+from ..director.runtime import DirectorRuntime
+from ..director.service import DirectorService
+from ..director.session import SceneSession
+from ..director.templates import SceneTemplateRepository
 from ..tts import IndexTTSMCPClient, VoiceService
 from ..config import config
+from .director_routes import create_director_router
 
 # 配置日志
 logging.basicConfig(
@@ -90,6 +96,8 @@ OUTPUTS_DIR = Path(config.OUTPUTS_DIRECTORY)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 DIALOGUE_HISTORY_DIR = Path(config.DIALOGUE_HISTORY_DIRECTORY)
 DIALOGUE_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+DIRECTOR_HISTORY_DIR = Path(config.DIRECTOR_HISTORY_DIRECTORY)
+DIRECTOR_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 CHARACTERS_DIR = Path(config.CHARACTERS_DIRECTORY)
 SESSION_TTL_SECONDS = max(0, config.DIALOGUE_SESSION_TTL_SECONDS)
 SESSION_HISTORY_MAX_MESSAGES = max(0, config.DIALOGUE_SESSION_HISTORY_MAX_MESSAGES)
@@ -101,7 +109,12 @@ API_RATE_LIMIT_MAX_REQUESTS = max(1, config.API_RATE_LIMIT_MAX_REQUESTS)
 API_CHAT_RATE_LIMIT_MAX_REQUESTS = max(1, config.API_CHAT_RATE_LIMIT_MAX_REQUESTS)
 ENABLE_TTS = config.ENABLE_TTS
 API_AUTH_EXEMPT_PATHS = {"/", "/audio"}
-_CHAT_ENDPOINTS = {"/chat", "/chat_stream"}
+_CHAT_ENDPOINTS = {
+    "/chat",
+    "/chat_stream",
+    "/director/turn",
+    "/director/turn_stream",
+}
 _rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
 _rate_limit_lock = asyncio.Lock()
 _response_format_unsupported: set[tuple[str, str]] = set()
@@ -121,6 +134,29 @@ dialogue_service = DialogueService(
     runtime=character_runtime,
     context_builder=legacy_context_builder,
 )
+scene_template_repository = SceneTemplateRepository(
+    config.SCENE_TEMPLATES_DIRECTORY
+)
+director_context_builder = DirectorContextBuilder(
+    settings=config,
+    max_speakers=config.DIRECTOR_MAX_SPEAKERS_PER_TURN,
+)
+character_scene_context_builder = CharacterSceneContextBuilder(settings=config)
+director_runtime = DirectorRuntime(
+    json_runtime=character_runtime,
+    settings=config,
+    max_speakers=config.DIRECTOR_MAX_SPEAKERS_PER_TURN,
+)
+director_service = DirectorService(
+    character_manager=character_manager,
+    character_runtime=character_runtime,
+    director_runtime=director_runtime,
+    template_repository=scene_template_repository,
+    director_context_builder=director_context_builder,
+    character_context_builder=character_scene_context_builder,
+    history_dir=DIRECTOR_HISTORY_DIR,
+    max_participants=config.DIRECTOR_MAX_PARTICIPANTS,
+)
 
 # FastAPI 应用
 app = FastAPI(title="Umamusume-Dialogue-Server", version="0.2.0")
@@ -132,6 +168,15 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
+)
+
+director_sessions: dict[str, SceneSession] = {}
+app.include_router(
+    create_director_router(
+        service=director_service,
+        sessions=director_sessions,
+        session_ttl_seconds=config.DIRECTOR_SESSION_TTL_SECONDS,
+    )
 )
 
 # 会话存储（简单内存存储，生产环境应使用数据库）
@@ -698,7 +743,12 @@ async def capabilities():
         "dialogue_api_version": 2,
         "dialogue_events": EVENT_SCHEMA_VERSION,
         "context_event_batch": 1,
-        "director_mode": 0,
+        "director_mode": 1,
+        "director_schema_version": 1,
+        "director_max_participants": config.DIRECTOR_MAX_PARTICIPANTS,
+        "director_max_speakers_per_turn": (
+            config.DIRECTOR_MAX_SPEAKERS_PER_TURN
+        ),
         "supported_event_types": [
             "dialogue",
             "action",
