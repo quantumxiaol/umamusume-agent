@@ -6,10 +6,8 @@ Dialogue Server - 交互式角色对话服务
 import asyncio
 import json
 import logging
-import re
 import shutil
 from collections import defaultdict, deque
-from urllib.parse import quote
 from pathlib import Path
 from typing import Optional, AsyncGenerator, Dict, Any
 from datetime import datetime
@@ -24,7 +22,43 @@ from starlette.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI, APIConnectionError, APITimeoutError, APIStatusError
 
 from ..character import CharacterManager, CharacterConfig
-from ..tts import IndexTTSMCPClient, MCPToolError
+from ..dialogue.context import LegacyDialogueContextBuilder
+from ..dialogue.history import (
+    InvalidHistoryImport,
+    collect_history_messages,
+    create_history_file_path,
+    extract_character_names_from_record,
+    extract_safe_name_from_session_dir,
+    iter_user_history_files,
+    load_persistent_history,
+    name_tokens,
+    normalize_import_messages,
+    parse_history_file,
+    resolve_character_query_names,
+    slugify,
+)
+from ..dialogue.models import CharacterReplyContext
+from ..dialogue.protocol import (
+    SAFE_PARSE_FAILURE_REPLY as _SAFE_PARSE_FAILURE_REPLY,
+    STRUCTURED_REPLY_SCHEMA_VERSION as _STRUCTURED_REPLY_SCHEMA_VERSION,
+    StructuredReply,
+    extract_dialogue_text as _extract_dialogue_text,
+    is_json_reply_enabled as _protocol_is_json_reply_enabled,
+    json_output_mode as _protocol_json_output_mode,
+    load_json_object_from_text as _load_json_object_from_text,
+    normalize_assistant_record as _normalize_assistant_record,
+    normalize_structured_reply as _normalize_structured_reply,
+    parse_structured_reply as _parse_structured_reply,
+    split_action_dialogue as _split_action_dialogue,
+    strip_stage_directions as _strip_stage_directions,
+    structured_reply_from_legacy_text as _structured_reply_from_legacy_text,
+    structured_reply_message as _structured_reply_message,
+    to_compact_context_message as _to_compact_context_message,
+)
+from ..dialogue.runtime import CharacterRuntime
+from ..dialogue.service import DialogueService
+from ..dialogue.session import DialogueSession
+from ..tts import IndexTTSMCPClient, VoiceService
 from ..config import config
 
 # 配置日志
@@ -52,15 +86,6 @@ CHARACTERS_DIR = Path(config.CHARACTERS_DIRECTORY)
 SESSION_TTL_SECONDS = max(0, config.DIALOGUE_SESSION_TTL_SECONDS)
 SESSION_HISTORY_MAX_MESSAGES = max(0, config.DIALOGUE_SESSION_HISTORY_MAX_MESSAGES)
 SESSION_CLEANUP_INTERVAL_SECONDS = max(5, config.DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS)
-PREFIX_CACHE_ENABLED = config.DIALOGUE_PREFIX_CACHE_ENABLED
-PREFIX_CACHE_MIN_CHARS = max(0, config.DIALOGUE_PREFIX_CACHE_MIN_CHARS)
-HIDDEN_FORMAT_REINJECTION_ENABLED = config.DIALOGUE_HIDDEN_FORMAT_REINJECTION_ENABLED
-HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES = max(
-    0,
-    config.DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES,
-)
-ROLEPLAY_BASE_URL = (config.ROLEPLAY_LLM_MODEL_BASE_URL or "").lower()
-ROLEPLAY_MODEL_NAME = (config.ROLEPLAY_LLM_MODEL_NAME or "").lower()
 API_ACCESS_KEY = (config.API_ACCESS_KEY or "").strip()
 API_RATE_LIMIT_ENABLED = config.API_RATE_LIMIT_ENABLED
 API_RATE_LIMIT_WINDOW_SECONDS = max(1, config.API_RATE_LIMIT_WINDOW_SECONDS)
@@ -73,100 +98,21 @@ _rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
 _rate_limit_lock = asyncio.Lock()
 _response_format_unsupported: set[tuple[str, str]] = set()
 
-_JSON_OUTPUT_MODES = {"auto", "response_format", "prompt_only", "disabled"}
-_STRUCTURED_REPLY_SCHEMA_VERSION = 2
-
-_JSON_RESPONSE_FORMAT_INSTRUCTION = (
-    "【JSON 回复格式硬性规范】\n"
-    "你正在进行沉浸式角色扮演。你必须只输出一个合法 JSON object。\n"
-    "不要输出 Markdown，不要输出代码块，不要输出解释，不要输出 JSON 以外的任何文字。\n\n"
-    "JSON 格式必须是：\n"
-    "{\n"
-    '  "action": "角色动作、神态或心理描写；没有则写“无”",\n'
-    '  "dialogue": "角色对训练员说的话；自然口语；可直接用于 TTS"\n'
-    "}\n\n"
-    "字段要求：\n"
-    "1) action 必须是 string。\n"
-    "2) dialogue 必须是 string，不能为空。\n"
-    "3) 不要替训练员说话、行动、思考或决定关系进展。\n"
-    "4) dialogue 中不要混入动作描写。\n"
-    "5) action 中不要混入对白。"
+voice_service = VoiceService(
+    client=tts_client,
+    outputs_dir=OUTPUTS_DIR,
+    characters_dir=CHARACTERS_DIR,
 )
-
-_LEGACY_RESPONSE_FORMAT_INSTRUCTION = (
-    "【回复格式硬性规范】\n"
-    "你正在进行沉浸式角色扮演。请始终使用中文，并且只输出两行，顺序固定如下：\n"
-    "动作：<描写角色动作、神态或心理活动；简洁；不写台词>\n"
-    "对白：<角色说的话；只写口语台词；不写动作或旁白>\n\n"
-    "【输出边界】\n"
-    "1) 必须包含且只包含这两行。\n"
-    "2) 不要添加额外标题、编号、解释或第三行。\n"
-    "3) 每行必须以完整标签“动作：”和“对白：”开头。\n"
-    "4) 对白将直接用于 TTS，请保证自然可朗读。\n\n"
-    "【正确示例（模板）】\n"
-    "动作：【角色】耳朵轻轻抖动。\n"
-    "对白：我是【角色名】，目标是成为优秀的赛马娘。"
+character_runtime = CharacterRuntime(
+    llm_client=llm_client,
+    settings=config,
+    response_format_unsupported=_response_format_unsupported,
 )
-
-_PLAIN_TEXT_RESPONSE_FORMAT_INSTRUCTION = (
-    "本次不需要生成语音文件，但仍必须遵守当前回复格式；dialogue/对白要自然可读。"
+legacy_context_builder = LegacyDialogueContextBuilder(settings=config)
+dialogue_service = DialogueService(
+    runtime=character_runtime,
+    context_builder=legacy_context_builder,
 )
-
-_HIDDEN_JSON_FORMAT_REINJECTION_PROMPT = (
-    "【后端隐藏 JSON 格式提醒】\n"
-    "继续只输出一个合法 JSON object，不要 Markdown，不要代码块。\n"
-    '格式固定为：{"action":"...","dialogue":"..."}'
-)
-
-_HIDDEN_LEGACY_FORMAT_REINJECTION_PROMPT = (
-    "【后端隐藏格式约束提醒】\n"
-    "继续严格遵守输出格式，只输出两行，且顺序固定：\n"
-    "动作：<只写角色自己的动作、神态或心理；简短；不要写台词>\n"
-    "对白：<只写角色对训练员说的话；自然口语；不要写动作或旁白>\n"
-    "不要输出第三行、标题、解释、总结或列表；不要替训练员说话、行动、思考或决定关系进展。"
-)
-
-_REPAIR_JSON_PROMPT = (
-    "你刚才没有输出合法 JSON。\n"
-    "请只输出一个 JSON object，不要解释，不要 Markdown，不要代码块。\n"
-    '格式必须是：{"action":"...","dialogue":"..."}'
-)
-
-_REGENERATE_JSON_PROMPT = (
-    "上一条 assistant 回复没有通过后端 JSON 解析。\n"
-    "请忽略那次失败输出，基于最近一条训练员发言重新生成角色回复。\n"
-    "必须只输出一个合法 JSON object，不要解释，不要 Markdown，不要代码块。\n"
-    '格式必须是：{"action":"...","dialogue":"..."}'
-)
-
-_SAFE_PARSE_FAILURE_REPLY = "光钻有点没听清，训练员可以再说一次吗？"
-
-_ACTION_PREFIXES = ("动作：", "动作:", "神态：", "神态:", "场景：", "场景:")
-_DIALOGUE_PREFIXES = (
-    "对白：", "对白:",
-    "台词：", "台词:",
-    "对话：", "对话:",
-    "TTS：", "TTS:",
-)
-_ACTION_LABELS = {"动作", "神态", "场景", "神情", "表情"}
-_DIALOGUE_LABELS = {"对白", "台词", "对话", "tts", "dialogue", "speech"}
-_LABELLED_LINE_PATTERN = re.compile(r"^(?P<label>[\u4e00-\u9fffA-Za-z]{1,8})[：:]\s*(?P<content>.*)$")
-_INLINE_SECOND_LABEL_PATTERN = re.compile(
-    r"^(?P<action>.*?[。！？；;…])\s*(?P<label>[\u4e00-\u9fffA-Za-z]{1,8})[：:]\s*(?P<dialogue>.+)$"
-)
-
-_STAGE_PATTERNS = [
-    r"\\*[^\\*]+\\*",
-    r"（[^）]*）",
-    r"\\([^)]*\\)",
-    r"【[^】]*】",
-    r"\\[[^\\]]*]",
-    r"〔[^〕]*〕",
-    r"＜[^＞]*＞",
-    r"<[^>]*>",
-    r"《[^》]*》",
-]
-_SESSION_DIR_NAME_PATTERN = re.compile(r"^(?P<safe_name>.+)_\d{8}_\d{6}_[0-9a-fA-F]{8}$")
 
 # FastAPI 应用
 app = FastAPI(title="Umamusume-Dialogue-Server", version="0.2.0")
@@ -233,14 +179,6 @@ class SessionInfo(BaseModel):
     history_size: int
     output_dir: Optional[str] = None
     history_file: Optional[str] = None
-
-
-class StructuredReply(BaseModel):
-    """服务端内部使用的 assistant 结构化回复。"""
-    action: str = "无"
-    dialogue: str
-    source_format: str = "json_v2"
-    schema_version: int = _STRUCTURED_REPLY_SCHEMA_VERSION
 
 
 # ============= 会话管理 =============
@@ -314,21 +252,11 @@ async def protect_api(request: Request, call_next):
 
 
 def _supports_prefix_cache_provider() -> bool:
-    if "dashscope.aliyuncs.com" in ROLEPLAY_BASE_URL:
-        return True
-    if "bailian" in ROLEPLAY_BASE_URL:
-        return True
-    if ROLEPLAY_MODEL_NAME.startswith("qwen"):
-        return True
-    return False
+    return legacy_context_builder.supports_prefix_cache_provider()
 
 
 def _should_attach_prefix_cache(system_prompt: str) -> bool:
-    if not PREFIX_CACHE_ENABLED:
-        return False
-    if not _supports_prefix_cache_provider():
-        return False
-    return len(system_prompt) >= PREFIX_CACHE_MIN_CHARS
+    return legacy_context_builder.should_attach_prefix_cache(system_prompt)
 
 
 def _extract_upstream_error_detail(exc: APIStatusError) -> str:
@@ -368,71 +296,28 @@ def _translate_llm_exception(exc: Exception) -> HTTPException:
 
 
 def _extract_completion_text(response: Any) -> str:
-    choices = getattr(response, "choices", None) or []
-    if not choices:
-        raise ValueError("上游模型返回空响应（choices 为空）")
-
-    first_choice = choices[0]
-    message = getattr(first_choice, "message", None)
-    if message is None:
-        raise ValueError("上游模型响应缺少 message 字段")
-
-    content = getattr(message, "content", None)
-    if isinstance(content, str):
-        return content
-    if content is None:
-        return ""
-    return str(content)
+    return CharacterRuntime.extract_completion_text(response)
 
 
 def _json_output_mode() -> str:
-    mode = (config.LLM_JSON_OUTPUT_MODE or "auto").strip().lower()
-    if mode not in _JSON_OUTPUT_MODES:
-        logger.warning("Invalid LLM_JSON_OUTPUT_MODE=%s, fallback to auto", config.LLM_JSON_OUTPUT_MODE)
-        return "auto"
-    return mode
+    return _protocol_json_output_mode(config)
 
 
 def _is_json_reply_enabled() -> bool:
-    return bool(config.LLM_JSON_ENABLED) and _json_output_mode() != "disabled"
+    return _protocol_is_json_reply_enabled(config)
 
 
 def _json_capability_key() -> tuple[str, str]:
-    return (
-        config.ROLEPLAY_LLM_MODEL_BASE_URL or "",
-        config.ROLEPLAY_LLM_MODEL_NAME or "",
-    )
+    return character_runtime._json_capability_key()
 
 
 def _looks_like_unsupported_response_format(exc: Exception) -> bool:
-    if not isinstance(exc, APIStatusError):
-        return False
-    if exc.status_code not in {400, 422}:
-        return False
+    return CharacterRuntime._looks_like_unsupported_response_format(exc)
 
-    response = getattr(exc, "response", None)
-    if response is not None:
-        try:
-            payload = response.json()
-            msg = json.dumps(payload, ensure_ascii=False)
-        except Exception:
-            msg = str(exc)
-    else:
-        msg = str(exc)
 
-    msg = msg.lower()
-    response_format_terms = ("response_format", "json_object")
-    unsupported_terms = (
-        "unsupported",
-        "unknown parameter",
-        "unrecognized",
-        "invalid parameter",
-        "not supported",
-    )
-    return (
-        any(term in msg for term in response_format_terms)
-        and any(term in msg for term in unsupported_terms)
-    )
+def _sync_character_runtime_client() -> None:
+    """Keep legacy tests that replace this module's client working."""
+    character_runtime.llm_client = llm_client
 
 
 async def _create_json_completion(
@@ -442,47 +327,13 @@ async def _create_json_completion(
     max_tokens: int,
     force_prompt_only: bool = False,
 ) -> str:
-    mode = _json_output_mode()
-    key = _json_capability_key()
-    send_response_format = (
-        not force_prompt_only
-        and _is_json_reply_enabled()
-        and mode in {"auto", "response_format"}
-        and not (mode == "auto" and key in _response_format_unsupported)
+    _sync_character_runtime_client()
+    return await character_runtime.create_json_completion(
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        force_prompt_only=force_prompt_only,
     )
-
-    kwargs: Dict[str, Any] = {
-        "model": config.ROLEPLAY_LLM_MODEL_NAME,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    if send_response_format:
-        kwargs["response_format"] = {"type": "json_object"}
-
-    try:
-        response = await llm_client.chat.completions.create(**kwargs)
-        return _extract_completion_text(response)
-    except Exception as exc:
-        if (
-            send_response_format
-            and mode == "auto"
-            and config.LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR
-            and _looks_like_unsupported_response_format(exc)
-        ):
-            _response_format_unsupported.add(key)
-            logger.warning(
-                "LLM response_format=json_object unsupported for base_url=%s model=%s; fallback to prompt-only JSON.",
-                key[0],
-                key[1],
-            )
-            return await _create_json_completion(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                force_prompt_only=True,
-            )
-        raise
 
 
 def _extract_stream_delta_text(chunk: Any) -> str:
@@ -526,487 +377,72 @@ def _create_history_file_path(
     created_at: datetime,
     session_id: str,
 ) -> Path:
-    safe_name = _slugify(character.name_en or character.name_zh)
-    timestamp = created_at.strftime("%Y%m%d_%H%M%S")
-    session_dir = DIALOGUE_HISTORY_DIR / user_uuid / f"{safe_name}_{timestamp}_{session_id[:8]}"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    return session_dir / "history.jsonl"
+    return create_history_file_path(
+        DIALOGUE_HISTORY_DIR,
+        user_uuid,
+        character,
+        created_at,
+        session_id,
+    )
 
 
 def _extract_character_names_from_record(record: Dict[str, Any]) -> list[str]:
-    names = []
-    for key in ("character_name_en", "character_name_zh", "character_name_jp"):
-        value = record.get(key)
-        if isinstance(value, str):
-            stripped = value.strip()
-            if stripped:
-                names.append(stripped)
-    return names
+    return extract_character_names_from_record(record)
 
 
 def _name_tokens(names: list[str]) -> set[str]:
-    tokens: set[str] = set()
-    for name in names:
-        if not isinstance(name, str):
-            continue
-        stripped = name.strip()
-        if not stripped:
-            continue
-        tokens.add(stripped.lower())
-        tokens.add(_slugify(stripped))
-    return tokens
+    return name_tokens(names)
 
 
 def _resolve_character_query_names(character_name: Optional[str]) -> list[str]:
-    if not isinstance(character_name, str):
-        return []
-    query = character_name.strip()
-    if not query:
-        return []
-
-    names: list[str] = [query]
-    try:
-        if character_manager.character_exists(query):
-            character_dir = character_manager.get_character_dir(query)
-            config_path = character_dir / "config.json"
-            if config_path.exists():
-                with config_path.open("r", encoding="utf-8") as f:
-                    config_data = json.load(f)
-                for key in ("name_zh", "name_en", "name_jp"):
-                    value = config_data.get(key)
-                    if isinstance(value, str) and value.strip():
-                        names.append(value.strip())
-                names.append(character_dir.name)
-    except Exception:
-        logger.exception("Failed to resolve character aliases for query: %s", query)
-
-    # 去重，保留顺序
-    seen = set()
-    deduped: list[str] = []
-    for name in names:
-        key = name.strip().lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(name)
-    return deduped
+    return resolve_character_query_names(character_name, character_manager)
 
 
 def _extract_safe_name_from_session_dir(session_dir_name: str) -> str:
-    match = _SESSION_DIR_NAME_PATTERN.match(session_dir_name)
-    if match:
-        return match.group("safe_name")
-    return session_dir_name
+    return extract_safe_name_from_session_dir(session_dir_name)
 
 
 def _iter_user_history_files(user_uuid: str) -> list[Path]:
-    user_dir = DIALOGUE_HISTORY_DIR / user_uuid
-    if not user_dir.exists():
-        return []
-    files = [path for path in user_dir.glob("*/history.jsonl") if path.is_file()]
-    files.sort(key=lambda path: path.parent.name)
-    return files
+    return iter_user_history_files(DIALOGUE_HISTORY_DIR, user_uuid)
 
 
-def _parse_history_file(history_file: Path) -> tuple[list[Dict[str, Any]], set[str]]:
-    fallback_safe_name = _extract_safe_name_from_session_dir(history_file.parent.name)
-    character_names: set[str] = {fallback_safe_name} if fallback_safe_name else set()
-    messages: list[Dict[str, Any]] = []
-
-    with history_file.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                logger.warning("Skip invalid history line: %s", history_file)
-                continue
-
-            for name in _extract_character_names_from_record(record):
-                character_names.add(name)
-
-            if record.get("event") != "message":
-                continue
-            role = record.get("role")
-            if role not in {"user", "assistant"}:
-                continue
-
-            if role == "assistant":
-                semantic_record = _normalize_assistant_record(record)
-            else:
-                content = record.get("content")
-                if not isinstance(content, str) or not content.strip():
-                    continue
-                semantic_record = {**record, "role": "user", "content": content.strip()}
-
-            if not str(semantic_record.get("content") or "").strip():
-                continue
-
-            message_character_name = record.get("character_name_en")
-            if not isinstance(message_character_name, str) or not message_character_name.strip():
-                extracted_names = _extract_character_names_from_record(record)
-                if extracted_names:
-                    message_character_name = extracted_names[0]
-                else:
-                    message_character_name = fallback_safe_name
-
-            messages.append(
-                {
-                    "session_id": record.get("session_id"),
-                    "role": role,
-                    "content": semantic_record.get("content"),
-                    "action": semantic_record.get("action"),
-                    "dialogue": semantic_record.get("dialogue"),
-                    "schema_version": semantic_record.get("schema_version"),
-                    "source_format": semantic_record.get("source_format"),
-                    "timestamp": record.get("timestamp"),
-                    "message_index": record.get("message_index"),
-                    "character_name_en": message_character_name,
-                }
-            )
-
-    return messages, character_names
+def _parse_history_file(
+    history_file: Path,
+) -> tuple[list[Dict[str, Any]], set[str]]:
+    return parse_history_file(history_file)
 
 
-def _collect_history_messages(user_uuid: str, character_name: Optional[str] = None) -> list[Dict[str, Any]]:
-    query_tokens = _name_tokens(_resolve_character_query_names(character_name))
-    messages: list[Dict[str, Any]] = []
-
-    for history_file in _iter_user_history_files(user_uuid):
-        try:
-            file_messages, file_character_names = _parse_history_file(history_file)
-        except Exception:
-            logger.exception("Failed to parse history file: %s", history_file)
-            continue
-
-        if query_tokens:
-            file_tokens = _name_tokens(list(file_character_names))
-            if not (file_tokens & query_tokens):
-                continue
-
-        messages.extend(file_messages)
-
-    def _message_sort_key(item: Dict[str, Any]) -> tuple[str, str, int]:
-        raw_index = item.get("message_index")
-        try:
-            message_index = int(raw_index or 0)
-        except (TypeError, ValueError):
-            message_index = 0
-        return (
-            str(item.get("timestamp") or ""),
-            str(item.get("session_id") or ""),
-            message_index,
-        )
-
-    messages.sort(key=_message_sort_key)
-    return messages
-
-
-def _normalize_import_messages(raw_messages: list[HistoryImportMessage]) -> list[Dict[str, Any]]:
-    messages: list[Dict[str, Any]] = []
-    for index, item in enumerate(raw_messages, start=1):
-        role = (item.role or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            raise HTTPException(status_code=400, detail=f"Invalid role at message {index}: {item.role}")
-
-        content = (item.content or "").strip()
-        if role == "user":
-            if not content:
-                continue
-            messages.append(
-                {
-                    "role": role,
-                    "content": content,
-                    "timestamp": item.timestamp,
-                    "schema_version": item.schema_version or item.schemaVersion,
-                }
-            )
-            continue
-
-        raw_record = {
-            "role": "assistant",
-            "content": content,
-            "action": item.action,
-            "dialogue": item.dialogue,
-            "timestamp": item.timestamp,
-            "schema_version": item.schema_version or item.schemaVersion,
-            "source_format": item.source_format or item.sourceFormat or "import",
-        }
-        if not content and not (isinstance(item.dialogue, str) and item.dialogue.strip()):
-            continue
-        semantic_record = _normalize_assistant_record(raw_record)
-        if not str(semantic_record.get("dialogue") or semantic_record.get("content") or "").strip():
-            continue
-
-        messages.append(semantic_record)
-
-    if not messages:
-        raise HTTPException(status_code=400, detail="No valid messages to import")
-    return messages
-
-
-def _load_persistent_history(user_uuid: str, character: CharacterConfig) -> list[Dict[str, str]]:
-    """
-    按 user_uuid + 角色聚合历史消息，用于在新会话中恢复上下文记忆。
-    """
-    user_dir = DIALOGUE_HISTORY_DIR / user_uuid
-    if not user_dir.exists():
-        return []
-
-    safe_name = _slugify(character.name_en or character.name_zh)
-    history_files = sorted(
-        [path for path in user_dir.glob(f"{safe_name}_*/history.jsonl") if path.is_file()],
-        key=lambda path: path.parent.name,
+def _collect_history_messages(
+    user_uuid: str,
+    character_name: Optional[str] = None,
+) -> list[Dict[str, Any]]:
+    return collect_history_messages(
+        DIALOGUE_HISTORY_DIR,
+        user_uuid,
+        character_name=character_name,
+        character_manager=character_manager,
     )
 
-    expected_character_name = character.name_en or character.name_zh
-    messages: list[Dict[str, str]] = []
-    for history_file in history_files:
-        try:
-            with history_file.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        logger.warning("Skip invalid history line: %s", history_file)
-                        continue
 
-                    if record.get("event") != "message":
-                        continue
-                    recorded_character_name = record.get("character_name_en")
-                    if (
-                        isinstance(recorded_character_name, str)
-                        and recorded_character_name.strip()
-                        and recorded_character_name != expected_character_name
-                    ):
-                        continue
-                    role = record.get("role")
-                    if role not in {"user", "assistant"}:
-                        continue
-
-                    if role == "assistant":
-                        semantic_record = _normalize_assistant_record(record)
-                    else:
-                        content = record.get("content")
-                        if not isinstance(content, str) or not content.strip():
-                            continue
-                        semantic_record = {"role": "user", "content": content.strip()}
-
-                    if not str(semantic_record.get("content") or "").strip():
-                        continue
-                    messages.append(_to_compact_context_message(semantic_record))
-        except Exception:
-            logger.exception("Failed to load history file: %s", history_file)
-
-    if SESSION_HISTORY_MAX_MESSAGES > 0 and len(messages) > SESSION_HISTORY_MAX_MESSAGES:
-        messages = messages[-SESSION_HISTORY_MAX_MESSAGES:]
-
-    return messages
+def _normalize_import_messages(
+    raw_messages: list[HistoryImportMessage],
+) -> list[Dict[str, Any]]:
+    try:
+        return normalize_import_messages(raw_messages)
+    except InvalidHistoryImport as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-class DialogueSession:
-    """对话会话"""
-
-    def __init__(
-        self,
-        session_id: str,
-        character: CharacterConfig,
-        user_uuid: str,
-        initial_history: Optional[list[Dict[str, str]]] = None,
-    ):
-        self.session_id = session_id
-        self.user_uuid = user_uuid
-        self.character = character
-        self.created_at = datetime.now()
-        self.last_active_at = self.created_at
-        self.history = list(initial_history or [])
-        self.message_count = len(self.history)
-        self.voice_index = 0
-        self.output_dir = _create_output_dir(character, self.created_at)
-        self.audio_history: list[Dict[str, Any]] = []
-        self.history_file = _create_history_file_path(user_uuid, character, self.created_at, session_id)
-        self._closed = False
-        self._trim_history()
-
-        self._append_history_event(
-            {
-                "event": "session_start",
-                "created_at": self.created_at.isoformat(),
-                "restored_history_messages": len(self.history),
-            }
-        )
-
-    def _append_history_event(self, payload: Dict[str, Any]):
-        record: Dict[str, Any] = {
-            "session_id": self.session_id,
-            "user_uuid": self.user_uuid,
-            "character_name_en": self.character.name_en or self.character.name_zh,
-            "timestamp": datetime.now().isoformat(),
-        }
-        record.update(payload)
-
-        try:
-            self.history_file.parent.mkdir(parents=True, exist_ok=True)
-            with self.history_file.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception:
-            logger.exception("Failed to persist dialogue history: session_id=%s", self.session_id)
-
-    def _rewrite_history_file(self):
-        try:
-            self.history_file.parent.mkdir(parents=True, exist_ok=True)
-            with self.history_file.open("w", encoding="utf-8"):
-                pass
-        except Exception:
-            logger.exception("Failed to rewrite dialogue history: session_id=%s", self.session_id)
-
-    def mark_closed(self, reason: str):
-        if self._closed:
-            return
-        self._closed = True
-        self._append_history_event({"event": "session_end", "reason": reason})
-
-    def touch(self):
-        self.last_active_at = datetime.now()
-
-    def _trim_history(self):
-        if SESSION_HISTORY_MAX_MESSAGES <= 0:
-            return
-        overflow = len(self.history) - SESSION_HISTORY_MAX_MESSAGES
-        if overflow > 0:
-            del self.history[:overflow]
-
-    def add_message(
-        self,
-        role: str,
-        content: str,
-        *,
-        action: Optional[str] = None,
-        dialogue: Optional[str] = None,
-        source_format: str = "text",
-        schema_version: Optional[int] = None,
-        imported_timestamp: Optional[str] = None,
-    ):
-        """添加消息到历史"""
-        if role == "assistant":
-            semantic_record = _normalize_assistant_record(
-                {
-                    "role": role,
-                    "content": content,
-                    "action": action,
-                    "dialogue": dialogue,
-                    "source_format": source_format,
-                    "schema_version": schema_version or _STRUCTURED_REPLY_SCHEMA_VERSION,
-                }
-            )
-        else:
-            semantic_record = {"role": role, "content": content}
-
-        self.history.append(_to_compact_context_message(semantic_record))
-        self.message_count += 1
-        self.touch()
-        self._trim_history()
-        payload: Dict[str, Any] = {
-            "event": "message",
-            "role": role,
-            "content": semantic_record.get("content") or "",
-            "message_index": self.message_count,
-        }
-        if imported_timestamp:
-            payload["imported_timestamp"] = imported_timestamp
-        if role == "assistant":
-            payload.update(
-                {
-                    "action": semantic_record.get("action") or "无",
-                    "dialogue": semantic_record.get("dialogue") or semantic_record.get("content") or "",
-                    "source_format": semantic_record.get("source_format") or source_format,
-                    "schema_version": semantic_record.get("schema_version") or _STRUCTURED_REPLY_SCHEMA_VERSION,
-                }
-            )
-        self._append_history_event(payload)
-
-    def import_messages(self, messages: list[Dict[str, Any]], replace_current: bool = True, source: str = "manual"):
-        """导入历史消息到当前会话上下文，并持久化到当前 session 的 history 文件。"""
-        if replace_current:
-            self.history.clear()
-            self.message_count = 0
-            self.touch()
-            self._rewrite_history_file()
-            self._append_history_event(
-                {
-                    "event": "session_start",
-                    "created_at": self.created_at.isoformat(),
-                    "restored_history_messages": 0,
-                    "reset_reason": "history_import",
-                }
-            )
-
-        self._append_history_event(
-            {
-                "event": "history_import",
-                "source": source,
-                "replace_current": replace_current,
-                "imported_messages": len(messages),
-            }
-        )
-        for message in messages:
-            self.add_message(
-                message["role"],
-                message.get("content", ""),
-                action=message.get("action"),
-                dialogue=message.get("dialogue"),
-                source_format=message.get("source_format") or source,
-                schema_version=message.get("schema_version"),
-                imported_timestamp=message.get("timestamp"),
-            )
-
-    def _extend_messages_with_hidden_format_reinjection(self, messages: list[Dict[str, Any]]) -> None:
-        if (
-            not HIDDEN_FORMAT_REINJECTION_ENABLED
-            or HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES <= 0
-        ):
-            messages.extend(self.history)
-            return
-
-        for index, message in enumerate(self.history, start=1):
-            messages.append(message)
-            if index % HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES == 0:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            _HIDDEN_JSON_FORMAT_REINJECTION_PROMPT
-                            if _is_json_reply_enabled()
-                            else _HIDDEN_LEGACY_FORMAT_REINJECTION_PROMPT
-                        ),
-                    }
-                )
-
-    def get_messages(self, text_only: bool = False) -> list:
-        """获取完整消息列表（包含系统提示）"""
-        response_instruction = (
-            _JSON_RESPONSE_FORMAT_INSTRUCTION
-            if _is_json_reply_enabled()
-            else _LEGACY_RESPONSE_FORMAT_INSTRUCTION
-        )
-        if text_only:
-            # text_only 仅代表不生成语音，不改变输出结构
-            response_instruction = f"{response_instruction}\n{_PLAIN_TEXT_RESPONSE_FORMAT_INSTRUCTION}"
-        system_prompt = f"{self.character.get_system_prompt()}\n\n{response_instruction}"
-        system_message: Dict[str, Any] = {
-            "role": "system",
-            "content": system_prompt,
-        }
-        if _should_attach_prefix_cache(system_prompt):
-            system_message["cache_control"] = {"type": "ephemeral"}
-        messages = [system_message]
-        self._extend_messages_with_hidden_format_reinjection(messages)
-        return messages
+def _load_persistent_history(
+    user_uuid: str,
+    character: CharacterConfig,
+) -> list[Dict[str, str]]:
+    return load_persistent_history(
+        DIALOGUE_HISTORY_DIR,
+        user_uuid,
+        character,
+        history_max_messages=SESSION_HISTORY_MAX_MESSAGES,
+    )
 
 
 def create_session(character: CharacterConfig, user_uuid: Optional[str] = None) -> DialogueSession:
@@ -1014,10 +450,21 @@ def create_session(character: CharacterConfig, user_uuid: Optional[str] = None) 
     session_id = str(uuid4())
     normalized_user_uuid = _normalize_user_uuid(user_uuid)
     restored_history = _load_persistent_history(normalized_user_uuid, character)
+    created_at = datetime.now()
     session = DialogueSession(
         session_id,
         character,
         normalized_user_uuid,
+        output_dir=_create_output_dir(character, created_at),
+        history_file=_create_history_file_path(
+            normalized_user_uuid,
+            character,
+            created_at,
+            session_id,
+        ),
+        context_builder=legacy_context_builder,
+        history_max_messages=SESSION_HISTORY_MAX_MESSAGES,
+        created_at=created_at,
         initial_history=restored_history,
     )
     sessions[session_id] = session
@@ -1032,418 +479,26 @@ def create_session(character: CharacterConfig, user_uuid: Optional[str] = None) 
 
 
 def _slugify(name: str) -> str:
-    return name.strip().replace(" ", "_").replace("　", "_").lower()
+    return slugify(name)
 
 
 def _create_output_dir(character: CharacterConfig, created_at: datetime) -> Path:
-    safe_name = _slugify(character.name_en or character.name_zh)
-    timestamp = created_at.strftime("%Y%m%d_%H%M%S")
-    base_name = f"{safe_name}_{timestamp}"
-    output_dir = OUTPUTS_DIR / base_name
-    if output_dir.exists():
-        counter = 1
-        while (OUTPUTS_DIR / f"{base_name}_{counter}").exists():
-            counter += 1
-        output_dir = OUTPUTS_DIR / f"{base_name}_{counter}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
+    return voice_service.create_output_dir(character, created_at)
 
 
 def _build_audio_url(path: Path) -> str:
-    return f"/audio?path={quote(str(path))}"
+    return voice_service.build_audio_url(path)
 
 
 def _is_allowed_audio_path(path: Path) -> bool:
-    try:
-        resolved = path.resolve()
-        return resolved.is_relative_to(OUTPUTS_DIR) or resolved.is_relative_to(CHARACTERS_DIR)
-    except Exception:
-        return False
-
-
-def _strip_stage_directions(text: str) -> str:
-    cleaned = text
-    for pattern in _STAGE_PATTERNS:
-        cleaned = re.sub(pattern, " ", cleaned)
-    lines = []
-    for line in cleaned.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if re.fullmatch(r"[~!！。，、.…\\-—·\\s]+", stripped):
-            continue
-        lines.append(stripped)
-    return " ".join(lines).strip()
-
-
-def _parse_labelled_line(line: str) -> tuple[str, str]:
-    for prefix in _ACTION_PREFIXES:
-        if line.startswith(prefix):
-            return "action", line[len(prefix):].strip()
-    for prefix in _DIALOGUE_PREFIXES:
-        if line.startswith(prefix):
-            return "dialogue", line[len(prefix):].strip()
-
-    match = _LABELLED_LINE_PATTERN.match(line)
-    if not match:
-        return "none", line.strip()
-
-    label = match.group("label").strip().lower()
-    content = match.group("content").strip()
-    if label in _ACTION_LABELS:
-        return "action", content
-    if label in _DIALOGUE_LABELS:
-        return "dialogue", content
-    return "unknown", content
-
-
-def _split_action_payload_by_inline_label(payload: str) -> tuple[str, str]:
-    match = _INLINE_SECOND_LABEL_PATTERN.match(payload.strip())
-    if not match:
-        return "", ""
-
-    action = match.group("action").strip()
-    label = match.group("label").strip().lower()
-    dialogue = match.group("dialogue").strip()
-    if not action or not dialogue:
-        return "", ""
-    if label in _ACTION_LABELS:
-        return "", ""
-
-    # 结构容错：只要出现第二个“短标签:内容”段，就按对白处理
-    return action, dialogue
-
-
-def _split_action_payload(payload: str) -> tuple[str, str]:
-    if not payload:
-        return "", ""
-
-    for marker in _DIALOGUE_PREFIXES:
-        if marker in payload:
-            left, right = payload.split(marker, 1)
-            return left.strip(), right.strip()
-
-    inline_action, inline_dialogue = _split_action_payload_by_inline_label(payload)
-    if inline_dialogue:
-        return inline_action, inline_dialogue
-
-    quote_match = re.search(r"[「“\"]([^」”\"]+)[」”\"]", payload)
-    if quote_match:
-        dialogue = quote_match.group(1).strip()
-        action = (payload[:quote_match.start()] + payload[quote_match.end():]).strip(" ，。;；")
-        if dialogue:
-            return action, dialogue
-
-    sentence_split = re.search(r"[。！？；;…](?=.)", payload)
-    if sentence_split:
-        split_idx = sentence_split.end()
-        action = payload[:split_idx].strip()
-        dialogue = payload[split_idx:].strip()
-        if dialogue:
-            return action, dialogue
-
-    keyword_patterns = ("我是", "我叫", "我会", "我必须", "我不", "我想", "我现在", "你", "训练员")
-    candidate_indexes = []
-    for pat in keyword_patterns:
-        idx = payload.find(pat)
-        if idx > 6:
-            candidate_indexes.append(idx)
-    if candidate_indexes:
-        split_idx = min(candidate_indexes)
-        action = payload[:split_idx].strip(" ，。;；")
-        dialogue = payload[split_idx:].strip()
-        if action and dialogue:
-            return action, dialogue
-
-    return payload.strip(), ""
-
-
-def _split_action_dialogue(reply: str) -> tuple[str, str]:
-    if not reply:
-        return "", ""
-
-    action_lines: list[str] = []
-    dialogue_lines: list[str] = []
-    unmarked_lines: list[str] = []
-    capture_dialogue = False
-    has_marker = False
-
-    for raw_line in reply.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        label_kind, content = _parse_labelled_line(line)
-        if label_kind == "action":
-            has_marker = True
-            capture_dialogue = False
-            if content:
-                action_lines.append(content)
-            continue
-
-        if label_kind == "dialogue":
-            has_marker = True
-            capture_dialogue = True
-            if content:
-                dialogue_lines.append(content)
-            continue
-
-        if label_kind == "unknown" and has_marker:
-            # 已经出现结构标签后，后续未知短标签更可能是“对白标签变体”
-            has_marker = True
-            capture_dialogue = True
-            if content:
-                dialogue_lines.append(content)
-            continue
-
-        if capture_dialogue:
-            dialogue_lines.append(line)
-        elif has_marker:
-            action_lines.append(line)
-        else:
-            unmarked_lines.append(line)
-
-    action_text = " ".join([x for x in action_lines if x]).strip()
-    dialogue_text = " ".join([x for x in dialogue_lines if x]).strip()
-    if dialogue_text:
-        return action_text, dialogue_text
-
-    if action_text and not dialogue_text:
-        inline_action, inline_dialogue = _split_action_payload(action_text)
-        if inline_dialogue:
-            return inline_action, inline_dialogue
-        return inline_action, ""
-
-    if unmarked_lines:
-        return "", " ".join(unmarked_lines).strip()
-
-    return "", reply.strip()
-
-
-def _normalize_structured_reply(reply: str) -> str:
-    action_text, dialogue_text = _split_action_dialogue(reply)
-    if not dialogue_text:
-        dialogue_text = _strip_stage_directions(reply)
-    if not dialogue_text:
-        dialogue_text = reply.strip()
-    if not action_text:
-        action_text = "无"
-    return f"动作：{action_text}\n对白：{dialogue_text}"
-
-
-def _strip_json_code_fence(text: str) -> str:
-    stripped = text.strip()
-    fenced = re.fullmatch(r"```(?:json|JSON)?\s*(.*?)\s*```", stripped, flags=re.DOTALL)
-    if fenced:
-        return fenced.group(1).strip()
-
-    embedded = re.search(r"```(?:json|JSON)?\s*(.*?)\s*```", stripped, flags=re.DOTALL)
-    if embedded:
-        return embedded.group(1).strip()
-    return stripped
-
-
-def _load_json_object_from_text(text: str) -> Dict[str, Any]:
-    stripped = (text or "").strip()
-    if not stripped:
-        raise ValueError("empty model output")
-
-    try:
-        payload = json.loads(stripped)
-    except json.JSONDecodeError:
-        if not config.LLM_JSON_PARSE_LOOSE_JSON:
-            raise
-
-        cleaned = _strip_json_code_fence(stripped)
-        if cleaned != stripped:
-            try:
-                payload = json.loads(cleaned)
-            except json.JSONDecodeError:
-                payload = None
-            else:
-                if isinstance(payload, dict):
-                    return payload
-
-        decoder = json.JSONDecoder()
-        for match in re.finditer(r"\{", stripped):
-            try:
-                payload, _end = decoder.raw_decode(stripped[match.start():])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                return payload
-        raise
-
-    if not isinstance(payload, dict):
-        raise ValueError("JSON output must be an object")
-    return payload
-
-
-def _parse_structured_reply(raw: str, *, source_format: str = "json_v2") -> StructuredReply:
-    payload = _load_json_object_from_text(raw)
-    action = payload.get("action", "无")
-    dialogue = payload.get("dialogue", "")
-
-    if not isinstance(action, str):
-        action = "无"
-    if not isinstance(dialogue, str) or not dialogue.strip():
-        raise ValueError("JSON output missing non-empty dialogue")
-
-    return StructuredReply(
-        action=action.strip() or "无",
-        dialogue=dialogue.strip(),
-        source_format=source_format,
-    )
-
-
-def _structured_reply_from_legacy_text(text: str, *, source_format: str = "legacy_text") -> StructuredReply:
-    normalized = _normalize_structured_reply(text)
-    action_text, dialogue_text = _split_action_dialogue(normalized)
-    if not dialogue_text:
-        dialogue_text = _strip_stage_directions(text) or text.strip()
-    return StructuredReply(
-        action=action_text.strip() or "无",
-        dialogue=dialogue_text.strip() or _SAFE_PARSE_FAILURE_REPLY,
-        source_format=source_format,
-    )
-
-
-def _structured_reply_message(reply: StructuredReply, *, role: str = "assistant") -> Dict[str, Any]:
-    return {
-        "schema_version": reply.schema_version,
-        "role": role,
-        "content": reply.dialogue,
-        "action": reply.action or "无",
-        "dialogue": reply.dialogue,
-        "source_format": reply.source_format,
-    }
-
-
-def _normalize_assistant_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    content = record.get("content")
-    if not isinstance(content, str):
-        content = ""
-
-    action = record.get("action")
-    dialogue = record.get("dialogue")
-    source_format = record.get("source_format") or record.get("sourceFormat") or "json_v2"
-
-    if isinstance(dialogue, str) and dialogue.strip():
-        return {
-            **record,
-            "role": "assistant",
-            "content": dialogue.strip(),
-            "action": action.strip() if isinstance(action, str) and action.strip() else "无",
-            "dialogue": dialogue.strip(),
-            "source_format": source_format,
-            "schema_version": record.get("schema_version") or record.get("schemaVersion") or _STRUCTURED_REPLY_SCHEMA_VERSION,
-        }
-
-    if content.strip():
-        try:
-            reply = _parse_structured_reply(content, source_format="json_v2")
-        except Exception:
-            reply = _structured_reply_from_legacy_text(content, source_format="legacy_text")
-        return {
-            **record,
-            "role": "assistant",
-            "content": reply.dialogue,
-            "action": reply.action,
-            "dialogue": reply.dialogue,
-            "source_format": reply.source_format,
-            "schema_version": reply.schema_version,
-        }
-
-    return {
-        **record,
-        "role": "assistant",
-        "content": _SAFE_PARSE_FAILURE_REPLY,
-        "action": "无",
-        "dialogue": _SAFE_PARSE_FAILURE_REPLY,
-        "source_format": "parse_error",
-        "schema_version": _STRUCTURED_REPLY_SCHEMA_VERSION,
-    }
-
-
-def _to_compact_context_message(record: Dict[str, Any]) -> Dict[str, str]:
-    role = record.get("role")
-    if role == "user":
-        return {"role": "user", "content": str(record.get("content") or "").strip()}
-
-    assistant_record = _normalize_assistant_record({**record, "role": "assistant"})
-    action = str(assistant_record.get("action") or "").strip()
-    dialogue = str(assistant_record.get("dialogue") or assistant_record.get("content") or "").strip()
-    if action and action != "无":
-        content = f"角色动作：{action}\n角色对白：{dialogue}"
-    else:
-        content = f"角色对白：{dialogue}"
-    return {"role": "assistant", "content": content}
+    return voice_service.is_allowed_audio_path(path)
 
 
 async def _complete_structured_reply(messages: list[Dict[str, Any]]) -> StructuredReply:
-    if not _is_json_reply_enabled():
-        response = await llm_client.chat.completions.create(
-            model=config.ROLEPLAY_LLM_MODEL_NAME,
-            messages=messages,
-            temperature=0.7,
-        )
-        return _structured_reply_from_legacy_text(_extract_completion_text(response))
-
-    raw = await _create_json_completion(
-        messages,
-        temperature=config.LLM_JSON_TEMPERATURE,
-        max_tokens=config.LLM_JSON_MAX_TOKENS,
+    _sync_character_runtime_client()
+    return await character_runtime.generate_reply(
+        CharacterReplyContext(messages=messages)
     )
-    try:
-        return _parse_structured_reply(raw)
-    except Exception as first_error:
-        logger.warning("Failed to parse JSON reply, retry=%s: %s", config.LLM_JSON_MAX_RETRIES, first_error)
-
-    retries = max(0, config.LLM_JSON_MAX_RETRIES)
-    for _attempt in range(retries):
-        repair_messages = [
-            *messages,
-            {"role": "assistant", "content": raw},
-            {"role": "user", "content": _REPAIR_JSON_PROMPT},
-        ]
-        raw = await _create_json_completion(
-            repair_messages,
-            temperature=config.LLM_JSON_TEMPERATURE,
-            max_tokens=config.LLM_JSON_MAX_TOKENS,
-            force_prompt_only=True,
-        )
-        try:
-            return _parse_structured_reply(raw, source_format="json_v2_repaired")
-        except Exception as repair_error:
-            logger.warning("Failed to parse repaired JSON reply: %s", repair_error)
-
-    if config.LLM_JSON_REGENERATE_ON_PARSE_FAILURE:
-        regenerate_attempts = max(0, config.LLM_JSON_MAX_REGENERATE_ATTEMPTS)
-        for _attempt in range(regenerate_attempts):
-            regenerate_messages = [
-                *messages,
-                {"role": "user", "content": _REGENERATE_JSON_PROMPT},
-            ]
-            raw = await _create_json_completion(
-                regenerate_messages,
-                temperature=config.LLM_JSON_TEMPERATURE,
-                max_tokens=config.LLM_JSON_MAX_TOKENS,
-                force_prompt_only=True,
-            )
-            try:
-                return _parse_structured_reply(raw, source_format="json_v2_regenerated")
-            except Exception as regenerate_error:
-                logger.warning("Failed to parse regenerated JSON reply: %s", regenerate_error)
-
-    return StructuredReply(action="无", dialogue=_SAFE_PARSE_FAILURE_REPLY, source_format="parse_error")
-
-
-def _extract_dialogue_text(text: str) -> str:
-    _, dialogue_text = _split_action_dialogue(text)
-    if dialogue_text:
-        return dialogue_text
-    cleaned = _strip_stage_directions(text)
-    return cleaned.strip()
 
 
 def get_session(session_id: str) -> Optional[DialogueSession]:
@@ -1609,32 +664,22 @@ async def chat(request: DialogueRequest):
         raise HTTPException(status_code=404, detail="会话不存在")
     
     try:
-        # 添加用户消息
-        session.add_message("user", request.message)
-        
-        # 调用 LLM 并解析为结构化回复
-        structured_reply = await _complete_structured_reply(session.get_messages(text_only=request.text_only))
-        
-        # 添加助手回复
-        session.add_message(
-            "assistant",
-            structured_reply.dialogue,
-            action=structured_reply.action,
-            dialogue=structured_reply.dialogue,
-            source_format=structured_reply.source_format,
-            schema_version=structured_reply.schema_version,
+        _sync_character_runtime_client()
+        turn_result = await dialogue_service.execute_turn(
+            session=session,
+            message=request.message,
+            text_only=request.text_only,
         )
-        
-        result = {
-            "action": structured_reply.action,
-            "dialogue": structured_reply.dialogue,
-            "message": _structured_reply_message(structured_reply),
-        }
+        result = turn_result.to_api_dict()
         
         # 生成语音（如果需要）
         if _should_generate_voice(request, session):
             voice_plan = _reserve_voice_output(session)
-            voice_info = await _generate_voice_for_reply(session, structured_reply.dialogue, voice_plan)
+            voice_info = await _generate_voice_for_reply(
+                session,
+                turn_result.reply.dialogue,
+                voice_plan,
+            )
             if voice_info:
                 result["voice"] = voice_info
         
@@ -1658,27 +703,16 @@ async def chat_stream(request: DialogueRequest):
     
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            # 添加用户消息
-            session.add_message("user", request.message)
-
             if _is_json_reply_enabled():
-                structured_reply = await _complete_structured_reply(session.get_messages(text_only=request.text_only))
-
-                session.add_message(
-                    "assistant",
-                    structured_reply.dialogue,
-                    action=structured_reply.action,
-                    dialogue=structured_reply.dialogue,
-                    source_format=structured_reply.source_format,
-                    schema_version=structured_reply.schema_version,
+                _sync_character_runtime_client()
+                turn_result = await dialogue_service.execute_turn(
+                    session=session,
+                    message=request.message,
+                    text_only=request.text_only,
                 )
 
                 payload = json.dumps(
-                    {
-                        "action": structured_reply.action,
-                        "dialogue": structured_reply.dialogue,
-                        "message": _structured_reply_message(structured_reply),
-                    },
+                    turn_result.to_api_dict(),
                     ensure_ascii=False,
                 )
                 yield f"event: structured_reply\ndata: {payload}\n\n"
@@ -1688,8 +722,17 @@ async def chat_stream(request: DialogueRequest):
                     voice_plan = _reserve_voice_output(session)
                     voice_payload = json.dumps(voice_plan, ensure_ascii=False)
                     yield f"event: voice_pending\ndata: {voice_payload}\n\n"
-                    asyncio.create_task(_generate_voice_for_reply(session, structured_reply.dialogue, voice_plan))
+                    asyncio.create_task(
+                        _generate_voice_for_reply(
+                            session,
+                            turn_result.reply.dialogue,
+                            voice_plan,
+                        )
+                    )
                 return
+
+            # 旧两行协议仍保持 token 流式行为。
+            session.add_message("user", request.message)
             
             # 流式调用 LLM
             stream = await llm_client.chat.completions.create(
@@ -1960,16 +1003,7 @@ async def head_audio(path: str):
 # ============= 辅助函数 =============
 
 def _reserve_voice_output(session: DialogueSession) -> Dict[str, Any]:
-    session.voice_index += 1
-    output_name = f"reply_{session.voice_index:03d}.wav"
-    target_path = session.output_dir / output_name
-    return {
-        "audio_path": str(target_path),
-        "audio_url": _build_audio_url(target_path),
-        "index": session.voice_index,
-        "output_dir": str(session.output_dir),
-        "output_name": output_name,
-    }
+    return voice_service.reserve_output(session)
 
 
 async def _generate_voice_for_reply(
@@ -1977,56 +1011,12 @@ async def _generate_voice_for_reply(
     dialogue_text: str,
     voice_plan: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    try:
-        voice_config = session.character.get_voice_config()
-        if voice_config.get("no_voice") or not voice_config.get("ref_audio_path"):
-            logger.info(f"Skipping TTS generation for session {session.session_id}: no_voice is True or ref_audio_path is missing")
-            return None
-            
-        prompt_audio_path = voice_config["ref_audio_path"]
-        output_name = voice_plan["output_name"]
-        target_path = Path(voice_plan["audio_path"])
-        raw_dialogue = dialogue_text or ""
-        tts_text = raw_dialogue.strip()
-        if not tts_text:
-            tts_text = _strip_stage_directions(raw_dialogue)
-        if not tts_text:
-            logger.warning("Skipping TTS generation for session %s: empty dialogue text", session.session_id)
-            return None
-
-        result = await tts_client.synthesize(
-            text=tts_text,
-            prompt_wav_path=prompt_audio_path,
-            output_name=output_name,
-        )
-
-        source_path = Path(result.get("audio_path", ""))
-        if not source_path.exists():
-            raise FileNotFoundError(f"TTS output not found: {source_path}")
-
-        if source_path.resolve() != target_path.resolve():
-            if target_path.exists():
-                target_path.unlink()
-            shutil.move(str(source_path), str(target_path))
-
-        voice_info = {
-            "audio_path": str(target_path),
-            "audio_url": _build_audio_url(target_path),
-            "prompt_audio_path": result.get("prompt_audio_path"),
-            "sample_rate": result.get("sample_rate"),
-            "index": voice_plan["index"],
-            "output_dir": voice_plan["output_dir"],
-            "tts_text": tts_text,
-        }
-        session.audio_history.append(voice_info)
-        return voice_info
-
-    except (MCPToolError, FileNotFoundError) as e:
-        logger.error(f"TTS MCP error: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Failed to generate voice: {e}")
-        return None
+    voice_service.client = tts_client
+    return await voice_service.generate_for_reply(
+        session,
+        dialogue_text,
+        voice_plan,
+    )
 
 
 # ============= 启动入口 =============

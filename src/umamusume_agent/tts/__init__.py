@@ -3,6 +3,7 @@ Text-to-Speech helpers.
 """
 
 from .mcp_client import IndexTTSMCPClient, IndexTTSMCPConfig, MCPToolError
+from .service import VoiceService
 
 try:
     from .engine import TTSEngine, CosyVoice3Engine, get_tts_engine
@@ -15,6 +16,7 @@ __all__ = [
     "IndexTTSMCPClient",
     "IndexTTSMCPConfig",
     "MCPToolError",
+    "VoiceService",
     "TTSEngine",
     "CosyVoice3Engine",
     "get_tts_engine",
