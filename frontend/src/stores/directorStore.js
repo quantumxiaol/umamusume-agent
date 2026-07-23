@@ -8,17 +8,185 @@ import {
   fetchDirectorHistory,
   fetchDirectorSession,
   fetchDirectorTemplates,
+  recoverDirectorSession,
   resumeDirectorHistory,
 } from '@/services/api';
 import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
 
 
 const DIRECTOR_ACTIVE_SESSION_PREFIX = 'umamusume_director_active_v1';
+const DIRECTOR_SCENE_CACHE_PREFIX = 'umamusume_director_scene_v1';
+const DIRECTOR_HISTORY_INDEX_PREFIX = 'umamusume_director_history_index_v1';
+const DIRECTOR_DELETED_INDEX_PREFIX = 'umamusume_director_deleted_v1';
+const DIRECTOR_LOCAL_HISTORY_LIMIT = 30;
 
 
 const activeSessionKey = (userUuid) => (
   `${DIRECTOR_ACTIVE_SESSION_PREFIX}:${encodeURIComponent(userUuid || '')}`
 );
+
+
+const sceneCacheKey = (userUuid, sessionId) => (
+  `${DIRECTOR_SCENE_CACHE_PREFIX}:${encodeURIComponent(userUuid || '')}:${encodeURIComponent(sessionId || '')}`
+);
+
+
+const historyIndexKey = (userUuid) => (
+  `${DIRECTOR_HISTORY_INDEX_PREFIX}:${encodeURIComponent(userUuid || '')}`
+);
+
+
+const deletedIndexKey = (userUuid) => (
+  `${DIRECTOR_DELETED_INDEX_PREFIX}:${encodeURIComponent(userUuid || '')}`
+);
+
+
+const readStringArray = (key) => {
+  if (typeof localStorage === 'undefined') {
+    return [];
+  }
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(value)
+      ? value.map((item) => String(item || '')).filter(Boolean)
+      : [];
+  } catch (_err) {
+    return [];
+  }
+};
+
+
+const writeStringArray = (key, values) => {
+  if (typeof localStorage === 'undefined') {
+    return false;
+  }
+  try {
+    localStorage.setItem(key, JSON.stringify([...new Set(values)]));
+    return true;
+  } catch (_err) {
+    return false;
+  }
+};
+
+
+const readSceneSnapshot = (userUuid, sessionId) => {
+  if (!userUuid || !sessionId || typeof localStorage === 'undefined') {
+    return null;
+  }
+  try {
+    const snapshot = JSON.parse(
+      localStorage.getItem(sceneCacheKey(userUuid, sessionId)) || 'null',
+    );
+    if (
+      !snapshot
+      || snapshot.schema_version !== 1
+      || snapshot.user_uuid !== userUuid
+      || snapshot.session_id !== sessionId
+    ) {
+      return null;
+    }
+    return snapshot;
+  } catch (_err) {
+    return null;
+  }
+};
+
+
+const writeSceneSnapshot = (userUuid, snapshot) => {
+  const sessionId = String(snapshot?.session_id || '');
+  if (!userUuid || !sessionId || typeof localStorage === 'undefined') {
+    return false;
+  }
+  const indexKey = historyIndexKey(userUuid);
+  let sessionIds = [
+    sessionId,
+    ...readStringArray(indexKey).filter((item) => item !== sessionId),
+  ];
+  const evicted = sessionIds.slice(DIRECTOR_LOCAL_HISTORY_LIMIT);
+  sessionIds = sessionIds.slice(0, DIRECTOR_LOCAL_HISTORY_LIMIT);
+  try {
+    localStorage.setItem(
+      sceneCacheKey(userUuid, sessionId),
+      JSON.stringify(snapshot),
+    );
+    localStorage.setItem(indexKey, JSON.stringify(sessionIds));
+    evicted.forEach((item) => {
+      localStorage.removeItem(sceneCacheKey(userUuid, item));
+    });
+    return true;
+  } catch (_err) {
+    const oldest = sessionIds[sessionIds.length - 1];
+    if (oldest && oldest !== sessionId) {
+      localStorage.removeItem(sceneCacheKey(userUuid, oldest));
+      try {
+        const reduced = sessionIds.filter((item) => item !== oldest);
+        localStorage.setItem(
+          sceneCacheKey(userUuid, sessionId),
+          JSON.stringify(snapshot),
+        );
+        localStorage.setItem(indexKey, JSON.stringify(reduced));
+        return true;
+      } catch (_retryError) {
+        return false;
+      }
+    }
+    return false;
+  }
+};
+
+
+const removeSceneSnapshot = (userUuid, sessionId) => {
+  if (!userUuid || !sessionId || typeof localStorage === 'undefined') {
+    return;
+  }
+  localStorage.removeItem(sceneCacheKey(userUuid, sessionId));
+  writeStringArray(
+    historyIndexKey(userUuid),
+    readStringArray(historyIndexKey(userUuid)).filter((item) => item !== sessionId),
+  );
+};
+
+
+const markSceneDeleted = (userUuid, sessionId) => {
+  writeStringArray(
+    deletedIndexKey(userUuid),
+    [
+      sessionId,
+      ...readStringArray(deletedIndexKey(userUuid))
+        .filter((item) => item !== sessionId),
+    ].slice(0, 100),
+  );
+};
+
+
+const localSceneSnapshots = (userUuid) => (
+  readStringArray(historyIndexKey(userUuid))
+    .map((sessionId) => readSceneSnapshot(userUuid, sessionId))
+    .filter(Boolean)
+);
+
+
+const snapshotSummary = (snapshot) => {
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const latest = events[events.length - 1] || {};
+  return {
+    session_id: snapshot.session_id,
+    template_id: snapshot.template?.template_id || '',
+    scene_name: snapshot.template?.name || '导演场景',
+    location: snapshot.scene_state?.location || '',
+    time: snapshot.scene_state?.time || '',
+    character_names: (snapshot.participants || [])
+      .filter((item) => ['umamusume', 'npc'].includes(item?.actor?.actor_type))
+      .map((item) => item.actor.display_name),
+    turn_index: Number(snapshot.turn_index || 0),
+    event_count: events.length,
+    preview: String(latest.dialogue || latest.content || latest.action || '').slice(0, 160),
+    created_at: snapshot.created_at,
+    updated_at: snapshot.last_active_at || snapshot.created_at,
+    is_custom: String(snapshot.template?.template_id || '').startsWith('custom_'),
+    source: 'browser',
+  };
+};
 
 
 const readActiveSession = (userUuid) => {
@@ -97,6 +265,8 @@ export const useDirectorStore = defineStore('director', {
     sceneState: {},
     events: [],
     turnIndex: 0,
+    createdAt: '',
+    lastActiveAt: '',
     inputMode: 'dialogue',
     queuedEvents: [],
     historyScenes: [],
@@ -143,6 +313,8 @@ export const useDirectorStore = defineStore('director', {
       this.sceneState = data.scene_state || {};
       this.events = data.events || [];
       this.turnIndex = data.turn_index || 0;
+      this.createdAt = data.created_at || new Date().toISOString();
+      this.lastActiveAt = data.last_active_at || this.createdAt;
       this.storyOutline = data.story_outline || '';
       this.selectedCharacterNames = this.participants
         .filter((item) => ['umamusume', 'npc'].includes(item?.actor?.actor_type))
@@ -154,7 +326,47 @@ export const useDirectorStore = defineStore('director', {
       }
       if (this.sessionId && this.currentUserUuid) {
         writeActiveSession(this.currentUserUuid, this.sessionId);
+        this._persistCurrentScene();
       }
+    },
+
+    _currentSnapshot() {
+      if (!this.sessionId || !this.currentUserUuid || !this.activeTemplate) {
+        return null;
+      }
+      return {
+        schema_version: 1,
+        session_id: this.sessionId,
+        user_uuid: this.currentUserUuid,
+        template: this.activeTemplate,
+        story_outline: this.storyOutline || '',
+        player: this.participants.find(
+          (item) => item?.actor?.actor_id === 'player',
+        )?.actor || {
+          actor_id: 'player',
+          actor_type: 'trainer',
+          display_name: '训练员',
+          role_in_scene: 'trainer',
+        },
+        participants: this.participants,
+        scene_state: this.sceneState,
+        turn_index: this.turnIndex,
+        events: this.events,
+        created_at: this.createdAt || new Date().toISOString(),
+        last_active_at: this.lastActiveAt || new Date().toISOString(),
+      };
+    },
+
+    _persistCurrentScene() {
+      const snapshot = this._currentSnapshot();
+      if (!snapshot) {
+        return false;
+      }
+      const saved = writeSceneSnapshot(this.currentUserUuid, snapshot);
+      if (!saved) {
+        this.historyError = '浏览器存储空间不足，当前场景可能无法在服务重启后恢复。';
+      }
+      return saved;
     },
 
     _clearCurrentScene() {
@@ -164,19 +376,32 @@ export const useDirectorStore = defineStore('director', {
       this.sceneState = {};
       this.events = [];
       this.turnIndex = 0;
+      this.createdAt = '';
+      this.lastActiveAt = '';
       this.queuedEvents = [];
+    },
+
+    async _loadSessionWithFallback(sessionId, userUuid) {
+      const localSnapshot = readSceneSnapshot(userUuid, sessionId);
+      try {
+        return await fetchDirectorSession(sessionId, userUuid);
+      } catch (_liveError) {
+        try {
+          return await resumeDirectorHistory(sessionId, userUuid);
+        } catch (historyError) {
+          if (!localSnapshot) {
+            throw historyError;
+          }
+          return recoverDirectorSession(localSnapshot, userUuid);
+        }
+      }
     },
 
     async restoreActiveSession(sessionId, userUuid) {
       this.isRestoring = true;
       this.historyError = null;
       try {
-        let data;
-        try {
-          data = await fetchDirectorSession(sessionId);
-        } catch (_liveError) {
-          data = await resumeDirectorHistory(sessionId, userUuid);
-        }
+        const data = await this._loadSessionWithFallback(sessionId, userUuid);
         this._applySnapshot(data, userUuid);
         return true;
       } catch (err) {
@@ -196,11 +421,30 @@ export const useDirectorStore = defineStore('director', {
       this.currentUserUuid = resolvedUserUuid;
       this.isHistoryLoading = true;
       this.historyError = null;
+      const deletedIds = new Set(
+        readStringArray(deletedIndexKey(resolvedUserUuid)),
+      );
+      const localScenes = localSceneSnapshots(resolvedUserUuid)
+        .filter((snapshot) => !deletedIds.has(snapshot.session_id))
+        .map(snapshotSummary);
+      this.historyScenes = localScenes;
       try {
         const data = await fetchDirectorHistory(resolvedUserUuid);
-        this.historyScenes = data.scenes || [];
+        const merged = new Map(
+          (data.scenes || [])
+            .filter((scene) => !deletedIds.has(scene.session_id))
+            .map((scene) => [scene.session_id, scene]),
+        );
+        localScenes.forEach((scene) => merged.set(scene.session_id, scene));
+        this.historyScenes = [...merged.values()].sort(
+          (left, right) => (
+            Date.parse(right.updated_at || 0) - Date.parse(left.updated_at || 0)
+          ),
+        );
       } catch (err) {
-        this.historyError = err.message || '读取场景历史失败。';
+        if (!localScenes.length) {
+          this.historyError = err.message || '读取场景历史失败。';
+        }
       } finally {
         this.isHistoryLoading = false;
       }
@@ -215,7 +459,10 @@ export const useDirectorStore = defineStore('director', {
       this.error = null;
       this.historyError = null;
       try {
-        const data = await resumeDirectorHistory(sessionId, resolvedUserUuid);
+        const data = await this._loadSessionWithFallback(
+          sessionId,
+          resolvedUserUuid,
+        );
         this._applySnapshot(data, resolvedUserUuid);
         return true;
       } catch (err) {
@@ -233,19 +480,21 @@ export const useDirectorStore = defineStore('director', {
       }
       this.isHistoryLoading = true;
       this.historyError = null;
+      removeSceneSnapshot(resolvedUserUuid, sessionId);
+      markSceneDeleted(resolvedUserUuid, sessionId);
+      this.historyScenes = this.historyScenes.filter(
+        (item) => item.session_id !== sessionId,
+      );
+      if (this.sessionId === sessionId) {
+        this._clearCurrentScene();
+        clearActiveSession(resolvedUserUuid);
+      }
       try {
         await deleteDirectorHistory(sessionId, resolvedUserUuid);
-        this.historyScenes = this.historyScenes.filter(
-          (item) => item.session_id !== sessionId,
-        );
-        if (this.sessionId === sessionId) {
-          this._clearCurrentScene();
-          clearActiveSession(resolvedUserUuid);
-        }
         return true;
       } catch (err) {
-        this.historyError = err.message || '删除场景历史失败。';
-        return false;
+        this.historyError = '浏览器历史已删除；后端当前不可用，残留记录将在服务端可用时忽略。';
+        return true;
       } finally {
         this.isHistoryLoading = false;
       }
@@ -371,7 +620,7 @@ export const useDirectorStore = defineStore('director', {
       this.error = null;
       if (sessionId) {
         try {
-          await deleteDirectorSession(sessionId);
+          await deleteDirectorSession(sessionId, userUuid);
         } catch (_err) {
           // Local reset is still complete; server TTL will remove stale state.
         }
@@ -388,6 +637,15 @@ export const useDirectorStore = defineStore('director', {
       }
       this.events.push(event);
       this.turnIndex = Math.max(this.turnIndex, Number(event.turn_index || 0));
+      if (event.scene_patch && typeof event.scene_patch === 'object') {
+        const patch = Object.fromEntries(
+          Object.entries(event.scene_patch)
+            .filter(([, value]) => value !== null && value !== undefined),
+        );
+        this.sceneState = { ...this.sceneState, ...patch };
+      }
+      this.lastActiveAt = new Date().toISOString();
+      this._persistCurrentScene();
     },
 
     async sendTurn(content = '') {
@@ -415,16 +673,21 @@ export const useDirectorStore = defineStore('director', {
             speaker: event.speaker,
             event_type: event.event_type,
           })),
+          this.currentUserUuid,
           ({ type, data }) => {
             if (type === 'scene_event' || type === 'character_reply') {
               this._appendEvent(data);
             } else if (type === 'scene_state') {
               this.sceneState = data || {};
+              this.lastActiveAt = new Date().toISOString();
+              this._persistCurrentScene();
             } else if (type === 'error') {
               this.error = data?.detail || '导演模式执行失败。';
             }
           },
         );
+        this.lastActiveAt = new Date().toISOString();
+        this._persistCurrentScene();
         return !this.error;
       } catch (err) {
         this.error = this.error || err.message || '导演模式执行失败。';

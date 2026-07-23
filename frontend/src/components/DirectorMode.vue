@@ -298,7 +298,7 @@ onMounted(() => store.init(props.userUuid));
           <div>
             <p class="section-kicker">Director History</p>
             <h2>场景历史</h2>
-            <p class="cast-help">刷新页面或服务重启后，都可以从这里继续之前的场景。</p>
+            <p class="cast-help">完整场景保存在当前浏览器；即使服务重启，也可以从这里继续。</p>
           </div>
           <button
             type="button"

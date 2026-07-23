@@ -270,20 +270,36 @@ export const createDirectorSession = async (
   }
 };
 
-export const deleteDirectorSession = async (sessionId) => {
+export const deleteDirectorSession = async (sessionId, userUuid) => {
   try {
-    const response = await apiClient.delete(`/director/sessions/${encodeURIComponent(sessionId)}`);
+    const response = await apiClient.delete(
+      `/director/sessions/${encodeURIComponent(sessionId)}`,
+      { params: { user_uuid: userUuid } },
+    );
     return response.data || {};
   } catch (error) {
     throw parseError(error);
   }
 };
 
-export const fetchDirectorSession = async (sessionId) => {
+export const fetchDirectorSession = async (sessionId, userUuid) => {
   try {
     const response = await apiClient.get(
       `/director/sessions/${encodeURIComponent(sessionId)}`,
+      { params: { user_uuid: userUuid } },
     );
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const recoverDirectorSession = async (snapshot, userUuid) => {
+  try {
+    const response = await apiClient.post('/director/sessions/recover', {
+      user_uuid: userUuid,
+      snapshot,
+    });
     return response.data || {};
   } catch (error) {
     throw parseError(error);
@@ -325,7 +341,7 @@ export const deleteDirectorHistory = async (sessionId, userUuid) => {
   }
 };
 
-export const directorTurnStream = async (sessionId, events, onEvent) => {
+export const directorTurnStream = async (sessionId, events, userUuid, onEvent) => {
   try {
     const response = await fetch(`${API_BASE_URL}/director/turn_stream`, {
       method: 'POST',
@@ -334,6 +350,7 @@ export const directorTurnStream = async (sessionId, events, onEvent) => {
       }),
       body: JSON.stringify({
         session_id: sessionId,
+        user_uuid: userUuid,
         events,
       }),
     });

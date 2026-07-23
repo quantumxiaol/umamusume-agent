@@ -14,7 +14,7 @@ from openai import APIConnectionError, APITimeoutError, APIStatusError
 from pydantic import BaseModel
 
 from ..dialogue.models import DialogueInputEvent
-from ..director.models import CustomSceneDefinition
+from ..director.models import CustomSceneDefinition, SceneRecoverySnapshot
 from ..director.service import DirectorService
 from ..director.session import SceneSession
 
@@ -29,11 +29,17 @@ class CreateDirectorSessionRequest(BaseModel):
 
 class DirectorTurnRequest(BaseModel):
     session_id: str
+    user_uuid: str
     events: list[DialogueInputEvent]
 
 
 class DirectorHistoryRequest(BaseModel):
     user_uuid: str
+
+
+class DirectorRecoveryRequest(BaseModel):
+    user_uuid: str
+    snapshot: SceneRecoverySnapshot
 
 
 def _normalize_user_uuid(value: str | None) -> str:
@@ -79,10 +85,11 @@ def create_director_router(
         for session_id in expired:
             sessions.pop(session_id, None)
 
-    def get_session(session_id: str) -> SceneSession:
+    def get_session(session_id: str, user_uuid: str) -> SceneSession:
         cleanup_sessions()
         session = sessions.get(session_id)
-        if session is None:
+        normalized_user_uuid = _normalize_user_uuid(user_uuid)
+        if session is None or session.user_uuid != normalized_user_uuid:
             raise HTTPException(status_code=404, detail="导演场景会话不存在")
         session.touch()
         return session
@@ -173,20 +180,50 @@ def create_director_router(
         sessions[session.session_id] = session
         return session.public_snapshot()
 
+    @router.post("/sessions/recover")
+    async def recover_scene_session(
+        request: DirectorRecoveryRequest,
+    ) -> dict[str, Any]:
+        cleanup_sessions()
+        user_uuid = _normalize_user_uuid(request.user_uuid)
+        live_session = sessions.get(request.snapshot.session_id)
+        if live_session is not None:
+            if live_session.user_uuid != user_uuid:
+                raise HTTPException(status_code=404, detail="导演场景会话不存在")
+            live_session.touch()
+            return live_session.public_snapshot()
+        try:
+            session = await service.recover_browser_snapshot(
+                user_uuid=user_uuid,
+                snapshot=request.snapshot,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        sessions[session.session_id] = session
+        return session.public_snapshot()
+
     @router.get("/sessions/{session_id}")
-    async def get_scene_session(session_id: str) -> dict[str, Any]:
-        return get_session(session_id).public_snapshot()
+    async def get_scene_session(
+        session_id: str,
+        user_uuid: str,
+    ) -> dict[str, Any]:
+        return get_session(session_id, user_uuid).public_snapshot()
 
     @router.delete("/sessions/{session_id}")
-    async def delete_scene_session(session_id: str) -> dict[str, Any]:
-        session = sessions.pop(session_id, None)
-        if session is None:
+    async def delete_scene_session(
+        session_id: str,
+        user_uuid: str,
+    ) -> dict[str, Any]:
+        session = get_session(session_id, user_uuid)
+        if sessions.pop(session.session_id, None) is None:
             raise HTTPException(status_code=404, detail="导演场景会话不存在")
         return {"status": "deleted", "session_id": session_id}
 
     @router.post("/turn")
     async def director_turn(request: DirectorTurnRequest) -> dict[str, Any]:
-        session = get_session(request.session_id)
+        session = get_session(request.session_id, request.user_uuid)
         try:
             events = await service.execute_turn(session, request.events)
         except ValueError as exc:
@@ -204,7 +241,7 @@ def create_director_router(
     async def director_turn_stream(
         request: DirectorTurnRequest,
     ) -> StreamingResponse:
-        session = get_session(request.session_id)
+        session = get_session(request.session_id, request.user_uuid)
 
         async def event_generator():
             try:

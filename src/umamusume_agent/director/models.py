@@ -104,3 +104,20 @@ class DirectorPlan(BaseModel):
     scene_patch: SceneStatePatch = Field(default_factory=SceneStatePatch)
     narration: str = ""
     speakers: list[DirectorSpeakerPlan] = Field(default_factory=list)
+
+
+class SceneRecoverySnapshot(BaseModel):
+    """Public browser-owned snapshot used after an ephemeral backend reset."""
+
+    schema_version: int = DIRECTOR_SCHEMA_VERSION
+    session_id: str
+    user_uuid: str
+    template: SceneTemplate
+    story_outline: str = ""
+    player: ActorRef
+    participants: list[ActorInstance]
+    scene_state: SceneState
+    turn_index: int = 0
+    events: list[SceneEvent] = Field(default_factory=list)
+    created_at: datetime
+    last_active_at: datetime

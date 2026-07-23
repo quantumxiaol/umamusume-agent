@@ -17,9 +17,12 @@ Director mode is a separate multi-character scene layer. It reuses
 - Public events are visible to every participant.
 - The director may patch scene state and add narration, but cannot author
   character action or dialogue.
-- Scene history is text-only and stored separately under `outputs/director`.
-- Active scene IDs are cached in the browser. JSONL histories can rebuild the
-  timeline plus every director/character prompt thread after memory loss.
+- Scene history is text-only. Each browser stores its full public scene snapshot
+  in `localStorage`, scoped by that browser's generated `user_uuid`.
+- The backend also writes a best-effort JSONL copy under `outputs/director`.
+  JSONL can exactly rebuild every prompt thread while the Space filesystem
+  survives; the browser snapshot can rebuild a fresh append-only context after
+  an ephemeral Hugging Face container loses both memory and files.
 - There is no autonomous loop, private memory, relationship inheritance, or
   mid-scene cast expansion in V1.
 
@@ -81,6 +84,7 @@ uncompacted.
 
 - `GET /director/templates`
 - `POST /director/sessions`
+- `POST /director/sessions/recover`
 - `GET /director/sessions/{session_id}`
 - `DELETE /director/sessions/{session_id}`
 - `GET /director/history`
@@ -95,8 +99,14 @@ and finally `done`.
 `POST /director/sessions` accepts either `template_id` or `custom_scene`, never
 both. `story_outline` is independent and optional for either form.
 
+Session reads, turns, and deletes include `user_uuid`. Browser recovery accepts
+only public events, validates the cast and final scene state, reloads each
+character card on the backend, and rejects hidden director events. This UUID is
+browser-instance isolation rather than account authentication: clearing browser
+storage or copying a UUID changes that boundary.
+
 Deleting an in-memory session ends the current browser scene but keeps its
-JSONL history. Deleting the corresponding history endpoint permanently removes
-that scene directory. On Hugging Face Persistent Storage, point
-`DIRECTOR_HISTORY_DIRECTORY` at a path under `/data` to retain histories across
-image rebuilds.
+browser and JSONL history. Deleting the corresponding history removes the
+browser snapshot immediately and removes the backend copy when reachable. No
+Hugging Face Persistent Storage is required; clearing local browser data loses
+the browser-owned recovery copy.

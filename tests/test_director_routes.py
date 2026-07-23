@@ -1,3 +1,4 @@
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,6 +80,7 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
             "/director/turn",
             json={
                 "session_id": created["session_id"],
+                "user_uuid": created["user_uuid"],
                 "events": [
                     {
                         "content": "你们今天训练得怎么样？",
@@ -135,6 +137,7 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
             "/director/turn_stream",
             json={
                 "session_id": created["session_id"],
+                "user_uuid": created["user_uuid"],
                 "events": [
                     {
                         "content": "夜幕降临。",
@@ -163,6 +166,7 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
             "/director/turn",
             json={
                 "session_id": created["session_id"],
+                "user_uuid": created["user_uuid"],
                 "events": [{"content": "训练场的灯亮了。", "event_type": "scene_event"}],
             },
         )
@@ -206,6 +210,97 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
             params={"user_uuid": created["user_uuid"]},
         )
         self.assertEqual(history_response.json()["scenes"], [])
+
+    async def test_browser_snapshot_recovers_after_ephemeral_storage_loss(self):
+        created = await self._create_session()
+        turn_response = await self.client.post(
+            "/director/turn",
+            json={
+                "session_id": created["session_id"],
+                "user_uuid": created["user_uuid"],
+                "events": [{"content": "夜色更深了。", "event_type": "scene_event"}],
+            },
+        )
+        self.assertEqual(turn_response.status_code, 200)
+        live_response = await self.client.get(
+            f"/director/sessions/{created['session_id']}",
+            params={"user_uuid": created["user_uuid"]},
+        )
+        snapshot = live_response.json()
+
+        self.sessions.clear()
+        for history_file in Path(self.temp_dir.name).rglob("scene.jsonl"):
+            history_file.unlink()
+
+        missing_history = await self.client.post(
+            f"/director/history/{created['session_id']}/resume",
+            json={"user_uuid": created["user_uuid"]},
+        )
+        self.assertEqual(missing_history.status_code, 404)
+
+        hidden_snapshot = copy.deepcopy(snapshot)
+        hidden_snapshot["events"][0]["hidden"] = True
+        rejected = await self.client.post(
+            "/director/sessions/recover",
+            json={
+                "user_uuid": created["user_uuid"],
+                "snapshot": hidden_snapshot,
+            },
+        )
+        self.assertEqual(rejected.status_code, 400)
+
+        recovered = await self.client.post(
+            "/director/sessions/recover",
+            json={
+                "user_uuid": created["user_uuid"],
+                "snapshot": snapshot,
+            },
+        )
+        self.assertEqual(recovered.status_code, 200)
+        self.assertEqual(
+            [event["event_id"] for event in recovered.json()["events"]],
+            [event["event_id"] for event in snapshot["events"]],
+        )
+        self.assertEqual(recovered.json()["scene_state"], snapshot["scene_state"])
+        self.assertEqual(recovered.json()["turn_index"], 1)
+
+        continued = await self.client.post(
+            "/director/turn",
+            json={
+                "session_id": created["session_id"],
+                "user_uuid": created["user_uuid"],
+                "events": [{"content": "我们回去吧。", "event_type": "dialogue"}],
+            },
+        )
+        self.assertEqual(continued.status_code, 200)
+        self.assertEqual(continued.json()["turn_index"], 2)
+
+    async def test_live_scene_access_is_scoped_to_browser_user(self):
+        created = await self._create_session()
+        wrong_user = "00000000-0000-4000-8000-000000000099"
+
+        get_response = await self.client.get(
+            f"/director/sessions/{created['session_id']}",
+            params={"user_uuid": wrong_user},
+        )
+        self.assertEqual(get_response.status_code, 404)
+
+        turn_response = await self.client.post(
+            "/director/turn",
+            json={
+                "session_id": created["session_id"],
+                "user_uuid": wrong_user,
+                "events": [{"content": "不应写入", "event_type": "dialogue"}],
+            },
+        )
+        self.assertEqual(turn_response.status_code, 404)
+
+        snapshot = created | {"user_uuid": wrong_user}
+        recover_response = await self.client.post(
+            "/director/sessions/recover",
+            json={"user_uuid": wrong_user, "snapshot": snapshot},
+        )
+        self.assertEqual(recover_response.status_code, 404)
 
 
 if __name__ == "__main__":

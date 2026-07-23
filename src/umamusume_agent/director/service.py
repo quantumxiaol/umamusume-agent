@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ from .models import (
     CustomSceneDefinition,
     DirectorPlan,
     SceneEvent,
+    SceneRecoverySnapshot,
     SceneState,
     SceneStatePatch,
     SceneTemplate,
@@ -38,6 +40,7 @@ from .models import (
 from .runtime import DirectorRuntime
 from .session import SceneSession
 from .templates import SceneTemplateRepository
+from .timeline import SceneTimeline
 
 
 class DirectorService:
@@ -348,6 +351,201 @@ class DirectorService:
         raise InvalidSceneHistory(
             f"无法加载历史角色: {actor.display_name}"
         ) from last_error
+
+    async def recover_browser_snapshot(
+        self,
+        *,
+        user_uuid: str,
+        snapshot: SceneRecoverySnapshot,
+    ) -> SceneSession:
+        """Rebuild a viable scene from browser-owned public history."""
+
+        if snapshot.schema_version != 1:
+            raise InvalidSceneHistory("不支持的浏览器场景快照版本")
+        if snapshot.user_uuid != user_uuid:
+            raise InvalidSceneHistory("浏览器场景快照不属于当前用户")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", snapshot.session_id):
+            raise InvalidSceneHistory("浏览器场景快照的 session_id 无效")
+        if not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,128}",
+            snapshot.template.template_id,
+        ):
+            raise InvalidSceneHistory("浏览器场景快照的场景 ID 无效")
+        if (
+            snapshot.player.actor_id != "player"
+            or snapshot.player.actor_type != "trainer"
+        ):
+            raise InvalidSceneHistory("浏览器场景快照的训练员身份无效")
+        if snapshot.turn_index < 0:
+            raise InvalidSceneHistory("浏览器场景快照的轮数无效")
+        if len(snapshot.events) > 5000:
+            raise InvalidSceneHistory("浏览器场景快照事件过多")
+        if len(snapshot.story_outline) > 20_000:
+            raise InvalidSceneHistory("浏览器场景快照的剧情大纲过长")
+        if len(snapshot.template.model_dump_json()) > 100_000:
+            raise InvalidSceneHistory("浏览器场景快照的场景定义过大")
+
+        participant_by_id: dict[str, ActorInstance] = {}
+        for participant in snapshot.participants:
+            actor = participant.actor
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", actor.actor_id):
+                raise InvalidSceneHistory("浏览器场景快照的角色 ID 无效")
+            if not actor.display_name.strip() or len(actor.display_name) > 200:
+                raise InvalidSceneHistory("浏览器场景快照的角色名称无效")
+            if actor.actor_id in participant_by_id:
+                raise InvalidSceneHistory("浏览器场景快照包含重复角色")
+            participant_by_id[actor.actor_id] = participant
+        player_participant = participant_by_id.get(snapshot.player.actor_id)
+        if (
+            player_participant is None
+            or player_participant.actor != snapshot.player
+        ):
+            raise InvalidSceneHistory("浏览器场景快照缺少训练员")
+
+        character_participants = [
+            item
+            for item in snapshot.participants
+            if item.actor.actor_type in {"umamusume", "npc"}
+        ]
+        if not character_participants:
+            raise InvalidSceneHistory("浏览器场景快照没有参加角色")
+        if len(character_participants) > self.max_participants:
+            raise InvalidSceneHistory(
+                f"导演模式最多恢复 {self.max_participants} 个角色"
+            )
+        if len(character_participants) + 1 != len(snapshot.participants):
+            raise InvalidSceneHistory("浏览器场景快照包含不支持的参加者")
+
+        character_map = {}
+        for participant in character_participants:
+            actor = participant.actor
+            character = await self._load_history_character(actor)
+            if character.id != actor.actor_id:
+                raise InvalidSceneHistory(
+                    f"角色配置与浏览器历史不一致: {actor.display_name}"
+                )
+            character_map[actor.actor_id] = character
+
+        allowed_actor_ids = {
+            snapshot.player.actor_id,
+            "narrator",
+            *character_map,
+        }
+        allowed_event_types = {
+            "dialogue",
+            "action",
+            "narration",
+            "scene_event",
+            "scene_change",
+            "character_reply",
+            "actor_enter",
+            "actor_leave",
+        }
+        narrator = self._narrator_actor()
+        event_ids: set[str] = set()
+        previous_sequence = -1
+        total_text_length = 0
+        for event in snapshot.events:
+            if event.hidden or event.visible_to != "all":
+                raise InvalidSceneHistory("浏览器场景快照不能包含隐藏事件")
+            if event.event_type not in allowed_event_types:
+                raise InvalidSceneHistory("浏览器场景快照包含内部事件")
+            if not event.event_id or event.event_id in event_ids:
+                raise InvalidSceneHistory("浏览器场景快照包含重复事件")
+            event_ids.add(event.event_id)
+            if event.sequence <= previous_sequence:
+                raise InvalidSceneHistory("浏览器场景快照事件顺序无效")
+            previous_sequence = event.sequence
+            if event.turn_index < 0 or event.turn_index > snapshot.turn_index:
+                raise InvalidSceneHistory("浏览器场景快照事件轮数无效")
+            if event.actor is None:
+                raise InvalidSceneHistory("浏览器场景快照事件缺少发言者")
+            actor_id = event.actor.actor_id
+            if actor_id not in allowed_actor_ids:
+                raise InvalidSceneHistory("浏览器场景快照包含未知发言者")
+            expected_actor = (
+                narrator
+                if actor_id == narrator.actor_id
+                else participant_by_id[actor_id].actor
+            )
+            if event.actor != expected_actor:
+                raise InvalidSceneHistory("浏览器场景快照的发言者信息不一致")
+            if (
+                event.event_type == "character_reply"
+                and actor_id not in character_map
+            ):
+                raise InvalidSceneHistory("浏览器场景快照的角色回复身份无效")
+            if (
+                event.event_type in {"dialogue", "action"}
+                and actor_id != snapshot.player.actor_id
+            ):
+                raise InvalidSceneHistory("浏览器场景快照的训练员事件身份无效")
+            if (
+                event.event_type in {"narration", "scene_event", "scene_change"}
+                and actor_id != narrator.actor_id
+            ):
+                raise InvalidSceneHistory("浏览器场景快照的环境事件身份无效")
+            if event.scene_patch is not None and event.event_type != "scene_change":
+                raise InvalidSceneHistory("浏览器场景快照的环境变更类型无效")
+            if any(
+                target_id not in allowed_actor_ids
+                for target_id in event.target_actor_ids
+            ):
+                raise InvalidSceneHistory("浏览器场景快照包含未知回应对象")
+            event_text_length = (
+                len(event.content) + len(event.action) + len(event.dialogue)
+            )
+            if event_text_length > 50_000:
+                raise InvalidSceneHistory("浏览器场景快照单条事件过长")
+            total_text_length += event_text_length
+        if total_text_length > 2_000_000:
+            raise InvalidSceneHistory("浏览器场景快照内容过大")
+        recovered_timeline = SceneTimeline(
+            initial_state=snapshot.template.initial_state,
+            events=snapshot.events,
+        )
+        if recovered_timeline.state != snapshot.scene_state:
+            raise InvalidSceneHistory("浏览器场景快照的环境状态不一致")
+
+        director_thread = self.director_context_builder.create_thread(
+            template=snapshot.template,
+            participants=snapshot.participants,
+            story_outline=snapshot.story_outline,
+        )
+        actor_threads = {
+            actor_id: self.character_context_builder.create_thread(
+                character=character,
+                template=snapshot.template,
+                participants=snapshot.participants,
+            )
+            for actor_id, character in character_map.items()
+        }
+        history_file = create_scene_history_path(
+            self.history_dir,
+            user_uuid=user_uuid,
+            template_id=snapshot.template.template_id,
+            session_id=snapshot.session_id,
+            created_at=datetime.now(),
+        )
+        session = SceneSession(
+            session_id=snapshot.session_id,
+            user_uuid=user_uuid,
+            template=snapshot.template,
+            player=snapshot.player,
+            participants=snapshot.participants,
+            characters=character_map,
+            director_thread=director_thread,
+            actor_threads=actor_threads,
+            history_file=history_file,
+            story_outline=snapshot.story_outline,
+            created_at=snapshot.created_at,
+            last_active_at=snapshot.last_active_at,
+        )
+        for event in snapshot.events:
+            session.append_event(event)
+        session.turn_index = snapshot.turn_index
+        session.touch()
+        return session
 
     @staticmethod
     def _replay_checked(session: SceneSession, event: SceneEvent) -> SceneEvent:

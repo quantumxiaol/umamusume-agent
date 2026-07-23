@@ -306,9 +306,11 @@ Pages 目标地址将是：
 导演模式复用现有 `ROLEPLAY_LLM_*` 模型配置，不需要增加第二套模型密钥。详细协议、
 范围和前缀复用约束见 [`docs/director_mode_v1.md`](docs/director_mode_v1.md)。
 
-若 Hugging Face Space 使用 Persistent Storage，建议把
-`DIRECTOR_HISTORY_DIRECTORY` 设置为 `/data/director`。默认的
-`./outputs/director` 可以应对页面刷新和普通进程重启，但镜像重建时是否保留取决于部署存储。
+导演历史不要求 Hugging Face Space 挂载 Persistent Storage。当前浏览器会按
+`user_uuid` 在 `localStorage` 保存完整公开场景；Space 内存和临时文件都丢失时，
+前端会上传该快照，让后端重新加载角色并继续场景。后端
+`DIRECTOR_HISTORY_DIRECTORY` 下的 JSONL 仍作为容器存活期间的快速、精确恢复副本。
+清理浏览器数据或更换浏览器后，本地场景历史不会自动迁移。
 
 剧情事件升级建议先发布 Hugging Face 后端，再发布 GitHub Pages 前端。新后端兼容旧前端；
 新前端也会通过 `/capabilities` 自动兼容尚未升级的旧后端，因此两个部署不要求同时完成。
@@ -327,7 +329,7 @@ pnpm run dev
 - 角色切换会重新调用 `/load_character`，并展示 `已恢复历史 N 条`。
 - 新后端启用剧情事件能力时，输入框上方可切换“训练员对白 / 训练员动作 / 环境事件”；旧后端下自动回退旧界面。
 - 后端声明 `director_mode=1` 时，顶部可进入独立导演页面；可从公园、赛马场、河边、教室、训练场等地点预设开始，也可以自定义开场环境，并同时选择 1～3 位参加角色。
-- 导演页面会缓存当前会话 ID，并提供场景历史列表、继续场景和永久删除；恢复时会重建导演与每位角色的只追加消息线程。
+- 导演页面会缓存完整公开场景，并提供场景历史列表、继续场景和永久删除；即使 Hugging Face 容器内存和临时文件同时丢失，也能从当前浏览器快照重建新的只追加消息线程。
 - 聊天窗口会显示当前用户与该角色的历史对话，不会在切角色时直接丢失历史能力。
 - 点击 `查看历史` 会调用 `/history` 刷新该角色历史。
 - 对话会以 v2 结构同步写入当前浏览器的 `localStorage` 缓存；剧情事件使用独立的 `event_schema_version=1`，并兼容迁移旧 v1 `role/content` 缓存。
