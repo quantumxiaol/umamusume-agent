@@ -28,6 +28,9 @@ class SceneSession:
         actor_threads: dict[str, PromptThread],
         history_file: Path,
         story_outline: str = "",
+        created_at: datetime | None = None,
+        last_active_at: datetime | None = None,
+        write_scene_start: bool = True,
     ):
         self.session_id = session_id
         self.user_uuid = user_uuid
@@ -40,8 +43,8 @@ class SceneSession:
         self.story_outline = story_outline.strip()
         self.timeline = SceneTimeline(initial_state=template.initial_state)
         self.turn_index = 0
-        self.created_at = datetime.now()
-        self.last_active_at = self.created_at
+        self.created_at = created_at or datetime.now()
+        self.last_active_at = last_active_at or self.created_at
         self.lock = asyncio.Lock()
         self.history_file = history_file
         self.history = SceneHistoryWriter(
@@ -50,19 +53,21 @@ class SceneSession:
             user_uuid=user_uuid,
             template_id=template.template_id,
         )
-        self.history.append(
-            {
-                "event": "scene_start",
-                "schema_version": 1,
-                "scene_template": template.model_dump(mode="json"),
-                "player": player.model_dump(mode="json"),
-                "participants": [
-                    participant.model_dump(mode="json")
-                    for participant in participants
-                ],
-                "story_outline": self.story_outline,
-            }
-        )
+        if write_scene_start:
+            self.history.append(
+                {
+                    "event": "scene_start",
+                    "schema_version": 1,
+                    "created_at": self.created_at.isoformat(),
+                    "scene_template": template.model_dump(mode="json"),
+                    "player": player.model_dump(mode="json"),
+                    "participants": [
+                        participant.model_dump(mode="json")
+                        for participant in participants
+                    ],
+                    "story_outline": self.story_outline,
+                }
+            )
 
     @property
     def character_actor_ids(self) -> list[str]:
@@ -81,6 +86,10 @@ class SceneSession:
             }
         )
         return stored
+
+    def replay_event(self, event: SceneEvent) -> SceneEvent:
+        """Append an already-persisted event without writing it a second time."""
+        return self.timeline.append(event)
 
     def public_snapshot(self) -> dict:
         return {

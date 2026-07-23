@@ -211,6 +211,77 @@ class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(session.timeline.events[0].event_type, "narration")
 
+    async def test_history_restore_rebuilds_timeline_and_prompt_threads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._service(temp_dir)
+            session = await service.create_session(
+                user_uuid="00000000-0000-4000-8000-000000000001",
+                template_id="test_scene",
+                character_names=["角色A", "角色B"],
+                story_outline="训练后聊聊下一场比赛。",
+            )
+            await service.execute_turn(
+                session,
+                [
+                    DialogueInputEvent(
+                        content="天色已经晚了。",
+                        speaker=ActorRef(
+                            actor_id="narrator",
+                            actor_type="narrator",
+                            display_name="环境",
+                        ),
+                        event_type="scene_event",
+                    )
+                ],
+            )
+            original_director_messages = session.director_thread.snapshot()
+            original_actor_messages = {
+                actor_id: thread.snapshot()
+                for actor_id, thread in session.actor_threads.items()
+            }
+
+            restored = await service.restore_session(
+                user_uuid=session.user_uuid,
+                session_id=session.session_id,
+            )
+
+            self.assertEqual(restored.turn_index, session.turn_index)
+            self.assertEqual(restored.timeline.events, session.timeline.events)
+            self.assertEqual(
+                restored.director_thread.messages,
+                original_director_messages,
+            )
+            self.assertEqual(
+                {
+                    actor_id: thread.messages
+                    for actor_id, thread in restored.actor_threads.items()
+                },
+                original_actor_messages,
+            )
+            summaries = service.list_history(user_uuid=session.user_uuid)
+            self.assertEqual(len(summaries), 1)
+            self.assertEqual(summaries[0]["session_id"], session.session_id)
+            self.assertEqual(summaries[0]["character_names"], ["角色A", "角色B"])
+
+            continued_events = await service.execute_turn(
+                restored,
+                [DialogueInputEvent(content="我们回去吧。", event_type="dialogue")],
+            )
+            self.assertEqual(restored.turn_index, 2)
+            self.assertEqual(continued_events[0].content, "我们回去吧。")
+            restored_again = await service.restore_session(
+                user_uuid=session.user_uuid,
+                session_id=session.session_id,
+            )
+            self.assertEqual(restored_again.turn_index, 2)
+            self.assertEqual(restored_again.timeline.events, restored.timeline.events)
+
+            service.delete_history(
+                user_uuid=session.user_uuid,
+                session_id=session.session_id,
+            )
+            self.assertEqual(service.list_history(user_uuid=session.user_uuid), [])
+
     async def test_director_runtime_repairs_and_sanitizes_speakers(self):
         json_runtime = _FakeJsonRuntime(
             [

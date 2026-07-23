@@ -279,6 +279,52 @@ export const deleteDirectorSession = async (sessionId) => {
   }
 };
 
+export const fetchDirectorSession = async (sessionId) => {
+  try {
+    const response = await apiClient.get(
+      `/director/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const fetchDirectorHistory = async (userUuid, limit = 50) => {
+  try {
+    const response = await apiClient.get('/director/history', {
+      params: { user_uuid: userUuid, limit },
+    });
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const resumeDirectorHistory = async (sessionId, userUuid) => {
+  try {
+    const response = await apiClient.post(
+      `/director/history/${encodeURIComponent(sessionId)}/resume`,
+      { user_uuid: userUuid },
+    );
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const deleteDirectorHistory = async (sessionId, userUuid) => {
+  try {
+    const response = await apiClient.delete(
+      `/director/history/${encodeURIComponent(sessionId)}`,
+      { params: { user_uuid: userUuid } },
+    );
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
 export const directorTurnStream = async (sessionId, events, onEvent) => {
   try {
     const response = await fetch(`${API_BASE_URL}/director/turn_stream`, {

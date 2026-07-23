@@ -2,11 +2,56 @@ import { defineStore } from 'pinia';
 
 import {
   createDirectorSession,
+  deleteDirectorHistory,
   deleteDirectorSession,
   directorTurnStream,
+  fetchDirectorHistory,
+  fetchDirectorSession,
   fetchDirectorTemplates,
+  resumeDirectorHistory,
 } from '@/services/api';
 import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
+
+
+const DIRECTOR_ACTIVE_SESSION_PREFIX = 'umamusume_director_active_v1';
+
+
+const activeSessionKey = (userUuid) => (
+  `${DIRECTOR_ACTIVE_SESSION_PREFIX}:${encodeURIComponent(userUuid || '')}`
+);
+
+
+const readActiveSession = (userUuid) => {
+  if (!userUuid || typeof localStorage === 'undefined') {
+    return '';
+  }
+  try {
+    const payload = JSON.parse(localStorage.getItem(activeSessionKey(userUuid)) || '{}');
+    return String(payload?.sessionId || '');
+  } catch (_err) {
+    return '';
+  }
+};
+
+
+const writeActiveSession = (userUuid, sessionId) => {
+  if (!userUuid || !sessionId || typeof localStorage === 'undefined') {
+    return;
+  }
+  localStorage.setItem(activeSessionKey(userUuid), JSON.stringify({
+    version: 1,
+    sessionId,
+    savedAt: new Date().toISOString(),
+  }));
+};
+
+
+const clearActiveSession = (userUuid) => {
+  if (!userUuid || typeof localStorage === 'undefined') {
+    return;
+  }
+  localStorage.removeItem(activeSessionKey(userUuid));
+};
 
 
 const defaultCustomScene = () => ({
@@ -54,23 +99,155 @@ export const useDirectorStore = defineStore('director', {
     turnIndex: 0,
     inputMode: 'dialogue',
     queuedEvents: [],
+    historyScenes: [],
+    currentUserUuid: '',
+    isRestoring: false,
+    isHistoryLoading: false,
     isLoading: false,
     error: null,
+    historyError: null,
   }),
 
   actions: {
-    async init() {
-      if (this.templates.length) {
+    async init(userUuid = '') {
+      if (!this.templates.length) {
+        try {
+          const data = await fetchDirectorTemplates();
+          this.templates = data.templates || [];
+          if (!this.selectedTemplateId && this.templates.length) {
+            this.selectedTemplateId = this.templates[0].template_id;
+          }
+        } catch (err) {
+          this.error = err.message || '读取场景预设失败。';
+        }
+      }
+
+      const normalizedUserUuid = String(userUuid || '').trim();
+      if (!normalizedUserUuid) {
         return;
       }
-      try {
-        const data = await fetchDirectorTemplates();
-        this.templates = data.templates || [];
-        if (!this.selectedTemplateId && this.templates.length) {
-          this.selectedTemplateId = this.templates[0].template_id;
+      this.currentUserUuid = normalizedUserUuid;
+      if (!this.sessionId) {
+        const activeSessionId = readActiveSession(normalizedUserUuid);
+        if (activeSessionId) {
+          await this.restoreActiveSession(activeSessionId, normalizedUserUuid);
         }
+      }
+      await this.refreshHistory(normalizedUserUuid);
+    },
+
+    _applySnapshot(data, userUuid = '') {
+      this.sessionId = data.session_id || '';
+      this.activeTemplate = data.template || null;
+      this.participants = data.participants || [];
+      this.sceneState = data.scene_state || {};
+      this.events = data.events || [];
+      this.turnIndex = data.turn_index || 0;
+      this.storyOutline = data.story_outline || '';
+      this.selectedCharacterNames = this.participants
+        .filter((item) => ['umamusume', 'npc'].includes(item?.actor?.actor_type))
+        .map((item) => item.actor.display_name);
+      this.queuedEvents = [];
+      const resolvedUserUuid = data.user_uuid || userUuid || this.currentUserUuid;
+      if (resolvedUserUuid) {
+        this.currentUserUuid = resolvedUserUuid;
+      }
+      if (this.sessionId && this.currentUserUuid) {
+        writeActiveSession(this.currentUserUuid, this.sessionId);
+      }
+    },
+
+    _clearCurrentScene() {
+      this.sessionId = '';
+      this.activeTemplate = null;
+      this.participants = [];
+      this.sceneState = {};
+      this.events = [];
+      this.turnIndex = 0;
+      this.queuedEvents = [];
+    },
+
+    async restoreActiveSession(sessionId, userUuid) {
+      this.isRestoring = true;
+      this.historyError = null;
+      try {
+        let data;
+        try {
+          data = await fetchDirectorSession(sessionId);
+        } catch (_liveError) {
+          data = await resumeDirectorHistory(sessionId, userUuid);
+        }
+        this._applySnapshot(data, userUuid);
+        return true;
       } catch (err) {
-        this.error = err.message || '读取预制场景失败。';
+        clearActiveSession(userUuid);
+        this.historyError = err.message || '上次场景已经无法恢复。';
+        return false;
+      } finally {
+        this.isRestoring = false;
+      }
+    },
+
+    async refreshHistory(userUuid = '') {
+      const resolvedUserUuid = userUuid || this.currentUserUuid;
+      if (!resolvedUserUuid) {
+        return;
+      }
+      this.currentUserUuid = resolvedUserUuid;
+      this.isHistoryLoading = true;
+      this.historyError = null;
+      try {
+        const data = await fetchDirectorHistory(resolvedUserUuid);
+        this.historyScenes = data.scenes || [];
+      } catch (err) {
+        this.historyError = err.message || '读取场景历史失败。';
+      } finally {
+        this.isHistoryLoading = false;
+      }
+    },
+
+    async resumeScene(sessionId, userUuid = '') {
+      const resolvedUserUuid = userUuid || this.currentUserUuid;
+      if (!resolvedUserUuid || !sessionId || this.isRestoring) {
+        return false;
+      }
+      this.isRestoring = true;
+      this.error = null;
+      this.historyError = null;
+      try {
+        const data = await resumeDirectorHistory(sessionId, resolvedUserUuid);
+        this._applySnapshot(data, resolvedUserUuid);
+        return true;
+      } catch (err) {
+        this.historyError = err.message || '恢复场景失败。';
+        return false;
+      } finally {
+        this.isRestoring = false;
+      }
+    },
+
+    async deleteHistoryScene(sessionId, userUuid = '') {
+      const resolvedUserUuid = userUuid || this.currentUserUuid;
+      if (!resolvedUserUuid || !sessionId) {
+        return false;
+      }
+      this.isHistoryLoading = true;
+      this.historyError = null;
+      try {
+        await deleteDirectorHistory(sessionId, resolvedUserUuid);
+        this.historyScenes = this.historyScenes.filter(
+          (item) => item.session_id !== sessionId,
+        );
+        if (this.sessionId === sessionId) {
+          this._clearCurrentScene();
+          clearActiveSession(resolvedUserUuid);
+        }
+        return true;
+      } catch (err) {
+        this.historyError = err.message || '删除场景历史失败。';
+        return false;
+      } finally {
+        this.isHistoryLoading = false;
       }
     },
 
@@ -146,6 +323,7 @@ export const useDirectorStore = defineStore('director', {
       }
       this.isLoading = true;
       this.error = null;
+      this.currentUserUuid = userUuid || this.currentUserUuid;
       try {
         const customScene = this.sceneSource === 'custom'
           ? {
@@ -174,13 +352,8 @@ export const useDirectorStore = defineStore('director', {
           customScene,
           this.storyOutline.trim(),
         );
-        this.sessionId = data.session_id || '';
-        this.activeTemplate = data.template || null;
-        this.participants = data.participants || [];
-        this.sceneState = data.scene_state || {};
-        this.events = data.events || [];
-        this.turnIndex = data.turn_index || 0;
-        this.queuedEvents = [];
+        this._applySnapshot(data, userUuid);
+        await this.refreshHistory(userUuid);
         return Boolean(this.sessionId);
       } catch (err) {
         this.error = err.message || '创建导演场景失败。';
@@ -192,13 +365,9 @@ export const useDirectorStore = defineStore('director', {
 
     async resetScene() {
       const sessionId = this.sessionId;
-      this.sessionId = '';
-      this.activeTemplate = null;
-      this.participants = [];
-      this.sceneState = {};
-      this.events = [];
-      this.turnIndex = 0;
-      this.queuedEvents = [];
+      const userUuid = this.currentUserUuid;
+      this._clearCurrentScene();
+      clearActiveSession(userUuid);
       this.error = null;
       if (sessionId) {
         try {
@@ -207,6 +376,7 @@ export const useDirectorStore = defineStore('director', {
           // Local reset is still complete; server TTL will remove stale state.
         }
       }
+      await this.refreshHistory(userUuid);
     },
 
     _appendEvent(event) {

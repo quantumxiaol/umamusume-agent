@@ -157,6 +157,56 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
             response.text.index("event: done"),
         )
 
+    async def test_history_list_resume_after_memory_loss_and_delete(self):
+        created = await self._create_session()
+        turn_response = await self.client.post(
+            "/director/turn",
+            json={
+                "session_id": created["session_id"],
+                "events": [{"content": "训练场的灯亮了。", "event_type": "scene_event"}],
+            },
+        )
+        self.assertEqual(turn_response.status_code, 200)
+
+        history_response = await self.client.get(
+            "/director/history",
+            params={"user_uuid": created["user_uuid"]},
+        )
+        self.assertEqual(history_response.status_code, 200)
+        self.assertEqual(len(history_response.json()["scenes"]), 1)
+        self.assertEqual(
+            history_response.json()["scenes"][0]["session_id"],
+            created["session_id"],
+        )
+
+        self.sessions.clear()
+        resume_response = await self.client.post(
+            f"/director/history/{created['session_id']}/resume",
+            json={"user_uuid": created["user_uuid"]},
+        )
+        self.assertEqual(resume_response.status_code, 200)
+        self.assertEqual(resume_response.json()["turn_index"], 1)
+        self.assertIn(created["session_id"], self.sessions)
+
+        wrong_user_delete = await self.client.delete(
+            f"/director/history/{created['session_id']}",
+            params={"user_uuid": "00000000-0000-4000-8000-000000000099"},
+        )
+        self.assertEqual(wrong_user_delete.status_code, 404)
+        self.assertIn(created["session_id"], self.sessions)
+
+        delete_response = await self.client.delete(
+            f"/director/history/{created['session_id']}",
+            params={"user_uuid": created["user_uuid"]},
+        )
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertNotIn(created["session_id"], self.sessions)
+        history_response = await self.client.get(
+            "/director/history",
+            params={"user_uuid": created["user_uuid"]},
+        )
+        self.assertEqual(history_response.json()["scenes"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

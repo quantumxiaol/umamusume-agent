@@ -15,11 +15,21 @@ from ..dialogue.models import (
     default_player_actor,
 )
 from ..dialogue.runtime import CharacterRuntime
+from ..dialogue.protocol import StructuredReply
 from .context import CharacterSceneContextBuilder, DirectorContextBuilder
-from .history import create_scene_history_path
+from .history import (
+    InvalidSceneHistory,
+    create_scene_history_path,
+    delete_scene_history,
+    find_scene_history,
+    iter_scene_history_files,
+    load_scene_history,
+    scene_history_summary,
+)
 from .models import (
     ActorInstance,
     CustomSceneDefinition,
+    DirectorPlan,
     SceneEvent,
     SceneState,
     SceneStatePatch,
@@ -171,6 +181,188 @@ class DirectorService:
             opening_narration=custom_scene.opening_narration.strip(),
             tags=list(dict.fromkeys(["自定义", *tags])),
         )
+
+    def list_history(self, *, user_uuid: str, limit: int = 50) -> list[dict]:
+        summaries = []
+        for path in iter_scene_history_files(self.history_dir, user_uuid=user_uuid):
+            try:
+                history = load_scene_history(path)
+            except InvalidSceneHistory:
+                continue
+            if history.user_uuid != user_uuid:
+                continue
+            summaries.append(scene_history_summary(history))
+            if limit > 0 and len(summaries) >= limit:
+                break
+        return summaries
+
+    async def restore_session(
+        self,
+        *,
+        user_uuid: str,
+        session_id: str,
+    ) -> SceneSession:
+        history = find_scene_history(
+            self.history_dir,
+            user_uuid=user_uuid,
+            session_id=session_id,
+        )
+        participant_by_id = {
+            item.actor.actor_id: item
+            for item in history.participants
+        }
+        character_map = {}
+        for participant in history.participants:
+            actor = participant.actor
+            if actor.actor_type not in {"umamusume", "npc"}:
+                continue
+            character = await self._load_history_character(actor)
+            if character.id != actor.actor_id:
+                raise InvalidSceneHistory(
+                    f"角色配置与历史不一致: {actor.display_name}"
+                )
+            character_map[actor.actor_id] = character
+        if not character_map:
+            raise InvalidSceneHistory("历史中的参加角色已不可用")
+
+        player = ActorRef.model_validate(history.player)
+        director_thread = self.director_context_builder.create_thread(
+            template=history.template,
+            participants=history.participants,
+            story_outline=history.story_outline,
+        )
+        actor_threads = {
+            actor_id: self.character_context_builder.create_thread(
+                character=character,
+                template=history.template,
+                participants=history.participants,
+            )
+            for actor_id, character in character_map.items()
+        }
+        session = SceneSession(
+            session_id=history.session_id,
+            user_uuid=history.user_uuid,
+            template=history.template,
+            player=player,
+            participants=history.participants,
+            characters=character_map,
+            director_thread=director_thread,
+            actor_threads=actor_threads,
+            history_file=history.path,
+            story_outline=history.story_outline,
+            created_at=history.created_at,
+            last_active_at=history.updated_at,
+            write_scene_start=False,
+        )
+
+        prepared_actors: set[str] = set()
+        for index, event in enumerate(history.events):
+            if event.event_type == "director_plan":
+                self.director_context_builder.append_turn(
+                    session.director_thread,
+                    timeline=session.timeline,
+                )
+                try:
+                    plan = DirectorPlan.model_validate_json(event.content)
+                except Exception as exc:
+                    raise InvalidSceneHistory("历史中的导演计划无法解析") from exc
+                self.director_context_builder.record_plan(
+                    session.director_thread,
+                    plan,
+                )
+                self._replay_checked(session, event)
+                continue
+
+            if event.event_type == "actor_directive":
+                self._replay_checked(session, event)
+                next_event = (
+                    history.events[index + 1]
+                    if index + 1 < len(history.events)
+                    else None
+                )
+                actor_id = event.target_actor_ids[0] if event.target_actor_ids else ""
+                if (
+                    next_event is not None
+                    and next_event.event_type == "character_reply"
+                    and next_event.actor is not None
+                    and next_event.actor.actor_id == actor_id
+                    and actor_id in actor_threads
+                ):
+                    self.character_context_builder.build_reply_context(
+                        actor_threads[actor_id],
+                        actor=participant_by_id[actor_id].actor,
+                        timeline=session.timeline,
+                        intent=event.content,
+                        target_actor_ids=next_event.target_actor_ids,
+                    )
+                    prepared_actors.add(actor_id)
+                continue
+
+            if event.event_type == "character_reply" and event.actor is not None:
+                actor_id = event.actor.actor_id
+                thread = actor_threads.get(actor_id)
+                participant = participant_by_id.get(actor_id)
+                if thread is None or participant is None:
+                    raise InvalidSceneHistory("历史中的回复角色已不在参加者列表")
+                if actor_id not in prepared_actors:
+                    self.character_context_builder.build_reply_context(
+                        thread,
+                        actor=participant.actor,
+                        timeline=session.timeline,
+                        intent="结合已发生的公开事件自然回应。",
+                        target_actor_ids=event.target_actor_ids,
+                    )
+                self.character_context_builder.record_reply(
+                    thread,
+                    StructuredReply(
+                        action=event.action or "无",
+                        dialogue=event.dialogue or event.content,
+                    ),
+                )
+                stored = self._replay_checked(session, event)
+                thread.last_seen_sequence = stored.sequence
+                prepared_actors.discard(actor_id)
+                continue
+
+            self._replay_checked(session, event)
+
+        session.turn_index = max(
+            (event.turn_index for event in history.events),
+            default=0,
+        )
+        session.last_active_at = history.updated_at
+        return session
+
+    async def _load_history_character(self, actor: ActorRef):
+        candidates = [
+            actor.display_name,
+            actor.character_id or "",
+            actor.actor_id.removeprefix("uma_"),
+        ]
+        last_error: Exception | None = None
+        for candidate in dict.fromkeys(item for item in candidates if item):
+            try:
+                return await self.character_manager.load_character(candidate)
+            except (FileNotFoundError, KeyError, ValueError) as exc:
+                last_error = exc
+        raise InvalidSceneHistory(
+            f"无法加载历史角色: {actor.display_name}"
+        ) from last_error
+
+    @staticmethod
+    def _replay_checked(session: SceneSession, event: SceneEvent) -> SceneEvent:
+        stored = session.replay_event(event)
+        if event.sequence > 0 and stored.sequence != event.sequence:
+            raise InvalidSceneHistory("导演场景历史事件顺序不连续")
+        return stored
+
+    def delete_history(self, *, user_uuid: str, session_id: str) -> None:
+        history = find_scene_history(
+            self.history_dir,
+            user_uuid=user_uuid,
+            session_id=session_id,
+        )
+        delete_scene_history(history, history_dir=self.history_dir)
 
     @staticmethod
     def _narrator_actor() -> ActorRef:

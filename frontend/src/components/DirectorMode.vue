@@ -87,6 +87,32 @@ const createScene = async () => {
   await store.createScene(props.userUuid);
 };
 
+const resumeScene = async (sessionId) => {
+  await store.resumeScene(sessionId, props.userUuid);
+};
+
+const deleteHistoryScene = async (scene) => {
+  const confirmed = window.confirm(
+    `确认永久删除「${scene.scene_name}」这段导演场景历史吗？`,
+  );
+  if (confirmed) {
+    await store.deleteHistoryScene(scene.session_id, props.userUuid);
+  }
+};
+
+const formatHistoryTime = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value || '';
+  }
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
 const queueCurrent = async () => {
   if (!store.queueEvent(input.value)) {
     return;
@@ -115,12 +141,20 @@ const handleKeydown = async (event) => {
   }
 };
 
-onMounted(() => store.init());
+onMounted(() => store.init(props.userUuid));
 </script>
 
 <template>
   <div class="director-shell">
-    <template v-if="!store.sessionId">
+    <template v-if="store.isRestoring">
+      <section class="director-restore-card">
+        <p class="section-kicker">Director History</p>
+        <h2>正在恢复上次场景…</h2>
+        <p>正在重建共享时间线与各角色上下文。</p>
+      </section>
+    </template>
+
+    <template v-else-if="!store.sessionId">
       <section class="director-setup-card">
         <div class="section-heading">
           <div>
@@ -258,6 +292,47 @@ onMounted(() => store.init());
         </button>
         <p v-if="store.error" class="director-error">{{ store.error }}</p>
       </section>
+
+      <section class="director-history-card">
+        <div class="section-heading history-heading">
+          <div>
+            <p class="section-kicker">Director History</p>
+            <h2>场景历史</h2>
+            <p class="cast-help">刷新页面或服务重启后，都可以从这里继续之前的场景。</p>
+          </div>
+          <button
+            type="button"
+            class="history-refresh-button"
+            :disabled="store.isHistoryLoading"
+            @click="store.refreshHistory(userUuid)"
+          >
+            {{ store.isHistoryLoading ? '读取中…' : '刷新' }}
+          </button>
+        </div>
+        <p v-if="store.historyError" class="director-error">{{ store.historyError }}</p>
+        <div v-if="store.historyScenes.length" class="history-grid">
+          <article v-for="scene in store.historyScenes" :key="scene.session_id" class="history-item">
+            <div class="history-item-main">
+              <div class="history-title-line">
+                <strong>{{ scene.scene_name }}</strong>
+                <span>第 {{ scene.turn_index }} 轮</span>
+              </div>
+              <p>{{ scene.character_names.join('、') }}</p>
+              <div class="history-meta">
+                <span>{{ scene.location }}</span>
+                <span v-if="scene.time">{{ scene.time }}</span>
+                <span>{{ formatHistoryTime(scene.updated_at) }}</span>
+              </div>
+              <p v-if="scene.preview" class="history-preview">{{ scene.preview }}</p>
+            </div>
+            <div class="history-actions">
+              <button type="button" class="history-resume" @click="resumeScene(scene.session_id)">继续场景</button>
+              <button type="button" class="history-delete" @click="deleteHistoryScene(scene)">删除</button>
+            </div>
+          </article>
+        </div>
+        <div v-else-if="!store.isHistoryLoading" class="history-empty">还没有可以恢复的导演场景。</div>
+      </section>
     </template>
 
     <template v-else>
@@ -363,6 +438,8 @@ onMounted(() => store.init());
 }
 
 .director-setup-card,
+.director-history-card,
+.director-restore-card,
 .scene-toolbar,
 .scene-state-card,
 .scene-timeline,
@@ -375,6 +452,25 @@ onMounted(() => store.init());
 
 .director-setup-card {
   padding: 22px;
+}
+
+.director-history-card,
+.director-restore-card {
+  grid-column: 1 / -1;
+  padding: 22px;
+}
+
+.director-restore-card {
+  min-height: 180px;
+  text-align: center;
+}
+
+.director-restore-card h2 {
+  margin: 22px 0 8px;
+}
+
+.director-restore-card > p:last-child {
+  color: var(--muted);
 }
 
 .section-heading,
@@ -534,6 +630,96 @@ onMounted(() => store.init());
 
 .cast-help {
   margin: 5px 0 0;
+}
+
+.history-heading {
+  align-items: center;
+}
+
+.history-refresh-button {
+  padding: 8px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent-strong);
+}
+
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.history-title-line,
+.history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.history-title-line {
+  justify-content: space-between;
+}
+
+.history-title-line > span,
+.history-meta span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-item-main > p {
+  margin: 6px 0;
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.history-item-main .history-preview {
+  overflow: hidden;
+  margin-top: 8px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-actions {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+}
+
+.history-actions button {
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: #fff;
+  font-size: 11px;
+}
+
+.history-resume {
+  border: 1px solid var(--accent);
+  color: var(--accent-strong);
+}
+
+.history-delete {
+  border: 1px solid var(--border);
+  color: #a14b43;
+}
+
+.history-empty {
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
 }
 
 .director-search {
@@ -800,6 +986,10 @@ button:disabled {
   }
 
   .template-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .history-grid {
     grid-template-columns: 1fr;
   }
 

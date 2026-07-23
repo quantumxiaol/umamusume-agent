@@ -30,6 +30,7 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - 对话服务：`/load_character`、`/chat`、`/chat_stream`
 - 剧情事件：单角色页面可发送训练员对白、训练员动作或环境事件，角色会基于明确的说话者与事件类型回应
 - 导演模式：选择常见地点预设或自定义开场环境，可选填写剧情大纲并选择 1～3 位角色；导演 LLM 通常安排一位、必要时最多两位角色顺序回应
+- 导演历史：浏览器刷新会自动重连当前场景；服务内存会话失效后可从独立 JSONL 历史重建共享时间线和所有角色上下文
 - 历史落盘：按 `user_uuid/角色/时间戳/session` 写入 `jsonl` 对话日志；assistant 消息使用 v2 结构字段保存
 - 对话格式：后端主协议为 `{"action":"...","dialogue":"..."}` JSON；API 响应返回 `action`、`dialogue`、`message`，不再返回旧两行 `reply`
 - 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
@@ -305,6 +306,10 @@ Pages 目标地址将是：
 导演模式复用现有 `ROLEPLAY_LLM_*` 模型配置，不需要增加第二套模型密钥。详细协议、
 范围和前缀复用约束见 [`docs/director_mode_v1.md`](docs/director_mode_v1.md)。
 
+若 Hugging Face Space 使用 Persistent Storage，建议把
+`DIRECTOR_HISTORY_DIRECTORY` 设置为 `/data/director`。默认的
+`./outputs/director` 可以应对页面刷新和普通进程重启，但镜像重建时是否保留取决于部署存储。
+
 剧情事件升级建议先发布 Hugging Face 后端，再发布 GitHub Pages 前端。新后端兼容旧前端；
 新前端也会通过 `/capabilities` 自动兼容尚未升级的旧后端，因此两个部署不要求同时完成。
 
@@ -322,6 +327,7 @@ pnpm run dev
 - 角色切换会重新调用 `/load_character`，并展示 `已恢复历史 N 条`。
 - 新后端启用剧情事件能力时，输入框上方可切换“训练员对白 / 训练员动作 / 环境事件”；旧后端下自动回退旧界面。
 - 后端声明 `director_mode=1` 时，顶部可进入独立导演页面；可从公园、赛马场、河边、教室、训练场等地点预设开始，也可以自定义开场环境，并同时选择 1～3 位参加角色。
+- 导演页面会缓存当前会话 ID，并提供场景历史列表、继续场景和永久删除；恢复时会重建导演与每位角色的只追加消息线程。
 - 聊天窗口会显示当前用户与该角色的历史对话，不会在切角色时直接丢失历史能力。
 - 点击 `查看历史` 会调用 `/history` 刷新该角色历史。
 - 对话会以 v2 结构同步写入当前浏览器的 `localStorage` 缓存；剧情事件使用独立的 `event_schema_version=1`，并兼容迁移旧 v1 `role/content` 缓存。

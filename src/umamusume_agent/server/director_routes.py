@@ -32,6 +32,10 @@ class DirectorTurnRequest(BaseModel):
     events: list[DialogueInputEvent]
 
 
+class DirectorHistoryRequest(BaseModel):
+    user_uuid: str
+
+
 def _normalize_user_uuid(value: str | None) -> str:
     if not value:
         return str(uuid4())
@@ -91,6 +95,63 @@ def create_director_router(
                 for template in service.template_repository.list()
             ]
         }
+
+    @router.get("/history")
+    async def list_director_history(
+        user_uuid: str,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        normalized_user_uuid = _normalize_user_uuid(user_uuid)
+        return {
+            "scenes": service.list_history(
+                user_uuid=normalized_user_uuid,
+                limit=min(100, max(1, limit)),
+            )
+        }
+
+    @router.post("/history/{session_id}/resume")
+    async def resume_director_history(
+        session_id: str,
+        request: DirectorHistoryRequest,
+    ) -> dict[str, Any]:
+        cleanup_sessions()
+        user_uuid = _normalize_user_uuid(request.user_uuid)
+        live_session = sessions.get(session_id)
+        if live_session is not None:
+            if live_session.user_uuid != user_uuid:
+                raise HTTPException(status_code=404, detail="导演场景历史不存在")
+            live_session.touch()
+            return live_session.public_snapshot()
+        try:
+            session = await service.restore_session(
+                user_uuid=user_uuid,
+                session_id=session_id,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        session.touch()
+        sessions[session.session_id] = session
+        return session.public_snapshot()
+
+    @router.delete("/history/{session_id}")
+    async def delete_director_history(
+        session_id: str,
+        user_uuid: str,
+    ) -> dict[str, Any]:
+        normalized_user_uuid = _normalize_user_uuid(user_uuid)
+        try:
+            service.delete_history(
+                user_uuid=normalized_user_uuid,
+                session_id=session_id,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        sessions.pop(session_id, None)
+        return {"status": "deleted", "session_id": session_id}
 
     @router.post("/sessions")
     async def create_session(

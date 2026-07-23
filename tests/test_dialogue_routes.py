@@ -325,6 +325,7 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["director_schema_version"], 1)
         self.assertEqual(response.json()["director_custom_scenes"], 1)
         self.assertEqual(response.json()["director_story_outline"], 1)
+        self.assertEqual(response.json()["director_history_resume"], 1)
 
     async def test_director_templates_are_available_from_main_app(self):
         response = await self.client.get("/director/templates")

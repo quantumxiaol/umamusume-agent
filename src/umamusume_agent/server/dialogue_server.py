@@ -747,6 +747,7 @@ async def capabilities():
         "director_schema_version": 1,
         "director_custom_scenes": 1,
         "director_story_outline": 1,
+        "director_history_resume": 1,
         "director_max_participants": config.DIRECTOR_MAX_PARTICIPANTS,
         "director_max_speakers_per_turn": (
             config.DIRECTOR_MAX_SPEAKERS_PER_TURN

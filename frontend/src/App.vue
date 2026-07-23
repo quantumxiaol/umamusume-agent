@@ -1,11 +1,18 @@
 <!-- frontend/src/App.vue -->
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue';
+import {
+  ref,
+  computed,
+  onMounted,
+  nextTick,
+  watch,
+} from 'vue';
 import DirectorMode from '@/components/DirectorMode.vue';
 import { DIALOGUE_INPUT_MODES, useChatStore } from '@/stores/chatStore';
 
 const chatStore = useChatStore();
 const ttsEnabled = import.meta.env.VITE_ENABLE_TTS === 'true';
+const APP_MODE_STORAGE_KEY = 'umamusume_app_mode_v1';
 
 const messageInput = ref('');
 const messageInputRef = ref(null);
@@ -16,6 +23,10 @@ const promptOpen = ref(true);
 const audioRefs = ref({});
 const historyFileInput = ref(null);
 const appMode = ref('dialogue');
+
+watch(appMode, (value) => {
+  localStorage.setItem(APP_MODE_STORAGE_KEY, value);
+});
 
 const characters = computed(() => chatStore.characters);
 const userUuid = computed(() => chatStore.userUuid);
@@ -435,8 +446,12 @@ const formatMessage = (text) => {
   };
 };
 
-onMounted(() => {
-  chatStore.initCharacters();
+onMounted(async () => {
+  await chatStore.initCharacters();
+  const savedMode = localStorage.getItem(APP_MODE_STORAGE_KEY);
+  if (savedMode === 'director' && directorEnabled.value) {
+    appMode.value = 'director';
+  }
 });
 </script>
 

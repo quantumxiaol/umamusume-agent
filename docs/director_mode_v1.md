@@ -18,6 +18,8 @@ Director mode is a separate multi-character scene layer. It reuses
 - The director may patch scene state and add narration, but cannot author
   character action or dialogue.
 - Scene history is text-only and stored separately under `outputs/director`.
+- Active scene IDs are cached in the browser. JSONL histories can rebuild the
+  timeline plus every director/character prompt thread after memory loss.
 - There is no autonomous loop, private memory, relationship inheritance, or
   mid-scene cast expansion in V1.
 
@@ -81,6 +83,9 @@ uncompacted.
 - `POST /director/sessions`
 - `GET /director/sessions/{session_id}`
 - `DELETE /director/sessions/{session_id}`
+- `GET /director/history`
+- `POST /director/history/{session_id}/resume`
+- `DELETE /director/history/{session_id}`
 - `POST /director/turn`
 - `POST /director/turn_stream`
 
@@ -89,3 +94,9 @@ and finally `done`.
 
 `POST /director/sessions` accepts either `template_id` or `custom_scene`, never
 both. `story_outline` is independent and optional for either form.
+
+Deleting an in-memory session ends the current browser scene but keeps its
+JSONL history. Deleting the corresponding history endpoint permanently removes
+that scene directory. On Hugging Face Persistent Storage, point
+`DIRECTOR_HISTORY_DIRECTORY` at a path under `/data` to retain histories across
+image rebuilds.
