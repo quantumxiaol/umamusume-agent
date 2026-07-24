@@ -88,6 +88,8 @@ class SceneEvent(BaseModel):
     content: str = ""
     action: str = ""
     dialogue: str = ""
+    source_format: str = ""
+    revision: int = 0
     scene_patch: SceneStatePatch | None = None
     hidden: bool = False
     created_at: datetime = Field(default_factory=datetime.now)

@@ -699,11 +699,18 @@ async def _session_cleanup_worker():
         raise
 
 
-def _should_generate_voice(request: DialogueRequest, session: 'DialogueSession') -> bool:
+def _should_generate_voice(
+    request: DialogueRequest,
+    session: 'DialogueSession',
+    reply: StructuredReply | None = None,
+) -> bool:
     if not ENABLE_TTS:
         return False
     if request.generate_voice and request.text_only:
         logger.info("text_only=true, skip voice generation for this request")
+        return False
+    if reply is not None and reply.source_format == "parse_error":
+        logger.warning("Skipping TTS for parse-error fallback reply")
         return False
         
     voice_config = session.character.get_voice_config()
@@ -838,6 +845,7 @@ async def capabilities():
         "director_story_outline": 1,
         "director_history_resume": 1,
         "director_browser_recovery": 1,
+        "director_reply_regenerate": 1,
         "tts_jobs": 1 if ENABLE_TTS else 0,
         "tts_manual_playback": 1 if ENABLE_TTS else 0,
         "director_max_participants": config.DIRECTOR_MAX_PARTICIPANTS,
@@ -926,7 +934,7 @@ async def chat(request: DialogueRequest):
         
         # TTS submission is quick; translation and Fish Speech run inside the
         # project-local MCP server after this API response returns.
-        if _should_generate_voice(request, session):
+        if _should_generate_voice(request, session, turn_result.reply):
             voice_info = await _submit_single_voice(
                 session,
                 utterance_id=turn_result.utterance_id,
@@ -974,7 +982,11 @@ async def chat_stream(request: DialogueRequest):
                 )
                 yield f"event: structured_reply\ndata: {payload}\n\n"
 
-                if _should_generate_voice(request, session):
+                if _should_generate_voice(
+                    request,
+                    session,
+                    turn_result.reply,
+                ):
                     voice_info = await _submit_single_voice(
                         session,
                         utterance_id=turn_result.utterance_id,
@@ -1038,7 +1050,7 @@ async def chat_stream(request: DialogueRequest):
             # 发送完成事件
             yield f"event: done\ndata: {{}}\n\n"
 
-            if _should_generate_voice(request, session):
+            if _should_generate_voice(request, session, structured_reply):
                 voice_info = await _submit_single_voice(
                     session,
                     utterance_id=utterance_id,

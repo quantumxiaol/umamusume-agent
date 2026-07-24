@@ -22,11 +22,19 @@ A TTS job is created only when all of the following are true:
 
 - backend `ENABLE_TTS=true`;
 - the frontend TTS switch was on when the user sent that turn;
-- the generated event is a character reply with a non-empty `dialogue`.
+- the generated event is a character reply with a non-empty `dialogue`;
+- the reply passed structured-output validation and is not a
+  `source_format=parse_error` fallback.
 
 Trainer dialogue, trainer actions, environment events, narration, and character
 `action` fields are never synthesized. Turning TTS on does not scan or backfill
 older replies.
+
+In director mode, manually regenerating the latest reply first cancels its old
+job in the browser flow, replaces the text in place, and submits only the new
+event revision. Each revision uses a distinct idempotency key. If an old Fish
+Speech request has already completed before cancellation arrives, its audio is
+discarded from the current event and is never attached to the replacement.
 
 The submit request contains one current Chinese subtitle plus stable character
 metadata, cast names, and public context events. It never mutates dialogue or

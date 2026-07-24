@@ -77,6 +77,18 @@ export const fetchTtsJob = async (jobId, userUuid) => {
   }
 };
 
+export const cancelTtsJob = async (jobId, userUuid) => {
+  try {
+    const response = await apiClient.delete(
+      `/tts/jobs/${encodeURIComponent(jobId)}`,
+      { params: { user_uuid: userUuid } },
+    );
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
 const buildDialogueEventFields = (dialogueEvent) => {
   if (!dialogueEvent) {
     return {};
@@ -289,6 +301,26 @@ export const deleteDirectorSession = async (sessionId, userUuid) => {
     const response = await apiClient.delete(
       `/director/sessions/${encodeURIComponent(sessionId)}`,
       { params: { user_uuid: userUuid } },
+    );
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const regenerateDirectorReply = async (
+  sessionId,
+  eventId,
+  userUuid,
+  generateVoice,
+) => {
+  try {
+    const response = await apiClient.post(
+      `/director/sessions/${encodeURIComponent(sessionId)}/events/${encodeURIComponent(eventId)}/regenerate`,
+      {
+        user_uuid: userUuid,
+        generate_voice: Boolean(generateVoice),
+      },
     );
     return response.data || {};
   } catch (error) {

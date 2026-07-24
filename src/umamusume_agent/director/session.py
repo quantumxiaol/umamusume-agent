@@ -87,6 +87,36 @@ class SceneSession:
         )
         return stored
 
+    def replace_event(
+        self,
+        event_id: str,
+        replacement: SceneEvent,
+    ) -> SceneEvent:
+        for index, current in enumerate(self.timeline.events):
+            if current.event_id != event_id:
+                continue
+            stored = replacement.model_copy(
+                update={
+                    "event_id": current.event_id,
+                    "sequence": current.sequence,
+                    "turn_index": current.turn_index,
+                    "revision": current.revision + 1,
+                },
+                deep=True,
+            )
+            self.timeline.events[index] = stored
+            self.touch()
+            # Director history is append-only. A later record with the same
+            # event_id replaces the earlier revision when history is loaded.
+            self.history.append(
+                {
+                    "event": "scene_event",
+                    **stored.model_dump(mode="json"),
+                }
+            )
+            return stored
+        raise ValueError("要重新生成的角色回复不存在")
+
     def replay_event(self, event: SceneEvent) -> SceneEvent:
         """Append an already-persisted event without writing it a second time."""
         return self.timeline.append(event)

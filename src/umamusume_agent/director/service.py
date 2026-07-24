@@ -11,6 +11,7 @@ from uuid import uuid4
 from ..character import CharacterManager
 from ..dialogue.models import (
     ActorRef,
+    CharacterReplyContext,
     DialogueInputEvent,
     actor_from_character,
     default_player_actor,
@@ -736,12 +737,82 @@ class DirectorService:
                         action=reply.action,
                         dialogue=reply.dialogue,
                         content=reply.dialogue,
+                        source_format=reply.source_format,
                     )
                 )
                 # The actor's own reply is already the assistant tail in its
                 # prompt thread, so do not project it again as a user event.
                 thread.last_seen_sequence = reply_event.sequence
                 yield reply_event
+                if reply.source_format == "parse_error":
+                    # Do not let a synthetic parse-failure fallback influence
+                    # another character in the same turn.
+                    break
+
+    async def regenerate_reply(
+        self,
+        session: SceneSession,
+        *,
+        event_id: str,
+    ) -> SceneEvent:
+        async with session.lock:
+            public_events = session.timeline.public_events()
+            if not public_events or public_events[-1].event_id != event_id:
+                raise ValueError("只能重新生成场景中最新的一条角色回复")
+            original = public_events[-1]
+            if (
+                original.event_type != "character_reply"
+                or original.actor is None
+                or original.actor.actor_id not in session.characters
+            ):
+                raise ValueError("最新事件不是可重新生成的角色回复")
+
+            actor_id = original.actor.actor_id
+            thread = session.actor_threads[actor_id]
+            base_messages = thread.snapshot()
+            if (
+                not base_messages
+                or base_messages[-1].get("role") != "assistant"
+            ):
+                raise ValueError("角色回复上下文无法安全回退")
+            base_messages.pop()
+            retry_messages = [
+                *base_messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "上一条回复已被用户判定为不合适并作废。"
+                        "不要复述错误内容；保持当前角色身份、称呼关系与"
+                        "已经发生的场景事实，重新给出自然回应。"
+                    ),
+                },
+            ]
+            reply = await self.character_runtime.generate_reply(
+                CharacterReplyContext(messages=retry_messages)
+            )
+
+            # Commit the prompt-thread replacement only after generation
+            # succeeds. The retry-only instruction is intentionally transient:
+            # persisted/restored threads keep the original stable prefix with
+            # the corrected assistant tail.
+            thread.messages = base_messages
+            thread.reply_count = max(0, thread.reply_count - 1)
+            self.character_context_builder.record_reply(thread, reply)
+            replacement = session.replace_event(
+                event_id,
+                SceneEvent(
+                    event_type="character_reply",
+                    actor=original.actor,
+                    target_actor_ids=original.target_actor_ids,
+                    action=reply.action,
+                    dialogue=reply.dialogue,
+                    content=reply.dialogue,
+                    source_format=reply.source_format,
+                    created_at=datetime.now(),
+                ),
+            )
+            thread.last_seen_sequence = replacement.sequence
+            return replacement
 
     async def execute_turn(
         self,

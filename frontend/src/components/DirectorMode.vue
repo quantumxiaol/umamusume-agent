@@ -74,6 +74,14 @@ const stateItems = computed(() => {
     .map(([key, label]) => ({ label, value: store.sceneState?.[key] }))
     .filter((item) => item.value);
 });
+const latestCharacterReplyId = computed(() => {
+  for (let index = store.events.length - 1; index >= 0; index -= 1) {
+    if (store.events[index]?.event_type === 'character_reply') {
+      return store.events[index].event_id;
+    }
+  }
+  return '';
+});
 
 const eventActorName = (event) => event.actor?.display_name || '环境';
 const eventKind = (event) => {
@@ -104,6 +112,13 @@ const voiceStatusText = (event) => {
 
 const playVoice = (eventId) => {
   audioRefs.value[eventId]?.play();
+};
+
+const regenerateReply = async (event) => {
+  await store.regenerateReply(
+    event,
+    props.ttsEnabled && props.voiceEnabled,
+  );
 };
 
 const toggleCharacter = (name) => {
@@ -396,8 +411,22 @@ onMounted(() => store.init(props.userUuid));
             <strong>{{ eventActorName(event) }}</strong>
             <span>{{ eventKind(event) }}</span>
           </header>
-          <div v-if="event.action" class="scene-action">{{ event.action }}</div>
+          <div
+            v-if="event.action && event.action !== '无'"
+            class="scene-action"
+          >
+            {{ event.action }}
+          </div>
           <p v-if="event.dialogue || event.content">{{ event.dialogue || event.content }}</p>
+          <button
+            v-if="event.event_id === latestCharacterReplyId"
+            type="button"
+            class="regenerate-reply-button"
+            :disabled="store.isLoading"
+            @click="regenerateReply(event)"
+          >
+            {{ store.isLoading ? '正在重新生成…' : '重新生成这条回复' }}
+          </button>
           <div
             v-if="props.ttsEnabled && event.event_type === 'character_reply' && event.voice?.job_id"
             class="director-message-audio"
@@ -916,6 +945,23 @@ button:disabled {
   border-radius: 999px;
   background: #fff;
   color: var(--accent-strong);
+}
+
+.regenerate-reply-button {
+  margin-top: 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.regenerate-reply-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .director-working,

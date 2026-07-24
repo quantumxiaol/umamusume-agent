@@ -197,6 +197,37 @@ class DialogueJsonProtocolTests(unittest.TestCase):
         self.assertNotIn("response_format", completions.calls[1])
         self.assertNotIn("response_format", completions.calls[2])
 
+    def test_safe_fallback_is_character_neutral(self):
+        self._configure_json_auto()
+        completions = _FakeCompletions(
+            [
+                _FakeResponse("not json"),
+                _FakeResponse('{"action":"无"}'),
+                _FakeResponse('{"dialogue":""}'),
+            ]
+        )
+        ds.llm_client = _FakeLlmClient(completions)
+
+        reply = asyncio.run(
+            ds._complete_structured_reply(
+                [
+                    {
+                        "role": "system",
+                        "content": "你是米浴，只输出 JSON",
+                    },
+                    {"role": "user", "content": "请回应"},
+                ]
+            )
+        )
+
+        self.assertEqual(reply.source_format, "parse_error")
+        self.assertEqual(
+            reply.dialogue,
+            "抱歉，刚才有点没听清，可以再说一次吗？",
+        )
+        self.assertNotIn("光钻", reply.dialogue)
+        self.assertNotIn("米浴", reply.dialogue)
+
 
 if __name__ == "__main__":
     unittest.main()

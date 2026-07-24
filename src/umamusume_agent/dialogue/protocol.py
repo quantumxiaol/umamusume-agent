@@ -80,7 +80,9 @@ REGENERATE_JSON_PROMPT = (
     '格式必须是：{"action":"...","dialogue":"..."}'
 )
 
-SAFE_PARSE_FAILURE_REPLY = "光钻有点没听清，训练员可以再说一次吗？"
+# This fallback is shared by every character and must never contain a
+# character-specific name, self-reference, or trainer honorific.
+SAFE_PARSE_FAILURE_REPLY = "抱歉，刚才有点没听清，可以再说一次吗？"
 
 _ACTION_PREFIXES = ("动作：", "动作:", "神态：", "神态:", "场景：", "场景:")
 _DIALOGUE_PREFIXES = (

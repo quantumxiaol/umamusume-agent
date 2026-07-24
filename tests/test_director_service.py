@@ -282,6 +282,71 @@ class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(service.list_history(user_uuid=session.user_uuid), [])
 
+    async def test_regenerate_latest_reply_replaces_event_and_persisted_revision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            character_runtime = _FakeCharacterRuntime()
+            service = self._service(
+                temp_dir,
+                character_runtime=character_runtime,
+            )
+            session = await service.create_session(
+                user_uuid="00000000-0000-4000-8000-000000000001",
+                template_id="test_scene",
+                character_names=["角色A", "角色B"],
+            )
+            events = await service.execute_turn(
+                session,
+                [DialogueInputEvent(content="今天训练得怎么样？")],
+            )
+            first_reply, original = events[-2:]
+
+            with self.assertRaisesRegex(ValueError, "最新"):
+                await service.regenerate_reply(
+                    session,
+                    event_id=first_reply.event_id,
+                )
+
+            regenerated = await service.regenerate_reply(
+                session,
+                event_id=original.event_id,
+            )
+
+            self.assertEqual(regenerated.event_id, original.event_id)
+            self.assertEqual(regenerated.sequence, original.sequence)
+            self.assertEqual(regenerated.revision, 1)
+            self.assertEqual(regenerated.dialogue, "角色回复3")
+            self.assertNotEqual(regenerated.dialogue, original.dialogue)
+            self.assertIn(
+                "上一条回复已被用户判定为不合适",
+                character_runtime.contexts[-1].messages[-1]["content"],
+            )
+            self.assertEqual(
+                session.timeline.public_events()[-1],
+                regenerated,
+            )
+
+            live_actor_messages = {
+                actor_id: thread.snapshot()
+                for actor_id, thread in session.actor_threads.items()
+            }
+            restored = await service.restore_session(
+                user_uuid=session.user_uuid,
+                session_id=session.session_id,
+            )
+
+            self.assertEqual(restored.timeline.events, session.timeline.events)
+            self.assertEqual(
+                {
+                    actor_id: thread.messages
+                    for actor_id, thread in restored.actor_threads.items()
+                },
+                live_actor_messages,
+            )
+            self.assertEqual(
+                restored.timeline.public_events()[-1].revision,
+                1,
+            )
+
     async def test_director_runtime_repairs_and_sanitizes_speakers(self):
         json_runtime = _FakeJsonRuntime(
             [

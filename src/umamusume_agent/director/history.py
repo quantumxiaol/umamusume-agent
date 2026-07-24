@@ -105,11 +105,23 @@ def load_scene_history(path: Path) -> LoadedSceneHistory:
             for item in start.get("participants", [])
         ]
         player = dict(start["player"])
-        events = [
-            SceneEvent.model_validate(record)
-            for record in records
-            if record.get("event") == "scene_event"
-        ]
+        events: list[SceneEvent] = []
+        event_positions: dict[str, int] = {}
+        for record in records:
+            if record.get("event") != "scene_event":
+                continue
+            event = SceneEvent.model_validate(record)
+            existing_index = event_positions.get(event.event_id)
+            if existing_index is None:
+                event_positions[event.event_id] = len(events)
+                events.append(event)
+                continue
+            previous = events[existing_index]
+            if event.sequence != previous.sequence:
+                raise InvalidSceneHistory("导演场景历史的事件修订序号不一致")
+            if event.revision < previous.revision:
+                raise InvalidSceneHistory("导演场景历史的事件修订版本倒退")
+            events[existing_index] = event
     except Exception as exc:
         raise InvalidSceneHistory("导演场景历史结构无效") from exc
 

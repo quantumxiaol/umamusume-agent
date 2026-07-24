@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 
 import {
   API_BASE_URL,
+  cancelTtsJob,
   createDirectorSession,
   deleteDirectorHistory,
   deleteDirectorSession,
@@ -10,6 +11,7 @@ import {
   fetchDirectorSession,
   fetchDirectorTemplates,
   recoverDirectorSession,
+  regenerateDirectorReply,
   resumeDirectorHistory,
   fetchTtsJob,
 } from '@/services/api';
@@ -836,6 +838,74 @@ export const useDirectorStore = defineStore('director', {
       }
       this.lastActiveAt = new Date().toISOString();
       this._persistCurrentScene();
+    },
+
+    async regenerateReply(event, generateVoice = false) {
+      if (
+        !this.sessionId
+        || this.isLoading
+        || !event?.event_id
+      ) {
+        return false;
+      }
+      const eventId = event.event_id;
+      const jobId = event.voice?.job_id || '';
+      const timerId = this.voicePollers[eventId];
+      if (timerId) {
+        clearInterval(timerId);
+        delete this.voicePollers[eventId];
+      }
+      this.isLoading = true;
+      this.error = null;
+      try {
+        if (jobId) {
+          try {
+            await cancelTtsJob(jobId, this.currentUserUuid);
+          } catch (_err) {
+            // A ready, expired, or already removed job must not block retry.
+          }
+        }
+        const data = await regenerateDirectorReply(
+          this.sessionId,
+          eventId,
+          this.currentUserUuid,
+          generateVoice,
+        );
+        const replacement = {
+          ...(data.event || {}),
+          voice: normalizeVoice(data.event?.voice),
+        };
+        const index = this.events.findIndex(
+          (item) => item.event_id === eventId,
+        );
+        if (index < 0 || !replacement.event_id) {
+          throw new Error('重新生成的角色回复无法匹配原事件。');
+        }
+        this.events.splice(index, 1, replacement);
+        if (replacement.voice?.job_id) {
+          this._startVoicePolling(replacement);
+        }
+        if (data.scene_state) {
+          this.sceneState = data.scene_state;
+        }
+        this.lastActiveAt = new Date().toISOString();
+        this._persistCurrentScene();
+        return true;
+      } catch (err) {
+        this.error = err.message || '重新生成角色回复失败。';
+        const current = this.events.find(
+          (item) => item.event_id === eventId,
+        );
+        if (
+          current?.voice?.job_id
+          && !TERMINAL_TTS_STATES.has(current.voice.status)
+        ) {
+          this._startVoicePolling(current);
+        }
+        return false;
+      } finally {
+        this.isLoading = false;
+      }
     },
 
     async sendTurn(content = '', generateVoice = false) {

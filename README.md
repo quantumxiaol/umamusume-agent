@@ -283,11 +283,17 @@ POST   /director/history/{session_id}/resume
 DELETE /director/history/{session_id}
 POST   /director/turn
 POST   /director/turn_stream
+POST   /director/sessions/{session_id}/events/{event_id}/regenerate
 ```
 
 `/director/turn_stream` 按顺序发送 `scene_event`、`character_reply`、
 `scene_state` 和 `done`。更完整的数据契约、前缀规则与 V1 边界见
 [`docs/director_mode_v1.md`](docs/director_mode_v1.md)。
+
+导演时间线中最后一条角色回复可以手动重新生成。后端保留原
+`event_id`、顺序和历史位置，只递增 `revision` 并替换内容；前端会先取消旧版本的
+TTS Job，再只为新版本提交配音。该修订也会写入 JSONL 和浏览器快照，刷新或恢复场景
+后仍显示新版本。
 
 ### JSON 回复协议
 
@@ -332,7 +338,7 @@ data: {}
 
 ### 解析失败与自动重生成
 
-安全提示 `光钻有点没听清，训练员可以再说一次吗？` 只会在 JSON 主链路无法得到可用 `dialogue` 时出现，例如上游返回空内容、不是 JSON object、JSON 缺少非空 `dialogue`，并且修复与重生成都失败。
+角色中性的安全提示 `抱歉，刚才有点没听清，可以再说一次吗？` 只会在 JSON 主链路无法得到可用 `dialogue` 时出现，例如上游返回空内容、不是 JSON object、JSON 缺少非空 `dialogue`，并且修复与重生成都失败。该提示不包含角色名、自称或训练员称呼，避免多人场景中发生身份串线。
 
 默认失败处理顺序：
 
@@ -341,6 +347,10 @@ data: {}
 3. 修复仍失败时，忽略失败输出，基于最近训练员发言重新生成一次（`LLM_JSON_REGENERATE_ON_PARSE_FAILURE=true`、`LLM_JSON_MAX_REGENERATE_ATTEMPTS=1`）。
 4. 仍失败才返回安全提示，并以 `source_format=parse_error` 写入历史。
 
+`parse_error` 回复不会提交 TTS。导演模式还会停止本轮剩余角色响应，避免后续角色把
+这条合成的安全提示当作真实剧情继续接话；用户可直接点击最后一条角色回复旁的
+“重新生成这条回复”再次尝试。
+
 长上下文对话中如果频繁出现安全提示，优先尝试：缩短/裁剪历史、提高隐藏格式提醒频率、降低温度，或使用前端的“编辑上一句 / 重生成上一轮”从最近一轮重新生成。
 
 ### 历史与 TTS
@@ -348,7 +358,7 @@ data: {}
 - 历史文件中 assistant 消息保存 `schema_version=2`、`content`、`action`、`dialogue`、`source_format`。
 - 传给 LLM 的历史上下文不会塞 raw JSON，而是压成自然语言：`角色动作：...` / `角色对白：...`。
 - `/history/import` 可导入 v2 JSON，也兼容旧 `role/content`、旧“动作：/对白：”文本和 Markdown 导出；`replace_current=true` 且 `messages=[]` 会清空当前 session 上下文。
-- TTS 只为赛马娘的 `dialogue` 提交任务；角色动作、训练员输入、旁白和环境事件不配音。
+- TTS 只为校验成功的赛马娘 `dialogue` 提交任务；`parse_error` 安全提示、角色动作、训练员输入、旁白和环境事件不配音。
 - 对话回复先返回，语音任务在后台经历 `queued -> translating -> validating -> synthesizing -> downloading -> ready`；失败不会回滚或阻塞文字对话。
 - 前端不会自动播放。任务 `ready` 后，对应角色对白旁才显示“播放日语配音”按钮。
 - TTS 开关取发送瞬间的状态。关闭期间产生的对白不会在重新开启时补合成，但公开历史仍可作为之后翻译称呼和语境的上下文。

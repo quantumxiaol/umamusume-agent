@@ -14,6 +14,10 @@ Director mode is a separate multi-character scene layer. It reuses
 - At least one character replies to each submitted batch. The director normally
   schedules one and uses a second only when interaction benefits the scene.
 - Character replies are sequential; later speakers see earlier replies.
+- A parse-error fallback stops the remaining speakers for that turn and is
+  never sent to TTS.
+- The latest public character reply can be regenerated in place. Its event ID
+  and sequence stay stable while its revision increments.
 - Public events are visible to every participant.
 - The director may patch scene state and add narration, but cannot author
   character action or dialogue.
@@ -65,6 +69,13 @@ Dynamic state snapshots, unseen events, and one-turn instructions are appended
 at the tail. Earlier messages are never reordered or rewritten, so the entire
 previous request is an exact prefix of the next request for that runtime.
 
+Manual regeneration is the single bounded exception at the mutable tail: the
+latest character assistant message is replaced only after a retry succeeds.
+The retry request reuses the unchanged prefix and adds a transient correction
+instruction. JSONL persistence remains append-only by writing a later event
+revision with the same event ID and sequence; restoration selects the newest
+revision.
+
 The selected location or custom opening environment, initial cast, and optional
 story outline are fixed when the session is created and therefore stay in the
 director's static prefix. The outline guides scheduling but is not exposed to
@@ -92,12 +103,19 @@ uncompacted.
 - `DELETE /director/history/{session_id}`
 - `POST /director/turn`
 - `POST /director/turn_stream`
+- `POST /director/sessions/{session_id}/events/{event_id}/regenerate`
 
 The streaming endpoint emits `scene_event`, `character_reply`, `scene_state`,
 and finally `done`.
 
 `POST /director/sessions` accepts either `template_id` or `custom_scene`, never
 both. `story_outline` is independent and optional for either form.
+
+The regenerate endpoint accepts `user_uuid` and `generate_voice`. It rejects
+anything except the latest public character reply, replaces that reply in
+place, and returns the incremented `revision`. When voice is enabled, the new
+revision receives a distinct TTS idempotency key. The browser cancels the old
+job before calling this endpoint.
 
 Session reads, turns, and deletes include `user_uuid`. Browser recovery accepts
 only public events, validates the cast and final scene state, reloads each

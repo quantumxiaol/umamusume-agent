@@ -43,6 +43,11 @@ class DirectorRecoveryRequest(BaseModel):
     snapshot: SceneRecoverySnapshot
 
 
+class DirectorRegenerateRequest(BaseModel):
+    user_uuid: str
+    generate_voice: bool = False
+
+
 def _normalize_user_uuid(value: str | None) -> str:
     if not value:
         return str(uuid4())
@@ -154,6 +159,7 @@ def create_director_router(
             or event.event_type != "character_reply"
             or event.actor is None
             or not event.dialogue
+            or event.source_format == "parse_error"
         ):
             return None
         character = session.characters.get(event.actor.actor_id)
@@ -162,7 +168,7 @@ def create_director_router(
         return await voice_service.submit_dialogue(
             user_uuid=session.user_uuid,
             source_session_id=session.session_id,
-            utterance_id=event.event_id,
+            utterance_id=f"{event.event_id}:r{event.revision}",
             character=character,
             dialogue_text=event.dialogue,
             actor_id=event.actor.actor_id,
@@ -323,6 +329,35 @@ def create_director_router(
             "session_id": session.session_id,
             "turn_index": session.turn_index,
             "events": event_payloads,
+            "scene_state": session.timeline.state.model_dump(mode="json"),
+        }
+
+    @router.post(
+        "/sessions/{session_id}/events/{event_id}/regenerate"
+    )
+    async def regenerate_director_reply(
+        session_id: str,
+        event_id: str,
+        request: DirectorRegenerateRequest,
+    ) -> dict[str, Any]:
+        session = get_session(session_id, request.user_uuid)
+        try:
+            event = await service.regenerate_reply(
+                session,
+                event_id=event_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise _translate_exception(exc) from exc
+        payload = event.model_dump(mode="json")
+        if request.generate_voice:
+            voice = await submit_event_voice(session, event)
+            if voice:
+                payload["voice"] = voice
+        return {
+            "session_id": session.session_id,
+            "event": payload,
             "scene_state": session.timeline.state.model_dump(mode="json"),
         }
 

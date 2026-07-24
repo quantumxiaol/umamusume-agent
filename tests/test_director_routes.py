@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI
 
+from umamusume_agent.dialogue.protocol import StructuredReply
 from umamusume_agent.director.context import (
     CharacterSceneContextBuilder,
     DirectorContextBuilder,
@@ -170,6 +171,97 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
                 context["event_id"]
                 for context in self.voice_service.calls[1]["context_events"]
             },
+        )
+
+    async def test_parse_error_stops_cast_and_never_submits_tts(self):
+        async def generate_parse_error(_context):
+            return StructuredReply(
+                action="无",
+                dialogue="抱歉，刚才有点没听清，可以再说一次吗？",
+                source_format="parse_error",
+            )
+
+        self.character_runtime.generate_reply = generate_parse_error
+        created = await self._create_session()
+        response = await self.client.post(
+            "/director/turn",
+            json={
+                "session_id": created["session_id"],
+                "user_uuid": created["user_uuid"],
+                "generate_voice": True,
+                "events": [
+                    {
+                        "content": "请说说今天的训练。",
+                        "event_type": "dialogue",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        character_events = [
+            event
+            for event in response.json()["events"]
+            if event["event_type"] == "character_reply"
+        ]
+        self.assertEqual(len(character_events), 1)
+        self.assertEqual(character_events[0]["source_format"], "parse_error")
+        self.assertNotIn("voice", character_events[0])
+        self.assertEqual(self.voice_service.calls, [])
+
+    async def test_regenerate_reply_reuses_event_id_and_only_voices_new_revision(self):
+        created = await self._create_session()
+        turn_response = await self.client.post(
+            "/director/turn",
+            json={
+                "session_id": created["session_id"],
+                "user_uuid": created["user_uuid"],
+                "generate_voice": True,
+                "events": [
+                    {
+                        "content": "请说说今天的训练。",
+                        "event_type": "dialogue",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(turn_response.status_code, 200)
+        character_events = [
+            event
+            for event in turn_response.json()["events"]
+            if event["event_type"] == "character_reply"
+        ]
+        original = character_events[-1]
+        original_voice_calls = len(self.voice_service.calls)
+
+        response = await self.client.post(
+            (
+                f"/director/sessions/{created['session_id']}"
+                f"/events/{original['event_id']}/regenerate"
+            ),
+            json={
+                "user_uuid": created["user_uuid"],
+                "generate_voice": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        replacement = response.json()["event"]
+        self.assertEqual(replacement["event_id"], original["event_id"])
+        self.assertEqual(replacement["sequence"], original["sequence"])
+        self.assertEqual(replacement["revision"], 1)
+        self.assertNotEqual(replacement["dialogue"], original["dialogue"])
+        self.assertEqual(
+            len(self.voice_service.calls),
+            original_voice_calls + 1,
+        )
+        self.assertEqual(
+            self.voice_service.calls[-1]["utterance_id"],
+            f"{original['event_id']}:r1",
+        )
+        self.assertEqual(
+            replacement["voice"]["job_id"],
+            f"tts-{original['event_id']}:r1",
         )
 
     async def test_create_custom_scene_with_multiple_characters(self):

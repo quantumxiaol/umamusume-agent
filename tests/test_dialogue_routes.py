@@ -408,6 +408,30 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             "收到。",
         )
 
+    async def test_chat_parse_error_fallback_never_submits_tts(self):
+        session = self._prepare_session("tts-parse-error-test")
+        ds.ENABLE_TTS = True
+        ds.llm_client = _FakeLlmClient("not json")
+        submit_voice = AsyncMock()
+
+        with patch.object(ds, "_submit_single_voice", submit_voice):
+            response = await self.client.post(
+                "/chat",
+                json={
+                    "session_id": session.session_id,
+                    "message": "请回应",
+                    "generate_voice": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["message"]["source_format"],
+            "parse_error",
+        )
+        self.assertNotIn("voice", response.json())
+        submit_voice.assert_not_awaited()
+
     async def test_reenabling_tts_does_not_backfill_previous_reply(self):
         session = self._prepare_session("tts-toggle-test")
         ds.ENABLE_TTS = True
