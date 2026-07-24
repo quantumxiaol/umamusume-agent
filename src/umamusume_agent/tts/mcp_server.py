@@ -36,7 +36,8 @@ preparer = JapaneseDialoguePreparer(
     temperature=config.TTS_TRANSLATION_TEMPERATURE,
     max_tokens=config.TTS_TRANSLATION_MAX_TOKENS,
     prefix_cache_enabled=config.TTS_TRANSLATION_PREFIX_CACHE_ENABLED,
-    repair_attempts=1,
+    repair_attempts=config.TTS_TRANSLATION_REPAIR_ATTEMPTS,
+    content_retries=config.TTS_TRANSLATION_CONTENT_RETRIES,
     thread_ttl_seconds=config.TTS_TRANSLATION_THREAD_TTL_SECONDS,
     max_threads=config.TTS_TRANSLATION_MAX_THREADS,
 )

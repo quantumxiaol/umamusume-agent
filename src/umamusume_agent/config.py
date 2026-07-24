@@ -139,7 +139,13 @@ class Config:
         os.getenv("TTS_TRANSLATION_TEMPERATURE", "0.2")
     )
     TTS_TRANSLATION_MAX_TOKENS: int = int(
-        os.getenv("TTS_TRANSLATION_MAX_TOKENS", "400")
+        os.getenv("TTS_TRANSLATION_MAX_TOKENS", "1024")
+    )
+    TTS_TRANSLATION_CONTENT_RETRIES: int = int(
+        os.getenv("TTS_TRANSLATION_CONTENT_RETRIES", "2")
+    )
+    TTS_TRANSLATION_REPAIR_ATTEMPTS: int = int(
+        os.getenv("TTS_TRANSLATION_REPAIR_ATTEMPTS", "2")
     )
     TTS_TRANSLATION_PREFIX_CACHE_ENABLED: bool = _env_bool(
         "TTS_TRANSLATION_PREFIX_CACHE_ENABLED",

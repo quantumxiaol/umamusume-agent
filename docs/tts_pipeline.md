@@ -42,6 +42,10 @@ director history.
 
 It must preserve meaning, persona, proper names, first-person wording, and
 honorifics. The Fish Speech input comes only from validated `spoken_text_ja`.
+The default output budget is 1024 tokens. HTTP 200 responses with empty content
+are retried without provider JSON mode, `finish_reason=length` responses are
+retried with a larger output budget, and malformed JSON receives bounded repair
+turns. Failed attempts are removed from the persistent translation prefix.
 
 Each `user_uuid + dialogue/scene thread + speaker` owns an append-only
 translation thread. Single-character chat uses a stable per-character thread

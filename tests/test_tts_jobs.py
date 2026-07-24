@@ -67,6 +67,36 @@ class _TranslationClient:
         self.chat = type("_Chat", (), {"completions": self.completions})()
 
 
+class _SequenceTranslationCompletions:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(copy.deepcopy(kwargs))
+        item = self.responses.pop(0)
+        message = type(
+            "_Message",
+            (),
+            {"content": item.get("content")},
+        )()
+        choice = type(
+            "_Choice",
+            (),
+            {
+                "message": message,
+                "finish_reason": item.get("finish_reason", "stop"),
+            },
+        )()
+        return type("_Response", (), {"choices": [choice]})()
+
+
+class _SequenceTranslationClient:
+    def __init__(self, responses):
+        self.completions = _SequenceTranslationCompletions(responses)
+        self.chat = type("_Chat", (), {"completions": self.completions})()
+
+
 class TTSJobManagerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -159,6 +189,191 @@ class TTSJobManagerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class JapaneseDialoguePreparerTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def request(subtitle="哥哥，我们走吧。"):
+        return TTSSubmitRequest(
+            user_uuid="00000000-0000-4000-8000-000000000001",
+            source_session_id="scene-1",
+            utterance_id="utterance-1",
+            subtitle_zh=subtitle,
+            speaker=TTSCharacterProfile(
+                actor_id="rice_shower",
+                name_zh="米浴",
+                name_jp="ライスシャワー",
+                reference_audio_path="/tmp/reference.wav",
+                first_person="ライス",
+                user_address="お兄さま",
+            ),
+        )
+
+    @staticmethod
+    def valid_json():
+        return (
+            '{"subtitle_ja":"お兄さま、行きましょう。",'
+            '"spoken_text_ja":"お兄さま、行きましょう。"}'
+        )
+
+    async def test_empty_json_mode_content_retries_prompt_only(self):
+        client = _SequenceTranslationClient(
+            [
+                {"content": "", "finish_reason": "stop"},
+                {
+                    "content": self.valid_json(),
+                    "finish_reason": "stop",
+                },
+            ]
+        )
+        preparer = JapaneseDialoguePreparer(
+            client=client,
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            temperature=0.2,
+            max_tokens=1024,
+            prefix_cache_enabled=True,
+            content_retries=2,
+        )
+
+        prepared = await preparer.prepare(self.request())
+
+        self.assertEqual(
+            prepared.spoken_text_ja,
+            "お兄さま、行きましょう。",
+        )
+        self.assertEqual(len(client.completions.calls), 2)
+        self.assertIn(
+            "response_format",
+            client.completions.calls[0],
+        )
+        self.assertNotIn(
+            "response_format",
+            client.completions.calls[1],
+        )
+
+    async def test_length_response_retries_with_larger_budget(self):
+        client = _SequenceTranslationClient(
+            [
+                {
+                    "content": '{"subtitle_ja":"途中',
+                    "finish_reason": "length",
+                },
+                {
+                    "content": self.valid_json(),
+                    "finish_reason": "stop",
+                },
+            ]
+        )
+        preparer = JapaneseDialoguePreparer(
+            client=client,
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            temperature=0.2,
+            max_tokens=1024,
+            prefix_cache_enabled=True,
+            content_retries=2,
+        )
+
+        prepared = await preparer.prepare(self.request())
+
+        self.assertEqual(
+            prepared.subtitle_ja,
+            "お兄さま、行きましょう。",
+        )
+        self.assertEqual(
+            client.completions.calls[0]["max_tokens"],
+            1024,
+        )
+        self.assertEqual(
+            client.completions.calls[1]["max_tokens"],
+            2048,
+        )
+        self.assertIn(
+            "response_format",
+            client.completions.calls[1],
+        )
+
+    async def test_malformed_json_uses_bounded_repair_turns(self):
+        client = _SequenceTranslationClient(
+            [
+                {
+                    "content": '{"subtitle_ja":"途中',
+                    "finish_reason": "stop",
+                },
+                {
+                    "content": '{"subtitle_ja":"まだ途中',
+                    "finish_reason": "stop",
+                },
+                {
+                    "content": self.valid_json(),
+                    "finish_reason": "stop",
+                },
+            ]
+        )
+        preparer = JapaneseDialoguePreparer(
+            client=client,
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            temperature=0.2,
+            max_tokens=1024,
+            prefix_cache_enabled=True,
+            repair_attempts=2,
+        )
+
+        prepared = await preparer.prepare(self.request())
+
+        self.assertEqual(
+            prepared.spoken_text_ja,
+            "お兄さま、行きましょう。",
+        )
+        self.assertEqual(len(client.completions.calls), 3)
+        repair_messages = client.completions.calls[2]["messages"]
+        self.assertTrue(
+            any(
+                "上一条输出不符合固定格式" in str(item["content"])
+                for item in repair_messages
+            )
+        )
+
+    async def test_failed_translation_does_not_pollute_next_prefix(self):
+        client = _SequenceTranslationClient(
+            [
+                {"content": "", "finish_reason": "stop"},
+                {"content": "", "finish_reason": "stop"},
+                {
+                    "content": self.valid_json(),
+                    "finish_reason": "stop",
+                },
+            ]
+        )
+        preparer = JapaneseDialoguePreparer(
+            client=client,
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            temperature=0.2,
+            max_tokens=1024,
+            prefix_cache_enabled=True,
+            content_retries=1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "no usable content"):
+            await preparer.prepare(self.request("第一次失败。"))
+
+        prepared = await preparer.prepare(
+            self.request("第二次成功。").model_copy(
+                update={"utterance_id": "utterance-2"}
+            )
+        )
+
+        self.assertEqual(
+            prepared.spoken_text_ja,
+            "お兄さま、行きましょう。",
+        )
+        successful_messages = client.completions.calls[2]["messages"]
+        rendered = "\n".join(
+            str(message["content"]) for message in successful_messages
+        )
+        self.assertNotIn("第一次失败。", rendered)
+        self.assertIn("第二次成功。", rendered)
+
     async def test_thread_is_append_only_for_prefix_cache(self):
         client = _TranslationClient()
         preparer = JapaneseDialoguePreparer(

@@ -118,6 +118,7 @@ cat .env.template > .env
   - `TTS_MCP_AUTOSTART`（Docker/Hugging Face 启动时是否自动拉起项目内 MCP 进程）
   - `TTS_MAX_CONCURRENT_JOBS` / `TTS_JOB_TTL_SECONDS`（合成并发数与内存任务、临时音频保留时间）
   - `TTS_TRANSLATION_LLM_*`（中文对白到日语配音文本；留空时复用 `ROLEPLAY_LLM_*`）
+  - `TTS_TRANSLATION_MAX_TOKENS`（默认 `1024`）/ `TTS_TRANSLATION_CONTENT_RETRIES`（默认 `2`，处理空内容或截断）/ `TTS_TRANSLATION_REPAIR_ATTEMPTS`（默认 `2`，修复损坏 JSON）
   - `TTS_TRANSLATION_PREFIX_CACHE_ENABLED`（为支持 Qwen/百炼的模型标记稳定前缀）
   - `TTS_TRANSLATION_THREAD_TTL_SECONDS` / `TTS_TRANSLATION_MAX_THREADS`（限制匿名浏览器翻译线程的内存占用）
   - `FISHSPEECH_BASE_URL` / `FISHSPEECH_API_KEY` / `FISHSPEECH_TIMEOUT_SECONDS`（外部 Fish Speech 服务）

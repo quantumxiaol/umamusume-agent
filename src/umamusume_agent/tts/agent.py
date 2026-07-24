@@ -132,6 +132,7 @@ class JapaneseDialoguePreparer:
         max_tokens: int,
         prefix_cache_enabled: bool,
         repair_attempts: int = 1,
+        content_retries: int = 2,
         thread_ttl_seconds: int = 7200,
         max_threads: int = 256,
     ):
@@ -142,6 +143,7 @@ class JapaneseDialoguePreparer:
         self.max_tokens = max_tokens
         self.prefix_cache_enabled = prefix_cache_enabled
         self.repair_attempts = max(0, repair_attempts)
+        self.content_retries = max(0, content_retries)
         self.thread_ttl_seconds = max(0, thread_ttl_seconds)
         self.max_threads = max(1, max_threads)
         self._threads: dict[str, _TranslationThread] = {}
@@ -253,18 +255,42 @@ class JapaneseDialoguePreparer:
                     "严格按固定 JSON 格式转换，不要添加动作或旁白。"
                 ),
             }
+            request_start = len(thread.messages)
             thread.messages.append(request_message)
-            raw = await self._complete(thread.messages)
-            thread.messages.append({"role": "assistant", "content": raw})
-
             try:
-                prepared = self._validate(raw)
-            except ValueError as first_error:
-                prepared = await self._repair(
-                    thread,
-                    raw,
-                    first_error,
+                raw = await self._complete(thread.messages)
+                thread.messages.append(
+                    {"role": "assistant", "content": raw}
                 )
+                try:
+                    prepared = self._validate(raw)
+                except ValueError as first_error:
+                    prepared = await self._repair(
+                        thread,
+                        raw,
+                        first_error,
+                    )
+            except Exception:
+                # A failed translation must not poison the append-only prefix
+                # used by later utterances from the same speaker.
+                del thread.messages[request_start:]
+                raise
+
+            # Keep the successful turn cache-friendly. Repair instructions and
+            # malformed intermediate responses are useful only for the current
+            # request and should not become part of the next stable prefix.
+            canonical = json.dumps(
+                {
+                    "subtitle_ja": prepared.subtitle_ja,
+                    "spoken_text_ja": prepared.spoken_text_ja,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            thread.messages[request_start:] = [
+                request_message,
+                {"role": "assistant", "content": canonical},
+            ]
             thread.last_used_at = time.monotonic()
             return prepared
 
@@ -280,13 +306,72 @@ class JapaneseDialoguePreparer:
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     async def _complete(self, messages: list[dict[str, Any]]) -> str:
+        use_response_format = self._response_format_supported
+        token_budget = max(1, self.max_tokens)
+        max_retry_budget = max(token_budget, 4096)
+        last_reason = "empty content"
+
+        for attempt in range(self.content_retries + 1):
+            response = await self._complete_once(
+                messages,
+                use_response_format=use_response_format,
+                max_tokens=token_budget,
+            )
+            choices = getattr(response, "choices", None) or []
+            choice = choices[0] if choices else None
+            finish_reason = str(
+                getattr(choice, "finish_reason", "") or ""
+            )
+            raw = _completion_text(response)
+
+            if finish_reason == "length":
+                last_reason = "finish_reason=length"
+                logger.warning(
+                    "TTS translation output was truncated "
+                    "(attempt %s/%s, max_tokens=%s); retrying",
+                    attempt + 1,
+                    self.content_retries + 1,
+                    token_budget,
+                )
+                token_budget = min(token_budget * 2, max_retry_budget)
+            elif not raw:
+                last_reason = (
+                    f"empty content (finish_reason={finish_reason or 'unknown'})"
+                )
+                logger.warning(
+                    "TTS translation model returned empty content "
+                    "(attempt %s/%s, finish_reason=%s); "
+                    "retrying without response_format",
+                    attempt + 1,
+                    self.content_retries + 1,
+                    finish_reason or "unknown",
+                )
+                # DeepSeek documents occasional empty content in JSON Output
+                # mode. Keep JSON instructions in the prompt, but retry this
+                # request without response_format.
+                use_response_format = False
+            else:
+                return raw
+
+        raise ValueError(
+            "TTS translation model produced no usable content after "
+            f"{self.content_retries + 1} attempts: {last_reason}"
+        )
+
+    async def _complete_once(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        use_response_format: bool,
+        max_tokens: int,
+    ) -> Any:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens,
         }
-        if self._response_format_supported:
+        if use_response_format and self._response_format_supported:
             kwargs["response_format"] = {"type": "json_object"}
         try:
             response = await self.client.chat.completions.create(**kwargs)
@@ -303,10 +388,7 @@ class JapaneseDialoguePreparer:
             )
             kwargs.pop("response_format", None)
             response = await self.client.chat.completions.create(**kwargs)
-        raw = _completion_text(response)
-        if not raw:
-            raise ValueError("TTS translation model returned empty content")
-        return raw
+        return response
 
     @staticmethod
     def _looks_like_unsupported_response_format(exc: Exception) -> bool:
