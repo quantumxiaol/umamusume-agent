@@ -30,11 +30,12 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - 对话服务：`/load_character`、`/chat`、`/chat_stream`
 - 剧情事件：单角色页面可发送训练员对白、训练员动作或环境事件，角色会基于明确的说话者与事件类型回应
 - 导演模式：选择常见地点预设或自定义开场环境，可选填写剧情大纲并选择 1～3 位角色；导演 LLM 通常安排一位、必要时最多两位角色顺序回应
-- 导演历史：浏览器刷新会自动重连当前场景；服务内存会话失效后可从独立 JSONL 历史重建共享时间线和所有角色上下文
-- 历史落盘：按 `user_uuid/角色/时间戳/session` 写入 `jsonl` 对话日志；assistant 消息使用 v2 结构字段保存
+- 多人共享时间线：训练员、环境和所有参加角色按照真实发生顺序共享公开事件；后发言角色能听到本轮前一位角色的公开发言
+- 导演历史：当前浏览器按 `user_uuid` 保存完整公开场景；即使 Hugging Face 同时丢失内存和临时 JSONL，也能上传浏览器快照恢复
+- 历史落盘：单角色对话与导演场景分别写入独立 JSONL；JSONL 是后端存活期间的快速恢复副本，导演模式以浏览器快照兜底
 - 对话格式：后端主协议为 `{"action":"...","dialogue":"..."}` JSON；API 响应返回 `action`、`dialogue`、`message`，不再返回旧两行 `reply`
 - 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
-- 前端 UI：角色选择、提示词预览、音色试听、多轮对话、语音播放
+- 前端 UI：单角色对话、剧情事件队列、多人导演页面、场景历史、角色选择、提示词预览和可选语音播放
 
 ## 仓库
 
@@ -199,6 +200,70 @@ curl -s http://127.0.0.1:1111/
 构造 LLM 上下文时会渲染为 `【训练员对白】`、`【训练员动作】`、
 `【环境变化】` 等明确标签。未携带事件字段的旧请求、旧响应和旧历史保持原样。
 
+### 多人导演模式
+
+导演模式是独立于旧单角色 `DialogueSession` 的多人场景层，不会把多人剧情写进任一角色的
+单聊历史。它复用相同的角色卡、`CharacterRuntime` 和结构化
+`{"action":"...","dialogue":"..."}` 回复协议，但由 `DirectorRuntime` 额外负责：
+
+- 读取训练员对白、训练员动作和环境事件组成的本轮输入批次。
+- 更新地点、时间、天气、光线、氛围和环境声等场景状态。
+- 从开场时选择的 1～3 位角色中决定本轮谁回应以及回应顺序。
+- 通常安排 1 位角色，确有接话或多人互动需要时最多安排 2 位。
+- 只向角色下发表演意图，不直接替角色编写动作或台词。
+
+多人回复严格顺序生成：
+
+```text
+训练员 / 环境输入
+    -> DirectorRuntime 生成导演计划
+    -> 可选场景变化与旁白
+    -> CharacterRuntime(A) 生成 A 的动作和对白
+    -> 写入公开时间线
+    -> CharacterRuntime(B) 读取包含 A 发言的时间线后回应
+```
+
+场景地点与剧情方向分开处理：
+
+- `scenes/` 提供公园、赛马场、河边、教室和训练场等常用地点预设。
+- 前端也可以填写自定义地点、时间、天气、光线、氛围、环境声、道具和开场旁白。
+- 剧情大纲是可选的发展方向，不是必须逐项执行的固定剧本。
+
+导演和每位角色各自维护独立、只追加的 `PromptThread`。固定角色卡、初始场景和初始演员表
+位于稳定前缀，动态事件只追加到尾部，以便兼容模型服务的前缀缓存。导演与每个角色按照
+自己的回复计数重新注入约束，间隔由
+`DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES` 控制。
+
+公开场景历史采用三层恢复：
+
+1. 优先恢复仍在后端内存中的 `SceneSession`。
+2. 内存失效时尝试从 `DIRECTOR_HISTORY_DIRECTORY` 下的 JSONL 精确重建导演和角色线程。
+3. Hugging Face 临时文件也丢失时，由当前浏览器上传 `localStorage` 中的完整公开快照，
+   后端校验角色、事件和最终环境状态，重新加载角色卡并建立新的只追加线程。
+
+浏览器快照不会保存隐藏的导演计划和角色私有指令。场景列表、读取、续写、结束和删除均按
+浏览器生成的 `user_uuid` 隔离；这属于浏览器实例隔离而不是账号鉴权，清理浏览器数据或
+更换浏览器会丢失本地恢复副本。
+
+当前导演 API：
+
+```text
+GET    /director/templates
+POST   /director/sessions
+POST   /director/sessions/recover
+GET    /director/sessions/{session_id}
+DELETE /director/sessions/{session_id}
+GET    /director/history
+POST   /director/history/{session_id}/resume
+DELETE /director/history/{session_id}
+POST   /director/turn
+POST   /director/turn_stream
+```
+
+`/director/turn_stream` 按顺序发送 `scene_event`、`character_reply`、
+`scene_state` 和 `done`。更完整的数据契约、前缀规则与 V1 边界见
+[`docs/director_mode_v1.md`](docs/director_mode_v1.md)。
+
 ### JSON 回复协议
 
 默认启用 JSON 回复主链路。模型被要求只输出：
@@ -312,8 +377,9 @@ Pages 目标地址将是：
 `DIRECTOR_HISTORY_DIRECTORY` 下的 JSONL 仍作为容器存活期间的快速、精确恢复副本。
 清理浏览器数据或更换浏览器后，本地场景历史不会自动迁移。
 
-剧情事件升级建议先发布 Hugging Face 后端，再发布 GitHub Pages 前端。新后端兼容旧前端；
-新前端也会通过 `/capabilities` 自动兼容尚未升级的旧后端，因此两个部署不要求同时完成。
+单角色剧情事件仍通过 `/capabilities` 保持向后兼容。导演浏览器恢复升级同时修改了
+Pages 请求参数和 HF 恢复接口，生产发布应同步更新两端；如果必须分先后，先发布
+GitHub Pages 前端，再发布 Hugging Face 后端。
 
 ## 前端使用说明（最新）
 
@@ -341,19 +407,58 @@ pnpm run dev
 ## 项目结构
 
 ```text
-|- src/umamusume_agent/
-|   |- character/              # 角色模型与管理
-|   |- client/                 # CLI 客户端
-|   |- crawler/                # 旧爬虫（未使用）
-|   |- rag/                    # 旧 RAG（未使用）
-|   |- search/                 # 旧搜索（未使用）
-|   |- server/                 # 对话服务
-|   |- tts/                    # MCP 客户端
-|   |- web/                    # 旧 Web MCP（未使用）
-|- frontend/                   # 前端 UI
-|- tests/                      # 测试脚本
-|- umamusume_characters.json   # 角色中英文映射
-|- README.md                   # 项目说明 / HF Space 配置
+.
+├── src/umamusume_agent/
+│   ├── character/                 # CharacterConfig 与角色卡加载
+│   ├── dialogue/                  # 旧单角色对话的可复用核心
+│   │   ├── context.py             # 单聊 Prompt、前缀缓存与约束再注入
+│   │   ├── history.py             # 单聊 JSONL 读取、恢复与导入
+│   │   ├── models.py              # Actor、输入事件与 Runtime 数据模型
+│   │   ├── protocol.py            # action/dialogue 协议、解析与兼容
+│   │   ├── runtime.py             # 角色 LLM 调用、修复与重生成
+│   │   ├── service.py             # 完整单角色轮次
+│   │   └── session.py             # DialogueSession
+│   ├── director/                  # 多人导演场景核心
+│   │   ├── context.py             # 导演/各角色独立 PromptThread
+│   │   ├── history.py             # 导演 JSONL 历史
+│   │   ├── models.py              # 场景、计划、事件与恢复快照模型
+│   │   ├── runtime.py             # DirectorRuntime 与计划校验
+│   │   ├── service.py             # 人物调度、顺序生成与快照恢复
+│   │   ├── session.py             # SceneSession
+│   │   ├── templates.py           # 场景预设仓库
+│   │   └── timeline.py            # 共享事件流与场景状态归并
+│   ├── server/
+│   │   ├── dialogue_server.py     # FastAPI 入口、旧接口与服务装配
+│   │   └── director_routes.py     # /director API 与 SSE
+│   ├── tts/                       # 可选 IndexTTS MCP 客户端与服务
+│   ├── client/                    # CLI 客户端
+│   ├── crawler/                   # 早期爬虫（当前主链路未使用）
+│   ├── rag/                       # 早期 RAG（当前主链路未使用）
+│   ├── search/                    # 早期搜索（当前主链路未使用）
+│   └── web/                       # 早期 Web MCP（当前主链路未使用）
+├── frontend/
+│   └── src/
+│       ├── App.vue                # 单角色/导演模式入口
+│       ├── components/
+│       │   └── DirectorMode.vue   # 多人场景选择、时间线与历史 UI
+│       ├── services/api.js        # 单聊与导演后端 API
+│       └── stores/
+│           ├── chatStore.js       # 单角色状态、事件队列与历史缓存
+│           └── directorStore.js   # 场景状态、浏览器快照与恢复
+├── scenes/                        # 公园、赛马场、河边等场景预设
+├── characters/                    # 外部导入的角色卡、Prompt 与参考音频
+├── docs/
+│   ├── dialogue_architecture.md   # 单角色 Runtime 架构
+│   └── director_mode_v1.md        # 多人导演协议与前缀约束
+├── tests/                         # 单聊、导演、历史和路由回归测试
+├── outputs/                       # 本地运行产物与后端 JSONL 副本
+├── .github/workflows/
+│   └── deploy-pages.yml           # GitHub Pages 前端部署
+├── app.py                         # Hugging Face / Uvicorn 启动入口
+├── Dockerfile                     # Hugging Face Docker Space
+├── .env.template                  # 后端配置模板
+├── umamusume_characters.json      # 角色中英文映射
+└── README.md                      # 项目说明与部署配置
 ```
 
 ## 保留模块说明
