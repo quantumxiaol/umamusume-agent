@@ -10,6 +10,7 @@ import {
   fetchHistory,
   importHistory,
   clearHistory,
+  fetchTtsJob,
 } from '@/services/api';
 
 const USER_UUID_STORAGE_KEY = 'umamusume_user_uuid';
@@ -18,6 +19,33 @@ const HISTORY_CACHE_PREFIX_V2 = 'umamusume_history_cache_v2';
 const HISTORY_SCHEMA_VERSION = 2;
 const EVENT_SCHEMA_VERSION = 1;
 const TTS_ENABLED = import.meta.env.VITE_ENABLE_TTS === 'true';
+const VOICE_ENABLED_STORAGE_KEY = 'umamusume_voice_enabled_v1';
+const TERMINAL_TTS_STATES = new Set(['ready', 'failed', 'cancelled', 'expired']);
+
+const readVoiceEnabledPreference = () => {
+  if (!TTS_ENABLED || typeof localStorage === 'undefined') {
+    return false;
+  }
+  try {
+    return localStorage.getItem(VOICE_ENABLED_STORAGE_KEY) === 'true';
+  } catch (_err) {
+    return false;
+  }
+};
+
+const writeVoiceEnabledPreference = (value) => {
+  if (!TTS_ENABLED || typeof localStorage === 'undefined') {
+    return;
+  }
+  try {
+    localStorage.setItem(
+      VOICE_ENABLED_STORAGE_KEY,
+      value ? 'true' : 'false',
+    );
+  } catch (_err) {
+    // TTS still works for the current page when browser storage is disabled.
+  }
+};
 
 export const DIALOGUE_INPUT_MODES = Object.freeze({
   dialogue: {
@@ -138,7 +166,7 @@ const createMessage = (role, content, extra = {}) => ({
   action: extra.action || '',
   dialogue: extra.dialogue || (role === 'assistant' ? content : ''),
   legacyReply: extra.legacyReply || '',
-  voice: extra.voice || null,
+  voice: normalizeVoiceReference(extra.voice || extra.tts),
   status: extra.status || 'ready',
   renderMode: extra.renderMode || 'structured',
   createdAt: extra.createdAt || new Date().toISOString(),
@@ -154,6 +182,7 @@ const createMessage = (role, content, extra = {}) => ({
     normalizeActor(extra.actor || extra.speaker),
     extra.eventType || extra.event_type || '',
   ),
+  utteranceId: extra.utteranceId || extra.utterance_id || '',
 });
 
 const resolveAudioUrl = (url) => {
@@ -167,6 +196,23 @@ const resolveAudioUrl = (url) => {
     return `${API_BASE_URL}${url}`;
   }
   return url;
+};
+
+const normalizeVoiceReference = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const jobId = String(value.job_id || value.jobId || '').trim();
+  if (!jobId) {
+    return null;
+  }
+  return {
+    requested: true,
+    job_id: jobId,
+    status: String(value.state || value.status || 'queued'),
+    audio_url: resolveAudioUrl(value.audio_url || value.audioUrl || ''),
+    error: String(value.error || ''),
+  };
 };
 
 const normalizeMarkdownText = (text) => {
@@ -413,6 +459,8 @@ const normalizeConversationRecord = (record) => {
     timestamp,
     schemaVersion: record?.schemaVersion || record?.schema_version || HISTORY_SCHEMA_VERSION,
     sourceFormat: parsed.sourceFormat || 'legacy_text',
+    utteranceId: record?.utteranceId || record?.utterance_id || '',
+    voice: normalizeVoiceReference(record?.voice || record?.tts),
     ...eventMetadata,
   };
 };
@@ -445,6 +493,14 @@ const messageToRecord = (message) => ({
   ...(message.eventType ? { event_type: message.eventType } : {}),
   ...(message.targetActorIds?.length ? { target_actor_ids: [...message.targetActorIds] } : {}),
   ...(message.eventSchemaVersion ? { event_schema_version: message.eventSchemaVersion } : {}),
+  ...(message.utteranceId ? { utterance_id: message.utteranceId } : {}),
+  ...(message.voice?.job_id ? {
+    tts: {
+      requested: true,
+      job_id: message.voice.job_id,
+      status: message.voice.status || 'queued',
+    },
+  } : {}),
 });
 
 const readHistoryCache = (userUuid, characterName) => {
@@ -614,7 +670,7 @@ export const useChatStore = defineStore('chat', {
     cachedMessageCount: 0,
     cachedSavedAt: '',
     streamMode: true,
-    voiceEnabled: false,
+    voiceEnabled: readVoiceEnabledPreference(),
     currentAssistantId: '',
     voicePollers: {},
   }),
@@ -685,7 +741,8 @@ export const useChatStore = defineStore('chat', {
     },
 
     setVoiceEnabled(value) {
-      this.voiceEnabled = TTS_ENABLED ? value : false;
+      this.voiceEnabled = TTS_ENABLED ? Boolean(value) : false;
+      writeVoiceEnabledPreference(this.voiceEnabled);
     },
 
     setInputMode(value) {
@@ -756,64 +813,115 @@ export const useChatStore = defineStore('chat', {
       this.voicePollers = {};
     },
 
-    async _checkAudioReady(audioUrl) {
-      if (!audioUrl) {
-        return false;
-      }
-      try {
-        const head = await fetch(audioUrl, { method: 'HEAD' });
-        if (head.ok) {
-          return true;
-        }
-        if (head.status !== 405) {
-          return false;
-        }
-      } catch (_err) {
-        // fall through to GET
-      }
-
-      try {
-        const resp = await fetch(audioUrl, {
-          method: 'GET',
-          headers: { Range: 'bytes=0-1' },
-        });
-        return resp.ok;
-      } catch (_err) {
-        return false;
-      }
-    },
-
     _startVoicePolling(message) {
-      if (!message?.voice?.audio_url) {
+      if (!message?.voice?.job_id || !this.userUuid) {
         return;
       }
       const messageId = message.id;
+      const jobId = message.voice.job_id;
       if (this.voicePollers[messageId]) {
         return;
       }
       let attempts = 0;
-      const maxAttempts = 300;
-      const intervalMs = 1000;
-
-      const timerId = setInterval(async () => {
-        attempts += 1;
-        const ready = await this._checkAudioReady(message.voice.audio_url);
-        if (ready) {
-          message.voice.status = 'ready';
+      let inFlight = false;
+      // One Fish Speech request may take up to 15 minutes, and director
+      // replies can queue behind each other when backend concurrency is 1.
+      const maxAttempts = 1800;
+      const intervalMs = 2000;
+      const poll = async () => {
+        if (inFlight) {
+          return;
+        }
+        const currentMessage = this.messages.find(
+          (item) => item.id === messageId,
+        );
+        if (
+          !currentMessage?.voice
+          || currentMessage.voice.job_id !== jobId
+        ) {
           clearInterval(timerId);
           delete this.voicePollers[messageId];
           return;
         }
-        if (attempts >= maxAttempts) {
+        inFlight = true;
+        attempts += 1;
+        try {
+          const job = await fetchTtsJob(
+            jobId,
+            this.userUuid,
+          );
+          const target = this.messages.find(
+            (item) => item.id === messageId,
+          );
+          if (!target?.voice || target.voice.job_id !== jobId) {
+            clearInterval(timerId);
+            delete this.voicePollers[messageId];
+            return;
+          }
+          target.voice = {
+            ...target.voice,
+            status: job.state || 'queued',
+            error: job.error || '',
+            audio_url: resolveAudioUrl(job.audio_url || ''),
+          };
+        } catch (err) {
+          const target = this.messages.find(
+            (item) => item.id === messageId,
+          );
+          if (!target?.voice || target.voice.job_id !== jobId) {
+            clearInterval(timerId);
+            delete this.voicePollers[messageId];
+            return;
+          }
+          if (err?.status === 404) {
+            target.voice = {
+              ...target.voice,
+              status: 'expired',
+              audio_url: '',
+            };
+          } else {
+            target.voice = {
+              ...target.voice,
+              error: '配音状态查询暂时失败，正在重试。',
+            };
+          }
+        } finally {
+          inFlight = false;
+        }
+        const target = this.messages.find(
+          (item) => item.id === messageId,
+        );
+        if (!target?.voice || target.voice.job_id !== jobId) {
           clearInterval(timerId);
           delete this.voicePollers[messageId];
+          return;
         }
-      }, intervalMs);
+        if (
+          TERMINAL_TTS_STATES.has(target.voice.status)
+          || attempts >= maxAttempts
+        ) {
+          clearInterval(timerId);
+          delete this.voicePollers[messageId];
+          if (
+            attempts >= maxAttempts
+            && !TERMINAL_TTS_STATES.has(target.voice.status)
+          ) {
+            target.voice = {
+              ...target.voice,
+              status: 'expired',
+            };
+          }
+          this._cacheCurrentConversation();
+          return;
+        }
+      };
 
+      const timerId = setInterval(poll, intervalMs);
       this.voicePollers[messageId] = timerId;
+      poll();
     },
 
-    _toHistoryMessages(records) {
+    _toHistoryMessages(records, cachedVoiceByUtterance = new Map()) {
       if (!Array.isArray(records)) {
         return [];
       }
@@ -842,6 +950,11 @@ export const useChatStore = defineStore('chat', {
           eventType: normalized.event_type,
           targetActorIds: normalized.target_actor_ids,
           eventSchemaVersion: normalized.event_schema_version,
+          utteranceId: normalized.utteranceId,
+          voice: (
+            cachedVoiceByUtterance.get(normalized.utteranceId)
+            || normalized.voice
+          ),
           renderMode: role === 'assistant' ? 'structured' : 'structured',
           status: 'ready',
         });
@@ -853,9 +966,29 @@ export const useChatStore = defineStore('chat', {
         return;
       }
       try {
+        const cached = readHistoryCache(this.userUuid, characterName);
+        const cachedVoiceByUtterance = new Map(
+          cached.messages
+            .filter((message) => message.utteranceId && message.voice?.job_id)
+            .map((message) => [message.utteranceId, message.voice]),
+        );
         const data = await fetchHistory(this.userUuid, characterName, 0);
         this.historyCharacters = Array.isArray(data.characters) ? data.characters : [];
-        this.messages = this._toHistoryMessages(data.messages || []);
+        this.messages = this._toHistoryMessages(
+          data.messages || [],
+          cachedVoiceByUtterance,
+        );
+        this.messages.forEach((message) => {
+          if (
+            message.voice?.job_id
+            && (
+              !message.voice.audio_url
+              || !TERMINAL_TTS_STATES.has(message.voice.status)
+            )
+          ) {
+            this._startVoicePolling(message);
+          }
+        });
         if (this.messages.length) {
           this._cacheCurrentConversation();
         } else {
@@ -1046,14 +1179,19 @@ export const useChatStore = defineStore('chat', {
               target.targetActorIds = structured?.target_actor_ids || [];
               target.eventSchemaVersion = structured?.event_schema_version || undefined;
               target.inputMode = inputModeFromEvent(target.actor, target.eventType);
+              target.utteranceId = data?.utterance_id || structured?.utteranceId || '';
               target.renderMode = 'structured';
             } else if (type === 'voice_pending' && TTS_ENABLED) {
-              target.voice = {
-                status: 'pending',
-                audio_url: resolveAudioUrl(data.audio_url),
-                audio_path: data.audio_path,
-              };
-              this._startVoicePolling(target);
+              target.voice = normalizeVoiceReference(data);
+              target.utteranceId = (
+                target.utteranceId
+                || data?.utterance_id
+                || ''
+              );
+              if (target.voice) {
+                this._startVoicePolling(target);
+                this._cacheCurrentConversation();
+              }
             } else if (type === 'done') {
               target.renderMode = 'structured';
               target.status = 'ready';
@@ -1096,16 +1234,22 @@ export const useChatStore = defineStore('chat', {
               eventType: structured?.event_type,
               targetActorIds: structured?.target_actor_ids,
               eventSchemaVersion: structured?.event_schema_version,
+              utteranceId: data.utterance_id || structured?.utteranceId,
               renderMode: 'structured',
             });
             if (TTS_ENABLED && data.voice) {
-              assistantMessage.voice = {
-                status: 'ready',
-                audio_url: resolveAudioUrl(data.voice.audio_url),
-                audio_path: data.voice.audio_path,
-              };
+              assistantMessage.voice = normalizeVoiceReference(data.voice);
             }
             this.messages.push(assistantMessage);
+            if (
+              assistantMessage.voice?.job_id
+              && (
+                !assistantMessage.voice.audio_url
+                || !TERMINAL_TTS_STATES.has(assistantMessage.voice.status)
+              )
+            ) {
+              this._startVoicePolling(assistantMessage);
+            }
             this._cacheCurrentConversation();
           }
         } catch (err) {
@@ -1157,6 +1301,8 @@ export const useChatStore = defineStore('chat', {
         eventType: record.event_type,
         targetActorIds: record.target_actor_ids,
         eventSchemaVersion: record.event_schema_version,
+        utteranceId: record.utteranceId,
+        voice: record.voice,
         renderMode: 'structured',
         status: 'ready',
       }));

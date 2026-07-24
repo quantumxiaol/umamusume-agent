@@ -287,6 +287,20 @@ const playAudio = (messageId) => {
   }
 };
 
+const voiceStatusText = (message) => {
+  const labels = {
+    queued: '等待配音',
+    translating: '正在转换日语对白',
+    validating: '正在校验日语对白',
+    synthesizing: '正在生成日语配音',
+    downloading: '正在接收音频',
+    failed: '配音生成失败',
+    cancelled: '配音已取消',
+    expired: '配音已过期',
+  };
+  return labels[message.voice?.status] || '';
+};
+
 const messageActorName = (message) => (
   message.actor?.display_name
   || (message.role === 'user' ? '训练员' : selectedCharacter.value || '角色')
@@ -486,7 +500,17 @@ onMounted(async () => {
           </button>
         </div>
         <div class="status-pill">{{ streamMode ? '流式' : '非流式' }}</div>
-        <div class="status-pill">{{ ttsEnabled ? `TTS ${voiceEnabled ? '开启' : '关闭'}` : '文本模式' }}</div>
+        <button
+          v-if="ttsEnabled"
+          type="button"
+          :class="['status-pill', 'status-button', { active: voiceEnabled }]"
+          :aria-pressed="voiceEnabled"
+          :title="voiceEnabled ? '点击关闭后续对白的语音合成' : '点击开启后续对白的语音合成'"
+          @click="toggleVoice"
+        >
+          TTS {{ voiceEnabled ? '开启' : '关闭' }}
+        </button>
+        <div v-else class="status-pill">文本模式</div>
         <div class="status-pill" v-if="outputDir">{{ outputDir.split('/').slice(-1)[0] }}</div>
       </div>
     </header>
@@ -620,17 +644,26 @@ onMounted(async () => {
               </template>
             </div>
 
-            <div v-if="ttsEnabled && message.role === 'assistant'" class="message-audio">
+            <div
+              v-if="ttsEnabled && message.role === 'assistant' && message.voice?.job_id"
+              class="message-audio"
+            >
               <button
+                v-if="message.voice.status === 'ready'"
                 class="audio-button"
-                :disabled="!message.voice || !message.voice.audio_url || message.voice.status === 'pending'"
+                :disabled="!message.voice.audio_url"
                 @click="playAudio(message.id)"
               >
-                ▶ 播放语音
+                ▶ 播放日语配音
               </button>
-              <span class="audio-status" v-if="message.voice?.status === 'pending'">合成中</span>
+              <span
+                class="audio-status"
+                v-if="message.voice.status !== 'ready'"
+              >
+                {{ voiceStatusText(message) }}
+              </span>
               <audio
-                v-if="message.voice?.audio_url"
+                v-if="message.voice.status === 'ready' && message.voice.audio_url"
                 :ref="(el) => (audioRefs[message.id] = el)"
                 :src="message.voice.audio_url"
                 preload="none"
@@ -731,6 +764,8 @@ onMounted(async () => {
       :user-uuid="userUuid"
       :max-participants="directorMaxParticipants"
       :max-speakers="directorMaxSpeakers"
+      :tts-enabled="ttsEnabled"
+      :voice-enabled="voiceEnabled"
     />
   </div>
 </template>
@@ -846,6 +881,34 @@ h1 {
   border: 1px solid var(--border);
   font-size: 12px;
   color: var(--accent-strong);
+}
+
+.status-button {
+  appearance: none;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.status-button:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.status-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.status-button.active {
+  background: rgba(37, 119, 113, 0.12);
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(37, 119, 113, 0.12);
 }
 
 .layout {

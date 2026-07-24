@@ -2,7 +2,13 @@
 Text-to-Speech helpers.
 """
 
-from .mcp_client import IndexTTSMCPClient, IndexTTSMCPConfig, MCPToolError
+from .mcp_client import (
+    IndexTTSMCPClient,
+    IndexTTSMCPConfig,
+    MCPToolError,
+    TTSMCPClient,
+    TTSMCPConfig,
+)
 from .service import VoiceService
 
 try:
@@ -15,6 +21,8 @@ except Exception:  # pragma: no cover - optional dependency
 __all__ = [
     "IndexTTSMCPClient",
     "IndexTTSMCPConfig",
+    "TTSMCPClient",
+    "TTSMCPConfig",
     "MCPToolError",
     "VoiceService",
     "TTSEngine",

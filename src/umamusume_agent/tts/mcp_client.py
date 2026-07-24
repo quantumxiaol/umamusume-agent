@@ -28,6 +28,12 @@ class IndexTTSMCPConfig:
     transport: str = config.INDEXTTS_MCP_TRANSPORT
 
 
+@dataclass(frozen=True)
+class TTSMCPConfig:
+    base_url: str = config.TTS_MCP_URL
+    transport: str = config.TTS_MCP_TRANSPORT
+
+
 def _maybe_parse_json(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -38,8 +44,22 @@ def _maybe_parse_json(value: Any) -> Any:
 
 
 def _extract_result_payload(result: Any) -> Dict[str, Any]:
-    if isinstance(result, dict) and "content" not in result:
-        return result
+    if isinstance(result, dict):
+        structured = (
+            result.get("structuredContent")
+            or result.get("structured_content")
+        )
+        if isinstance(structured, dict):
+            return structured
+        if "content" not in result:
+            return result
+    else:
+        structured = (
+            getattr(result, "structuredContent", None)
+            or getattr(result, "structured_content", None)
+        )
+        if isinstance(structured, dict):
+            return structured
 
     content = None
     if isinstance(result, dict):
@@ -72,6 +92,18 @@ def _extract_result_payload(result: Any) -> Dict[str, Any]:
     return {"raw": result}
 
 
+def _is_error_result(result: Any) -> bool:
+    if isinstance(result, dict):
+        return bool(
+            result.get("isError")
+            or result.get("is_error")
+        )
+    return bool(
+        getattr(result, "isError", False)
+        or getattr(result, "is_error", False)
+    )
+
+
 class IndexTTSMCPClient:
     def __init__(self, mcp_config: Optional[IndexTTSMCPConfig] = None):
         self._config = mcp_config or IndexTTSMCPConfig()
@@ -101,7 +133,7 @@ class IndexTTSMCPClient:
                 result = await session.call_tool(name, arguments)
 
             payload = _extract_result_payload(result)
-            if getattr(result, "is_error", False):
+            if _is_error_result(result):
                 raise MCPToolError(f"MCP tool {name} returned error: {payload}")
             return payload
         finally:
@@ -168,3 +200,28 @@ class IndexTTSMCPClient:
             "verbose": verbose,
         }
         return await self.call_tool("tts_batch_file", arguments)
+
+
+class TTSMCPClient(IndexTTSMCPClient):
+    """High-level async job client for the project-local TTS MCP server."""
+
+    def __init__(self, mcp_config: Optional[TTSMCPConfig] = None):
+        super().__init__(mcp_config=mcp_config or TTSMCPConfig())  # type: ignore[arg-type]
+
+    async def submit(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        return await self.call_tool("tts_submit", {"request": request})
+
+    async def get_job(self, job_id: str, user_uuid: str) -> Dict[str, Any]:
+        return await self.call_tool(
+            "tts_get_job",
+            {"job_id": job_id, "user_uuid": user_uuid},
+        )
+
+    async def cancel(self, job_id: str, user_uuid: str) -> Dict[str, Any]:
+        return await self.call_tool(
+            "tts_cancel",
+            {"job_id": job_id, "user_uuid": user_uuid},
+        )
+
+    async def health(self) -> Dict[str, Any]:
+        return await self.call_tool("tts_health", {})

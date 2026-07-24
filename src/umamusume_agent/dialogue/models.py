@@ -68,12 +68,14 @@ class DialogueTurnResult:
     speaker: ActorRef | None = None
     event_type: DialogueEventType | None = None
     target_actor_ids: tuple[str, ...] = ()
+    utterance_id: str = ""
 
     def to_api_dict(self) -> dict[str, Any]:
         payload = {
             "action": self.reply.action,
             "dialogue": self.reply.dialogue,
             "message": self.message,
+            "utterance_id": self.utterance_id,
         }
         if self.speaker is not None:
             payload.update(

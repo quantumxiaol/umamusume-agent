@@ -71,7 +71,7 @@ from ..director.runtime import DirectorRuntime
 from ..director.service import DirectorService
 from ..director.session import SceneSession
 from ..director.templates import SceneTemplateRepository
-from ..tts import IndexTTSMCPClient, VoiceService
+from ..tts import MCPToolError, TTSMCPClient, VoiceService
 from ..config import config
 from .director_routes import create_director_router
 
@@ -90,7 +90,7 @@ llm_client = AsyncOpenAI(
     timeout=max(5.0, config.ROLEPLAY_LLM_TIMEOUT_SECONDS),
     max_retries=max(0, config.ROLEPLAY_LLM_MAX_RETRIES),
 )
-tts_client = IndexTTSMCPClient()
+tts_client = TTSMCPClient()
 
 OUTPUTS_DIR = Path(config.OUTPUTS_DIRECTORY)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -176,6 +176,8 @@ app.include_router(
         service=director_service,
         sessions=director_sessions,
         session_ttl_seconds=config.DIRECTOR_SESSION_TTL_SECONDS,
+        voice_service=voice_service,
+        enable_tts=ENABLE_TTS,
     )
 )
 
@@ -220,6 +222,8 @@ class HistoryImportMessage(BaseModel):
     event_type: Optional[DialogueEventType] = None
     target_actor_ids: Optional[list[str]] = None
     event_schema_version: Optional[int] = None
+    utterance_id: Optional[str] = None
+    utteranceId: Optional[str] = None
 
 
 class HistoryImportRequest(BaseModel):
@@ -327,7 +331,12 @@ def _requires_api_key(request: Request) -> bool:
         return False
     if not API_ACCESS_KEY:
         return False
-    return request.url.path not in API_AUTH_EXEMPT_PATHS
+    path = request.url.path
+    if path in API_AUTH_EXEMPT_PATHS:
+        return False
+    if path.startswith("/tts/jobs/") and path.endswith("/audio"):
+        return False
+    return True
 
 
 async def _check_rate_limit(request: Request) -> Optional[JSONResponse]:
@@ -337,7 +346,13 @@ async def _check_rate_limit(request: Request) -> Optional[JSONResponse]:
     path = request.url.path
     if request.method == "OPTIONS":
         return None
-    if path in API_AUTH_EXEMPT_PATHS:
+    if (
+        path in API_AUTH_EXEMPT_PATHS
+        or (
+            path.startswith("/tts/jobs/")
+            and path.endswith("/audio")
+        )
+    ):
         return None
 
     client_ip = _get_client_ip(request)
@@ -698,6 +713,80 @@ def _should_generate_voice(request: DialogueRequest, session: 'DialogueSession')
     return request.generate_voice
 
 
+def _single_tts_context_events(
+    session: DialogueSession,
+) -> list[Dict[str, Any]]:
+    """Render the public prefix before the current assistant utterance."""
+
+    history = list(session.history)
+    if history and history[-1].get("role") == "assistant":
+        history = history[:-1]
+    events: list[Dict[str, Any]] = []
+    for index, message in enumerate(history, start=1):
+        role = str(message.get("role") or "")
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        is_character = role == "assistant"
+        events.append(
+            {
+                "event_id": f"message:{index}",
+                "actor_id": (
+                    session.character.id if is_character else "player"
+                ),
+                "actor_type": (
+                    "umamusume" if is_character else "trainer"
+                ),
+                "display_name": (
+                    session.character.name_zh
+                    if is_character
+                    else "训练员"
+                ),
+                "event_type": (
+                    "character_reply" if is_character else "dialogue"
+                ),
+                "content": content,
+                "dialogue": content,
+            }
+        )
+    return events
+
+
+async def _submit_single_voice(
+    session: DialogueSession,
+    *,
+    utterance_id: str,
+    dialogue: str,
+    target_actor_ids: list[str] | tuple[str, ...] | None = None,
+) -> Optional[Dict[str, Any]]:
+    return await voice_service.submit_dialogue(
+        user_uuid=session.user_uuid,
+        # Single-character history is restored across HTTP session IDs, so use
+        # a stable per-character thread key for translation prefix reuse.
+        source_session_id=f"dialogue:{session.character.id}",
+        utterance_id=utterance_id,
+        character=session.character,
+        dialogue_text=dialogue,
+        actor_id=session.character.id,
+        target_actor_ids=list(target_actor_ids or ["player"]),
+        cast=[
+            {
+                "actor_id": "player",
+                "name_zh": "训练员",
+                "name_jp": "トレーナー",
+                "actor_type": "trainer",
+            },
+            {
+                "actor_id": session.character.id,
+                "name_zh": session.character.name_zh,
+                "name_jp": session.character.name_jp,
+                "actor_type": "umamusume",
+            },
+        ],
+        context_events=_single_tts_context_events(session),
+    )
+
+
 # ============= API 端点 =============
 
 @app.on_event("startup")
@@ -749,6 +838,8 @@ async def capabilities():
         "director_story_outline": 1,
         "director_history_resume": 1,
         "director_browser_recovery": 1,
+        "tts_jobs": 1 if ENABLE_TTS else 0,
+        "tts_manual_playback": 1 if ENABLE_TTS else 0,
         "director_max_participants": config.DIRECTOR_MAX_PARTICIPANTS,
         "director_max_speakers_per_turn": (
             config.DIRECTOR_MAX_SPEAKERS_PER_TURN
@@ -833,13 +924,14 @@ async def chat(request: DialogueRequest):
         )
         result = turn_result.to_api_dict()
         
-        # 生成语音（如果需要）
+        # TTS submission is quick; translation and Fish Speech run inside the
+        # project-local MCP server after this API response returns.
         if _should_generate_voice(request, session):
-            voice_plan = _reserve_voice_output(session)
-            voice_info = await _generate_voice_for_reply(
+            voice_info = await _submit_single_voice(
                 session,
-                turn_result.reply.dialogue,
-                voice_plan,
+                utterance_id=turn_result.utterance_id,
+                dialogue=turn_result.reply.dialogue,
+                target_actor_ids=turn_result.target_actor_ids,
             )
             if voice_info:
                 result["voice"] = voice_info
@@ -881,19 +973,24 @@ async def chat_stream(request: DialogueRequest):
                     ensure_ascii=False,
                 )
                 yield f"event: structured_reply\ndata: {payload}\n\n"
-                yield f"event: done\ndata: {{}}\n\n"
 
                 if _should_generate_voice(request, session):
-                    voice_plan = _reserve_voice_output(session)
-                    voice_payload = json.dumps(voice_plan, ensure_ascii=False)
-                    yield f"event: voice_pending\ndata: {voice_payload}\n\n"
-                    asyncio.create_task(
-                        _generate_voice_for_reply(
-                            session,
-                            turn_result.reply.dialogue,
-                            voice_plan,
-                        )
+                    voice_info = await _submit_single_voice(
+                        session,
+                        utterance_id=turn_result.utterance_id,
+                        dialogue=turn_result.reply.dialogue,
+                        target_actor_ids=turn_result.target_actor_ids,
                     )
+                    if voice_info:
+                        voice_payload = json.dumps(
+                            voice_info,
+                            ensure_ascii=False,
+                        )
+                        yield (
+                            "event: voice_pending\n"
+                            f"data: {voice_payload}\n\n"
+                        )
+                yield f"event: done\ndata: {{}}\n\n"
                 return
 
             # 旧两行协议仍保持 token 流式行为。
@@ -924,6 +1021,7 @@ async def chat_stream(request: DialogueRequest):
 
             full_reply = _normalize_structured_reply(full_reply_raw)
             structured_reply = _structured_reply_from_legacy_text(full_reply, source_format="legacy_text")
+            utterance_id = uuid4().hex
             
             # 添加完整回复到历史
             session.add_message(
@@ -933,6 +1031,7 @@ async def chat_stream(request: DialogueRequest):
                 dialogue=structured_reply.dialogue,
                 source_format=structured_reply.source_format,
                 schema_version=structured_reply.schema_version,
+                utterance_id=utterance_id,
                 **_character_reply_event_metadata(request, session),
             )
             
@@ -940,10 +1039,14 @@ async def chat_stream(request: DialogueRequest):
             yield f"event: done\ndata: {{}}\n\n"
 
             if _should_generate_voice(request, session):
-                voice_plan = _reserve_voice_output(session)
-                payload = json.dumps(voice_plan, ensure_ascii=False)
-                yield f"event: voice_pending\ndata: {payload}\n\n"
-                asyncio.create_task(_generate_voice_for_reply(session, structured_reply.dialogue, voice_plan))
+                voice_info = await _submit_single_voice(
+                    session,
+                    utterance_id=utterance_id,
+                    dialogue=structured_reply.dialogue,
+                )
+                if voice_info:
+                    payload = json.dumps(voice_info, ensure_ascii=False)
+                    yield f"event: voice_pending\ndata: {payload}\n\n"
         
         except Exception as e:
             logger.error(f"Stream chat failed: {e}")
@@ -1153,6 +1256,49 @@ async def get_audio(path: str):
     if not _is_allowed_audio_path(audio_path):
         raise HTTPException(status_code=403, detail="Audio path not allowed")
     return FileResponse(audio_path)
+
+
+@app.get("/tts/jobs/{job_id}")
+async def get_tts_job(job_id: str, user_uuid: str):
+    try:
+        return await voice_service.get_job(
+            job_id=job_id,
+            user_uuid=_require_valid_user_uuid(user_uuid),
+        )
+    except MCPToolError as exc:
+        raise HTTPException(status_code=404, detail="TTS job not found") from exc
+
+
+@app.delete("/tts/jobs/{job_id}")
+async def cancel_tts_job(job_id: str, user_uuid: str):
+    try:
+        return await voice_service.cancel_job(
+            job_id=job_id,
+            user_uuid=_require_valid_user_uuid(user_uuid),
+        )
+    except MCPToolError as exc:
+        raise HTTPException(status_code=404, detail="TTS job not found") from exc
+
+
+@app.get("/tts/jobs/{job_id}/audio")
+async def get_tts_job_audio(job_id: str, user_uuid: str):
+    try:
+        audio_path = await voice_service.resolve_job_audio(
+            job_id=job_id,
+            user_uuid=_require_valid_user_uuid(user_uuid),
+        )
+    except (MCPToolError, FileNotFoundError) as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="TTS audio is not ready or has expired",
+        ) from exc
+    return FileResponse(
+        audio_path,
+        headers={
+            "Cache-Control": "private, no-store",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @app.head("/audio")

@@ -22,6 +22,14 @@ const props = defineProps({
     type: Number,
     default: 2,
   },
+  ttsEnabled: {
+    type: Boolean,
+    default: false,
+  },
+  voiceEnabled: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const store = useDirectorStore();
@@ -29,6 +37,7 @@ const input = ref('');
 const inputRef = ref(null);
 const isComposing = ref(false);
 const characterFilter = ref('');
+const audioRefs = ref({});
 
 const inputModes = Object.entries(DIALOGUE_INPUT_MODES).map(([value, item]) => ({
   value,
@@ -77,6 +86,24 @@ const eventKind = (event) => {
     character_reply: '角色回应',
   };
   return labels[event.event_type] || event.event_type;
+};
+
+const voiceStatusText = (event) => {
+  const labels = {
+    queued: '等待配音',
+    translating: '正在转换日语对白',
+    validating: '正在校验日语对白',
+    synthesizing: '正在生成日语配音',
+    downloading: '正在接收音频',
+    failed: '配音生成失败',
+    cancelled: '配音已取消',
+    expired: '配音已过期',
+  };
+  return labels[event.voice?.status] || '';
+};
+
+const playVoice = (eventId) => {
+  audioRefs.value[eventId]?.play();
 };
 
 const toggleCharacter = (name) => {
@@ -128,7 +155,7 @@ const send = async () => {
   }
   const text = input.value;
   input.value = '';
-  await store.sendTurn(text);
+  await store.sendTurn(text, props.ttsEnabled && props.voiceEnabled);
 };
 
 const handleKeydown = async (event) => {
@@ -371,6 +398,26 @@ onMounted(() => store.init(props.userUuid));
           </header>
           <div v-if="event.action" class="scene-action">{{ event.action }}</div>
           <p v-if="event.dialogue || event.content">{{ event.dialogue || event.content }}</p>
+          <div
+            v-if="props.ttsEnabled && event.event_type === 'character_reply' && event.voice?.job_id"
+            class="director-message-audio"
+          >
+            <button
+              v-if="event.voice.status === 'ready'"
+              type="button"
+              :disabled="!event.voice.audio_url"
+              @click="playVoice(event.event_id)"
+            >
+              ▶ 播放日语配音
+            </button>
+            <span v-else>{{ voiceStatusText(event) }}</span>
+            <audio
+              v-if="event.voice.status === 'ready' && event.voice.audio_url"
+              :ref="(el) => (audioRefs[event.event_id] = el)"
+              :src="event.voice.audio_url"
+              preload="none"
+            ></audio>
+          </div>
         </article>
         <div v-if="store.isLoading" class="director-working">
           导演正在整理场景并安排角色回应…
@@ -852,6 +899,23 @@ button:disabled {
   margin-bottom: 5px;
   color: var(--muted);
   font-style: italic;
+}
+
+.director-message-audio {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.director-message-audio button {
+  padding: 7px 11px;
+  border: 1px solid rgba(26, 111, 107, 0.3);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent-strong);
 }
 
 .director-working,

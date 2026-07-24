@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 
 import {
+  API_BASE_URL,
   createDirectorSession,
   deleteDirectorHistory,
   deleteDirectorSession,
@@ -10,6 +11,7 @@ import {
   fetchDirectorTemplates,
   recoverDirectorSession,
   resumeDirectorHistory,
+  fetchTtsJob,
 } from '@/services/api';
 import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
 
@@ -19,6 +21,45 @@ const DIRECTOR_SCENE_CACHE_PREFIX = 'umamusume_director_scene_v1';
 const DIRECTOR_HISTORY_INDEX_PREFIX = 'umamusume_director_history_index_v1';
 const DIRECTOR_DELETED_INDEX_PREFIX = 'umamusume_director_deleted_v1';
 const DIRECTOR_LOCAL_HISTORY_LIMIT = 30;
+const TERMINAL_TTS_STATES = new Set(['ready', 'failed', 'cancelled', 'expired']);
+
+
+const resolveAudioUrl = (url) => {
+  if (!url) {
+    return '';
+  }
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  return url.startsWith('/') ? `${API_BASE_URL}${url}` : url;
+};
+
+
+const normalizeVoice = (value) => {
+  const jobId = String(value?.job_id || value?.jobId || '').trim();
+  if (!jobId) {
+    return null;
+  }
+  return {
+    requested: true,
+    job_id: jobId,
+    status: String(value?.state || value?.status || 'queued'),
+    audio_url: resolveAudioUrl(value?.audio_url || ''),
+    error: String(value?.error || ''),
+  };
+};
+
+
+const eventForBrowserCache = (event) => ({
+  ...event,
+  ...(event.voice?.job_id ? {
+    voice: {
+      requested: true,
+      job_id: event.voice.job_id,
+      status: event.voice.status || 'queued',
+    },
+  } : { voice: undefined }),
+});
 
 
 const activeSessionKey = (userUuid) => (
@@ -276,6 +317,7 @@ export const useDirectorStore = defineStore('director', {
     isLoading: false,
     error: null,
     historyError: null,
+    voicePollers: {},
   }),
 
   actions: {
@@ -307,11 +349,27 @@ export const useDirectorStore = defineStore('director', {
     },
 
     _applySnapshot(data, userUuid = '') {
+      this._clearVoicePollers();
+      const resolvedUserUuid = data.user_uuid || userUuid || this.currentUserUuid;
+      const localSnapshot = readSceneSnapshot(
+        resolvedUserUuid,
+        data.session_id || '',
+      );
+      const localVoiceByEvent = new Map(
+        (localSnapshot?.events || [])
+          .filter((event) => event.event_id && event.voice?.job_id)
+          .map((event) => [event.event_id, event.voice]),
+      );
       this.sessionId = data.session_id || '';
       this.activeTemplate = data.template || null;
       this.participants = data.participants || [];
       this.sceneState = data.scene_state || {};
-      this.events = data.events || [];
+      this.events = (data.events || []).map((event) => ({
+        ...event,
+        voice: normalizeVoice(
+          event.voice || localVoiceByEvent.get(event.event_id),
+        ),
+      }));
       this.turnIndex = data.turn_index || 0;
       this.createdAt = data.created_at || new Date().toISOString();
       this.lastActiveAt = data.last_active_at || this.createdAt;
@@ -320,13 +378,23 @@ export const useDirectorStore = defineStore('director', {
         .filter((item) => ['umamusume', 'npc'].includes(item?.actor?.actor_type))
         .map((item) => item.actor.display_name);
       this.queuedEvents = [];
-      const resolvedUserUuid = data.user_uuid || userUuid || this.currentUserUuid;
       if (resolvedUserUuid) {
         this.currentUserUuid = resolvedUserUuid;
       }
       if (this.sessionId && this.currentUserUuid) {
         writeActiveSession(this.currentUserUuid, this.sessionId);
         this._persistCurrentScene();
+        this.events.forEach((event) => {
+          if (
+            event.voice?.job_id
+            && (
+              !event.voice.audio_url
+              || !TERMINAL_TTS_STATES.has(event.voice.status)
+            )
+          ) {
+            this._startVoicePolling(event);
+          }
+        });
       }
     },
 
@@ -351,7 +419,7 @@ export const useDirectorStore = defineStore('director', {
         participants: this.participants,
         scene_state: this.sceneState,
         turn_index: this.turnIndex,
-        events: this.events,
+        events: this.events.map(eventForBrowserCache),
         created_at: this.createdAt || new Date().toISOString(),
         last_active_at: this.lastActiveAt || new Date().toISOString(),
       };
@@ -370,6 +438,7 @@ export const useDirectorStore = defineStore('director', {
     },
 
     _clearCurrentScene() {
+      this._clearVoicePollers();
       this.sessionId = '';
       this.activeTemplate = null;
       this.participants = [];
@@ -379,6 +448,120 @@ export const useDirectorStore = defineStore('director', {
       this.createdAt = '';
       this.lastActiveAt = '';
       this.queuedEvents = [];
+    },
+
+    _clearVoicePollers() {
+      Object.values(this.voicePollers).forEach(
+        (timerId) => clearInterval(timerId),
+      );
+      this.voicePollers = {};
+    },
+
+    _startVoicePolling(event) {
+      if (!event?.voice?.job_id || !this.currentUserUuid) {
+        return;
+      }
+      const eventId = event.event_id;
+      const jobId = event.voice.job_id;
+      if (this.voicePollers[eventId]) {
+        return;
+      }
+      let attempts = 0;
+      let inFlight = false;
+      // Keep polling long enough for queued, sequential Fish Speech jobs.
+      const maxAttempts = 1800;
+      const poll = async () => {
+        if (inFlight) {
+          return;
+        }
+        const currentEvent = this.events.find(
+          (item) => item.event_id === eventId,
+        );
+        if (
+          !currentEvent?.voice
+          || currentEvent.voice.job_id !== jobId
+        ) {
+          clearInterval(timerId);
+          delete this.voicePollers[eventId];
+          return;
+        }
+        inFlight = true;
+        attempts += 1;
+        try {
+          const job = await fetchTtsJob(
+            jobId,
+            this.currentUserUuid,
+          );
+          const target = this.events.find(
+            (item) => item.event_id === eventId,
+          );
+          if (!target?.voice || target.voice.job_id !== jobId) {
+            clearInterval(timerId);
+            delete this.voicePollers[eventId];
+            return;
+          }
+          // Always update the object held by Pinia. The event passed into this
+          // method can be the raw object that existed before Array.push(), and
+          // mutating that raw reference does not notify Vue's reactive proxy.
+          target.voice = {
+            ...target.voice,
+            status: job.state || 'queued',
+            audio_url: resolveAudioUrl(job.audio_url || ''),
+            error: job.error || '',
+          };
+        } catch (err) {
+          const target = this.events.find(
+            (item) => item.event_id === eventId,
+          );
+          if (!target?.voice || target.voice.job_id !== jobId) {
+            clearInterval(timerId);
+            delete this.voicePollers[eventId];
+            return;
+          }
+          if (err?.status === 404) {
+            target.voice = {
+              ...target.voice,
+              status: 'expired',
+              audio_url: '',
+            };
+          } else {
+            target.voice = {
+              ...target.voice,
+              error: '配音状态查询暂时失败，正在重试。',
+            };
+          }
+        } finally {
+          inFlight = false;
+        }
+        const target = this.events.find(
+          (item) => item.event_id === eventId,
+        );
+        if (!target?.voice || target.voice.job_id !== jobId) {
+          clearInterval(timerId);
+          delete this.voicePollers[eventId];
+          return;
+        }
+        if (
+          TERMINAL_TTS_STATES.has(target.voice.status)
+          || attempts >= maxAttempts
+        ) {
+          clearInterval(timerId);
+          delete this.voicePollers[eventId];
+          if (
+            attempts >= maxAttempts
+            && !TERMINAL_TTS_STATES.has(target.voice.status)
+          ) {
+            target.voice = {
+              ...target.voice,
+              status: 'expired',
+            };
+          }
+          this._persistCurrentScene();
+        }
+      };
+      const timerId = setInterval(poll, 2000);
+      this.voicePollers[eventId] = timerId;
+      poll();
     },
 
     async _loadSessionWithFallback(sessionId, userUuid) {
@@ -635,7 +818,14 @@ export const useDirectorStore = defineStore('director', {
       if (this.events.some((item) => item.event_id === event.event_id)) {
         return;
       }
-      this.events.push(event);
+      const normalizedEvent = {
+        ...event,
+        voice: normalizeVoice(event.voice),
+      };
+      this.events.push(normalizedEvent);
+      if (normalizedEvent.voice?.job_id) {
+        this._startVoicePolling(normalizedEvent);
+      }
       this.turnIndex = Math.max(this.turnIndex, Number(event.turn_index || 0));
       if (event.scene_patch && typeof event.scene_patch === 'object') {
         const patch = Object.fromEntries(
@@ -648,7 +838,7 @@ export const useDirectorStore = defineStore('director', {
       this._persistCurrentScene();
     },
 
-    async sendTurn(content = '') {
+    async sendTurn(content = '', generateVoice = false) {
       if (!this.sessionId || this.isLoading) {
         return false;
       }
@@ -674,6 +864,7 @@ export const useDirectorStore = defineStore('director', {
             event_type: event.event_type,
           })),
           this.currentUserUuid,
+          generateVoice,
           ({ type, data }) => {
             if (type === 'scene_event' || type === 'character_reply') {
               this._appendEvent(data);

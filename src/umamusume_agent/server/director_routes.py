@@ -31,6 +31,7 @@ class DirectorTurnRequest(BaseModel):
     session_id: str
     user_uuid: str
     events: list[DialogueInputEvent]
+    generate_voice: bool = False
 
 
 class DirectorHistoryRequest(BaseModel):
@@ -69,6 +70,8 @@ def create_director_router(
     service: DirectorService,
     sessions: MutableMapping[str, SceneSession],
     session_ttl_seconds: int,
+    voice_service: Any | None = None,
+    enable_tts: bool = False,
 ) -> APIRouter:
     router = APIRouter(prefix="/director", tags=["director"])
     ttl_seconds = max(0, session_ttl_seconds)
@@ -93,6 +96,83 @@ def create_director_router(
             raise HTTPException(status_code=404, detail="导演场景会话不存在")
         session.touch()
         return session
+
+    def tts_context_events(
+        session: SceneSession,
+        *,
+        before_sequence: int,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "event_id": event.event_id,
+                "actor_id": event.actor.actor_id if event.actor else "",
+                "actor_type": (
+                    event.actor.actor_type if event.actor else "narrator"
+                ),
+                "display_name": (
+                    event.actor.display_name if event.actor else "环境"
+                ),
+                "event_type": event.event_type,
+                "content": event.content,
+                "action": event.action,
+                "dialogue": event.dialogue,
+            }
+            for event in session.timeline.public_events()
+            if event.sequence < before_sequence
+        ]
+
+    def tts_cast(session: SceneSession) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for participant in session.participants:
+            actor = participant.actor
+            character = session.characters.get(actor.actor_id)
+            items.append(
+                {
+                    "actor_id": actor.actor_id,
+                    "name_zh": actor.display_name,
+                    "name_jp": (
+                        character.name_jp
+                        if character is not None
+                        else (
+                            "トレーナー"
+                            if actor.actor_type == "trainer"
+                            else actor.display_name
+                        )
+                    ),
+                    "actor_type": actor.actor_type,
+                }
+            )
+        return items
+
+    async def submit_event_voice(
+        session: SceneSession,
+        event: Any,
+    ) -> dict[str, Any] | None:
+        if (
+            not enable_tts
+            or voice_service is None
+            or event.event_type != "character_reply"
+            or event.actor is None
+            or not event.dialogue
+        ):
+            return None
+        character = session.characters.get(event.actor.actor_id)
+        if character is None:
+            return None
+        return await voice_service.submit_dialogue(
+            user_uuid=session.user_uuid,
+            source_session_id=session.session_id,
+            utterance_id=event.event_id,
+            character=character,
+            dialogue_text=event.dialogue,
+            actor_id=event.actor.actor_id,
+            target_actor_ids=event.target_actor_ids,
+            cast=tts_cast(session),
+            context_events=tts_context_events(
+                session,
+                before_sequence=event.sequence,
+            ),
+        )
 
     @router.get("/templates")
     async def list_templates() -> dict[str, Any]:
@@ -230,10 +310,19 @@ def create_director_router(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise _translate_exception(exc) from exc
+        event_payloads: list[dict[str, Any]] = []
+        for event in events:
+            event_payload = event.model_dump(mode="json")
+            if request.generate_voice:
+                voice = await submit_event_voice(session, event)
+                if voice:
+                    event_payload["voice"] = voice
+            event_payloads.append(event_payload)
+
         return {
             "session_id": session.session_id,
             "turn_index": session.turn_index,
-            "events": [event.model_dump(mode="json") for event in events],
+            "events": event_payloads,
             "scene_state": session.timeline.state.model_dump(mode="json"),
         }
 
@@ -251,10 +340,12 @@ def create_director_router(
                         if event.event_type == "character_reply"
                         else "scene_event"
                     )
-                    payload = json.dumps(
-                        event.model_dump(mode="json"),
-                        ensure_ascii=False,
-                    )
+                    event_payload = event.model_dump(mode="json")
+                    if request.generate_voice:
+                        voice = await submit_event_voice(session, event)
+                        if voice:
+                            event_payload["voice"] = voice
+                    payload = json.dumps(event_payload, ensure_ascii=False)
                     yield f"event: {event_name}\ndata: {payload}\n\n"
                 state_payload = json.dumps(
                     session.timeline.state.model_dump(mode="json"),

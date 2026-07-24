@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any
+from uuid import uuid4
 
 from .context import LegacyDialogueContextBuilder
 from .models import (
@@ -103,6 +104,7 @@ class DialogueService:
             else [resolved_speaker.actor_id]
         )
         reply_metadata = {}
+        utterance_id = uuid4().hex
         if has_event_metadata:
             reply_metadata = {
                 "actor": reply_actor.model_dump(),
@@ -117,6 +119,7 @@ class DialogueService:
             dialogue=reply.dialogue,
             source_format=reply.source_format,
             schema_version=reply.schema_version,
+            utterance_id=utterance_id,
             **reply_metadata,
         )
 
@@ -132,4 +135,5 @@ class DialogueService:
             speaker=reply_actor,
             event_type="dialogue" if has_event_metadata else None,
             target_actor_ids=tuple(reply_targets),
+            utterance_id=utterance_id,
         )

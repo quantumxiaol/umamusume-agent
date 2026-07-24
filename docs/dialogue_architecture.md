@@ -17,15 +17,22 @@ FastAPI routes
 
 FastAPI routes
     -> VoiceService
+        -> TTSMCPClient
+            -> project-local TTS MCP
+                -> JapaneseDialoguePreparer
+                -> FishSpeechHttpClient
 ```
 
 The `dialogue` package must not import FastAPI. Provider errors remain ordinary
 Python/OpenAI exceptions until the server layer translates them into HTTP
 responses.
 
-The active dialogue and director runtimes call the OpenAI-compatible SDK
-directly. IndexTTS uses the official MCP client directly. LangChain, LangGraph,
-and the LangChain MCP adapters remain available through the optional
+The active dialogue, director, and TTS translation runtimes call the
+OpenAI-compatible SDK directly. The dialogue backend uses the official MCP
+client to submit asynchronous jobs to the project-local TTS MCP service, which
+then calls the external Fish Speech HTTP service. The legacy IndexTTS MCP
+client remains as a compatibility implementation. LangChain, LangGraph, and
+the LangChain MCP adapters remain available through the optional
 `langchain-mcp` dependency group for future orchestration and tool integrations.
 
 ## Module responsibilities
@@ -41,7 +48,11 @@ and the LangChain MCP adapters remain available through the optional
   session.
 - `dialogue/history.py`: JSONL paths, parsing, restoration, filtering, and
   import normalization.
-- `tts/service.py`: output reservation and IndexTTS orchestration.
+- `tts/service.py`: Dialogue/Director to TTS MCP request adaptation.
+- `tts/agent.py`: context-aware Chinese-to-Japanese dialogue preparation.
+- `tts/jobs.py`: asynchronous job lifecycle, bounded concurrency, and TTL.
+- `tts/fish_client.py`: external Fish Speech multipart HTTP protocol.
+- `tts/mcp_server.py`: project-local TTS MCP tools.
 - `server/dialogue_server.py`: FastAPI middleware, lifecycle, routes, SSE, and
   HTTP error translation.
 
@@ -56,7 +67,8 @@ and the LangChain MCP adapters remain available through the optional
 - JSON-mode `POST /chat_stream` emits `structured_reply` before `done`.
 - Disabled JSON mode preserves the legacy token stream.
 - Assistant history remains schema version 2 and restores legacy records.
-- TTS receives only the parsed `dialogue` field.
+- TTS receives only newly generated character `dialogue`; action,
+  trainer/environment input, and old off-period dialogue are never synthesized.
 - The Hugging Face entry point remains the root `app.py` importing
   `umamusume_agent.server.dialogue_server:app` on port 7860.
 

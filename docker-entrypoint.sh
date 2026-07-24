@@ -34,4 +34,8 @@ if [ "$#" -gt 0 ]; then
   exec "$@"
 fi
 
+if [ "${ENABLE_TTS:-false}" = "true" ] && [ "${TTS_MCP_AUTOSTART:-true}" = "true" ]; then
+  uv run python -m umamusume_agent.tts.mcp_server &
+fi
+
 exec uv run python app.py

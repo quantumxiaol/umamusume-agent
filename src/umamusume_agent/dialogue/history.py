@@ -227,6 +227,7 @@ def parse_history_file(
                     "source_format": semantic_record.get("source_format"),
                     "timestamp": record.get("timestamp"),
                     "message_index": record.get("message_index"),
+                    "utterance_id": record.get("utterance_id"),
                     "character_name_en": message_character_name,
                     **event_metadata,
                 }
@@ -295,6 +296,10 @@ def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
         event_type = getattr(item, "event_type", None)
         target_actor_ids = getattr(item, "target_actor_ids", None)
         event_schema_version = getattr(item, "event_schema_version", None)
+        utterance_id = (
+            getattr(item, "utterance_id", None)
+            or getattr(item, "utteranceId", None)
+        )
         event_metadata: Dict[str, Any] = {}
         if any(
             value is not None
@@ -314,15 +319,16 @@ def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
         if role == "user":
             if not content:
                 continue
-            messages.append(
-                {
-                    "role": role,
-                    "content": content,
-                    "timestamp": item.timestamp,
-                    "schema_version": item.schema_version or item.schemaVersion,
-                    **event_metadata,
-                }
-            )
+            user_record = {
+                "role": role,
+                "content": content,
+                "timestamp": item.timestamp,
+                "schema_version": item.schema_version or item.schemaVersion,
+                **event_metadata,
+            }
+            if utterance_id:
+                user_record["utterance_id"] = utterance_id
+            messages.append(user_record)
             continue
 
         raw_record = {
@@ -337,6 +343,8 @@ def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
             ),
             **event_metadata,
         }
+        if utterance_id:
+            raw_record["utterance_id"] = utterance_id
         if not content and not (
             isinstance(item.dialogue, str) and item.dialogue.strip()
         ):

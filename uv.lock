@@ -1082,6 +1082,7 @@ version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "mcp" },
     { name = "openai" },
     { name = "pydantic" },
@@ -1106,6 +1107,7 @@ local-tts = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.6" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "langchain", marker = "extra == 'langchain-mcp'", specifier = "==0.3.25" },
     { name = "langchain-core", marker = "extra == 'langchain-mcp'", specifier = "==0.3.59" },
     { name = "langchain-mcp-adapters", marker = "extra == 'langchain-mcp'", specifier = "==0.1.8" },

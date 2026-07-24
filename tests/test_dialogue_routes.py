@@ -382,19 +382,15 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_tts_receives_dialogue_without_action(self):
         session = self._prepare_session("tts-test")
         ds.ENABLE_TTS = True
-        voice_plan = {
-            "audio_path": "/tmp/reply.wav",
-            "audio_url": "/audio?path=/tmp/reply.wav",
-            "output_name": "reply.wav",
-        }
-        generate_voice = AsyncMock(
-            return_value={"audio_url": voice_plan["audio_url"]}
+        submit_voice = AsyncMock(
+            return_value={
+                "job_id": "tts-test-job",
+                "state": "queued",
+                "requested": True,
+            }
         )
 
-        with (
-            patch.object(ds, "_reserve_voice_output", return_value=voice_plan),
-            patch.object(ds, "_generate_voice_for_reply", generate_voice),
-        ):
+        with patch.object(ds, "_submit_single_voice", submit_voice):
             response = await self.client.post(
                 "/chat",
                 json={
@@ -406,8 +402,49 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("voice", response.json())
-        self.assertEqual(generate_voice.await_count, 1)
-        self.assertEqual(generate_voice.await_args.args[1], "收到。")
+        self.assertEqual(submit_voice.await_count, 1)
+        self.assertEqual(
+            submit_voice.await_args.kwargs["dialogue"],
+            "收到。",
+        )
+
+    async def test_reenabling_tts_does_not_backfill_previous_reply(self):
+        session = self._prepare_session("tts-toggle-test")
+        ds.ENABLE_TTS = True
+        submit_voice = AsyncMock(
+            return_value={
+                "job_id": "tts-current-job",
+                "state": "queued",
+                "requested": True,
+            }
+        )
+
+        with patch.object(ds, "_submit_single_voice", submit_voice):
+            disabled_response = await self.client.post(
+                "/chat",
+                json={
+                    "session_id": session.session_id,
+                    "message": "这一轮关闭语音",
+                    "generate_voice": False,
+                },
+            )
+            enabled_response = await self.client.post(
+                "/chat",
+                json={
+                    "session_id": session.session_id,
+                    "message": "从这一轮开启语音",
+                    "generate_voice": True,
+                },
+            )
+
+        self.assertEqual(disabled_response.status_code, 200)
+        self.assertNotIn("voice", disabled_response.json())
+        self.assertEqual(enabled_response.status_code, 200)
+        self.assertEqual(submit_voice.await_count, 1)
+        self.assertEqual(
+            submit_voice.await_args.kwargs["dialogue"],
+            enabled_response.json()["dialogue"],
+        )
 
 
 if __name__ == "__main__":

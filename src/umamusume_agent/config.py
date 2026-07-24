@@ -99,7 +99,94 @@ class Config:
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), _cosyvoice_model_dir.lstrip("./"))
     )
 
-    # ================== TTS Settings (IndexTTS MCP) ==================
+    # ================== TTS Settings ==================
+    # Dialogue backend -> project-local TTS MCP server.
+    TTS_MCP_URL: str = os.getenv(
+        "TTS_MCP_URL",
+        "http://127.0.0.1:8890/mcp/",
+    )
+    TTS_MCP_TRANSPORT: str = os.getenv(
+        "TTS_MCP_TRANSPORT",
+        "streamable_http",
+    )
+    TTS_MCP_HOST: str = os.getenv("TTS_MCP_HOST", "127.0.0.1")
+    TTS_MCP_PORT: int = int(os.getenv("TTS_MCP_PORT", "8890"))
+    TTS_MCP_AUTOSTART: bool = _env_bool("TTS_MCP_AUTOSTART", True)
+    TTS_MAX_CONCURRENT_JOBS: int = int(os.getenv("TTS_MAX_CONCURRENT_JOBS", "1"))
+    TTS_JOB_TTL_SECONDS: int = int(os.getenv("TTS_JOB_TTL_SECONDS", "3600"))
+
+    # The translation model defaults to the roleplay OpenAI-compatible API but
+    # can be moved independently without changing dialogue generation.
+    TTS_TRANSLATION_LLM_MODEL_NAME: str = os.getenv(
+        "TTS_TRANSLATION_LLM_MODEL_NAME",
+        ROLEPLAY_LLM_MODEL_NAME,
+    )
+    TTS_TRANSLATION_LLM_BASE_URL: str = os.getenv(
+        "TTS_TRANSLATION_LLM_BASE_URL",
+        ROLEPLAY_LLM_MODEL_BASE_URL,
+    )
+    TTS_TRANSLATION_LLM_API_KEY: str = os.getenv(
+        "TTS_TRANSLATION_LLM_API_KEY",
+        ROLEPLAY_LLM_MODEL_API_KEY,
+    )
+    TTS_TRANSLATION_TIMEOUT_SECONDS: float = float(
+        os.getenv("TTS_TRANSLATION_TIMEOUT_SECONDS", "120")
+    )
+    TTS_TRANSLATION_MAX_RETRIES: int = int(
+        os.getenv("TTS_TRANSLATION_MAX_RETRIES", "1")
+    )
+    TTS_TRANSLATION_TEMPERATURE: float = float(
+        os.getenv("TTS_TRANSLATION_TEMPERATURE", "0.2")
+    )
+    TTS_TRANSLATION_MAX_TOKENS: int = int(
+        os.getenv("TTS_TRANSLATION_MAX_TOKENS", "400")
+    )
+    TTS_TRANSLATION_PREFIX_CACHE_ENABLED: bool = _env_bool(
+        "TTS_TRANSLATION_PREFIX_CACHE_ENABLED",
+        True,
+    )
+    TTS_TRANSLATION_THREAD_TTL_SECONDS: int = int(
+        os.getenv("TTS_TRANSLATION_THREAD_TTL_SECONDS", "7200")
+    )
+    TTS_TRANSLATION_MAX_THREADS: int = int(
+        os.getenv("TTS_TRANSLATION_MAX_THREADS", "256")
+    )
+
+    # External fish-tts-server, using the same multipart API as
+    # quantumxiaol/umamusume-anime.
+    FISHSPEECH_BASE_URL: str = os.getenv(
+        "FISHSPEECH_BASE_URL",
+        "http://127.0.0.1:8002",
+    )
+    FISHSPEECH_API_KEY: str = os.getenv("FISHSPEECH_API_KEY", "")
+    FISHSPEECH_TIMEOUT_SECONDS: float = float(
+        os.getenv("FISHSPEECH_TIMEOUT_SECONDS", "900")
+    )
+    FISHSPEECH_AUDIO_FORMAT: str = os.getenv("FISHSPEECH_AUDIO_FORMAT", "wav")
+    FISHSPEECH_SPEAKER_PREFIX: str = os.getenv(
+        "FISHSPEECH_SPEAKER_PREFIX",
+        "<|speaker:0|>",
+    )
+    FISHSPEECH_MAX_NEW_TOKENS: int = int(
+        os.getenv("FISHSPEECH_MAX_NEW_TOKENS", "0")
+    )
+    FISHSPEECH_CHUNK_LENGTH: int = int(
+        os.getenv("FISHSPEECH_CHUNK_LENGTH", "0")
+    )
+    FISHSPEECH_TOP_P: float = float(os.getenv("FISHSPEECH_TOP_P", "0.8"))
+    FISHSPEECH_TEMPERATURE: float = float(
+        os.getenv("FISHSPEECH_TEMPERATURE", "0.7")
+    )
+    FISHSPEECH_REPETITION_PENALTY: float = float(
+        os.getenv("FISHSPEECH_REPETITION_PENALTY", "1.1")
+    )
+    FISHSPEECH_USE_MEMORY_CACHE: str = os.getenv(
+        "FISHSPEECH_USE_MEMORY_CACHE",
+        "on",
+    )
+
+    # Legacy IndexTTS MCP settings remain available for direct clients and
+    # compatibility tests; the dialogue runtime now uses TTS_MCP_*.
     INDEXTTS_MCP_URL: str = os.getenv("INDEXTTS_MCP_URL", "http://127.0.0.1:8890/mcp")
     INDEXTTS_MCP_TRANSPORT: str = os.getenv("INDEXTTS_MCP_TRANSPORT", "streamable_http")
     OUTPUTS_DIRECTORY: str = os.path.abspath(

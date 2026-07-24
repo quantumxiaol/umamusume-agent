@@ -24,7 +24,9 @@ const apiClient = axios.create({
 
 const parseError = (error) => {
   if (error.response) {
-    return new Error(`Server Error: ${error.response.status} - ${error.response.data?.detail || 'Unknown error'}`);
+    const parsed = new Error(`Server Error: ${error.response.status} - ${error.response.data?.detail || 'Unknown error'}`);
+    parsed.status = error.response.status;
+    return parsed;
   }
   if (error.request) {
     return new Error('Network Error: No response received from server.');
@@ -57,6 +59,18 @@ export const loadCharacter = async (characterName, forceRebuild = false, userUui
 export const fetchCapabilities = async () => {
   try {
     const response = await apiClient.get('/capabilities');
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
+export const fetchTtsJob = async (jobId, userUuid) => {
+  try {
+    const response = await apiClient.get(
+      `/tts/jobs/${encodeURIComponent(jobId)}`,
+      { params: { user_uuid: userUuid } },
+    );
     return response.data || {};
   } catch (error) {
     throw parseError(error);
@@ -341,7 +355,13 @@ export const deleteDirectorHistory = async (sessionId, userUuid) => {
   }
 };
 
-export const directorTurnStream = async (sessionId, events, userUuid, onEvent) => {
+export const directorTurnStream = async (
+  sessionId,
+  events,
+  userUuid,
+  generateVoice,
+  onEvent,
+) => {
   try {
     const response = await fetch(`${API_BASE_URL}/director/turn_stream`, {
       method: 'POST',
@@ -352,6 +372,7 @@ export const directorTurnStream = async (sessionId, events, userUuid, onEvent) =
         session_id: sessionId,
         user_uuid: userUuid,
         events,
+        generate_voice: Boolean(generateVoice),
       }),
     });
     if (!response.ok) {

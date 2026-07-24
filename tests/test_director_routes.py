@@ -21,12 +21,26 @@ from tests.test_director_service import (
 )
 
 
+class _FakeVoiceService:
+    def __init__(self):
+        self.calls = []
+
+    async def submit_dialogue(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "requested": True,
+            "job_id": f"tts-{kwargs['utterance_id']}",
+            "state": "queued",
+        }
+
+
 class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.sessions = {}
         self.character_runtime = _FakeCharacterRuntime()
         self.director_runtime = _FakeDirectorRuntime()
+        self.voice_service = _FakeVoiceService()
         service = DirectorService(
             character_manager=_CharacterManager(),
             character_runtime=self.character_runtime,
@@ -48,6 +62,8 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
                 service=service,
                 sessions=self.sessions,
                 session_ttl_seconds=3600,
+                voice_service=self.voice_service,
+                enable_tts=True,
             )
         )
         self.client = httpx.AsyncClient(
@@ -104,6 +120,57 @@ class DirectorRouteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(self.director_runtime.calls), 1)
         self.assertEqual(len(self.character_runtime.contexts), 2)
+
+    async def test_tts_only_submits_new_character_dialogue_events(self):
+        created = await self._create_session()
+        response = await self.client.post(
+            "/director/turn",
+            json={
+                "session_id": created["session_id"],
+                "user_uuid": created["user_uuid"],
+                "generate_voice": True,
+                "events": [
+                    {
+                        "content": "夜幕降临，告诉我今天训练得怎么样。",
+                        "speaker": {
+                            "actor_id": "narrator",
+                            "actor_type": "narrator",
+                            "display_name": "环境",
+                        },
+                        "event_type": "scene_event",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        events = response.json()["events"]
+        input_events = [
+            event for event in events
+            if event["event_type"] != "character_reply"
+        ]
+        character_events = [
+            event for event in events
+            if event["event_type"] == "character_reply"
+        ]
+        self.assertTrue(input_events)
+        self.assertTrue(
+            all("voice" not in event for event in input_events)
+        )
+        self.assertEqual(
+            len(self.voice_service.calls),
+            len(character_events),
+        )
+        self.assertTrue(
+            all(event.get("voice", {}).get("job_id") for event in character_events)
+        )
+        self.assertIn(
+            character_events[0]["event_id"],
+            {
+                context["event_id"]
+                for context in self.voice_service.calls[1]["context_events"]
+            },
+        )
 
     async def test_create_custom_scene_with_multiple_characters(self):
         response = await self.client.post(

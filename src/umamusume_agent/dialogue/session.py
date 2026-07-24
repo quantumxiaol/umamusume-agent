@@ -122,6 +122,7 @@ class DialogueSession:
         event_type: Optional[str] = None,
         target_actor_ids: Optional[list[str]] = None,
         event_schema_version: Optional[int] = None,
+        utterance_id: Optional[str] = None,
     ):
         """Add a message to model history and append its JSONL event."""
 
@@ -164,6 +165,8 @@ class DialogueSession:
         }
         if imported_timestamp:
             payload["imported_timestamp"] = imported_timestamp
+        if utterance_id:
+            payload["utterance_id"] = utterance_id
         if any(
             value is not None
             for value in (
@@ -244,6 +247,7 @@ class DialogueSession:
                 event_type=message.get("event_type"),
                 target_actor_ids=message.get("target_actor_ids"),
                 event_schema_version=message.get("event_schema_version"),
+                utterance_id=message.get("utterance_id"),
             )
 
     def get_messages(self, text_only: bool = False) -> list:

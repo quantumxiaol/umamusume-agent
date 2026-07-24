@@ -20,10 +20,10 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - 角色人格来自 `characters/<角色>/prompt.md`
 - 角色音色来自角色目录中的参考音频
 - 对话支持非流式请求与 SSE 流式请求；JSON 模式下不会把半截 JSON token 直接推给前端
-- 默认仅文本回复；当 `generate_voice=true` 时才会调用 IndexTTS MCP 合成语音，音频保存在 `outputs/<角色>_<时间戳>/reply_###.wav`
+- 默认仅文本回复；开启 TTS 后，仅为本次新生成的角色对白异步提交日语配音任务
+- 项目内 TTS MCP 负责中文对白到日语配音文本的准备，再调用外部 Fish Speech HTTP 服务；合成完成后由用户手动播放
 
-角色人格可以通过项目[umamusume-agent-prompt](https://github.com/quantumxiaol/umamusume-agent-prompt)获取，角色音色可以通过项目[umamusume-voice-data](https://github.com/quantumxiaol/umamusume-voice-data)在bilibili wiki上爬取，角色音色当前是通过[index-TTS mcp](https://github.com/quantumxiaol/index-tts)实现的。
-
+角色人格可以通过项目[umamusume-agent-prompt](https://github.com/quantumxiaol/umamusume-agent-prompt)获取，角色音色可以通过项目[umamusume-voice-data](https://github.com/quantumxiaol/umamusume-voice-data)在 bilibili wiki 上爬取。
 ## 功能概览
 
 - 角色管理：从 `characters/` 加载角色配置
@@ -34,8 +34,9 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - 导演历史：当前浏览器按 `user_uuid` 保存完整公开场景；即使 Hugging Face 同时丢失内存和临时 JSONL，也能上传浏览器快照恢复
 - 历史落盘：单角色对话与导演场景分别写入独立 JSONL；JSONL 是后端存活期间的快速恢复副本，导演模式以浏览器快照兜底
 - 对话格式：后端主协议为 `{"action":"...","dialogue":"..."}` JSON；API 响应返回 `action`、`dialogue`、`message`，不再返回旧两行 `reply`
-- 语音合成：IndexTTS MCP 工具 `tts_synthesize` / `tts_batch_file`
-- 前端 UI：单角色对话、剧情事件队列、多人导演页面、场景历史、角色选择、提示词预览和可选语音播放
+- TTS Agent：结合角色卡、人物日文名、称呼关系和共享公开上下文，将中文对白准备为日语配音文本
+- 异步语音：项目内 MCP 提供提交、查询、取消和健康检查工具；外部 Fish Speech 较慢时不阻塞对话回复
+- 前端 UI：单角色对话、剧情事件队列、多人导演页面、场景历史、角色选择、提示词预览和手动语音播放
 
 ## 仓库
 
@@ -63,7 +64,7 @@ uv lock
 uv sync
 ```
 
-`uv sync` 默认安装对话、导演模式和 IndexTTS MCP 客户端所需依赖（角色构建依赖已剥离至 `umamusume-character-build` 项目）。
+`uv sync` 默认安装对话、导演模式、TTS MCP 客户端/服务端和 Fish Speech HTTP 客户端所需依赖（角色构建依赖已剥离至 `umamusume-character-build` 项目）。
 
 如需使用进程内 CosyVoice 辅助模块，再安装本地 TTS 可选依赖：
 
@@ -71,9 +72,10 @@ uv sync
 uv sync --extra local-tts
 ```
 
-当前对话与导演运行时直接调用 OpenAI 兼容 SDK，IndexTTS 直接使用官方 MCP
-客户端。仓库同时保留 LangChain、LangGraph 和 MCP 适配器，供后续工具调用或
-调度能力使用：
+当前对话、导演和 TTS 翻译运行时直接调用 OpenAI 兼容 SDK。对话后端通过官方 MCP
+客户端访问项目内 TTS MCP 服务。原有 `IndexTTSMCPClient` 兼容实现仍然保留，
+但不参与新的 Fish Speech 主链路。仓库同时保留 LangChain、LangGraph 和 MCP
+适配器，供后续工具调用或调度能力使用：
 
 ```bash
 uv sync --extra langchain-mcp
@@ -110,7 +112,18 @@ cat .env.template > .env
   - `DIRECTOR_LLM_TEMPERATURE` / `DIRECTOR_LLM_MAX_TOKENS`（导演计划 JSON 的生成参数）
   - `DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES`（默认 `25`，按导演或单个角色自己的回复次数重新注入约束）
   - `SCENE_TEMPLATES_DIRECTORY` / `DIRECTOR_HISTORY_DIRECTORY`（预制场景与独立场景历史目录）
-当前运行链路只依赖角色对话相关的 `ROLEPLAY_LLM_*`，以及启用语音时使用的 `INDEXTTS_MCP_*`；`langchain-mcp` 是预留能力，不参与当前请求链路。
+- TTS 配置：
+  - `ENABLE_TTS`（后端总开关；`false` 时即使请求携带 `generate_voice=true` 也不提交任务）
+  - `TTS_MCP_URL` / `TTS_MCP_TRANSPORT`（对话后端到项目内 TTS MCP）
+  - `TTS_MCP_AUTOSTART`（Docker/Hugging Face 启动时是否自动拉起项目内 MCP 进程）
+  - `TTS_MAX_CONCURRENT_JOBS` / `TTS_JOB_TTL_SECONDS`（合成并发数与内存任务、临时音频保留时间）
+  - `TTS_TRANSLATION_LLM_*`（中文对白到日语配音文本；留空时复用 `ROLEPLAY_LLM_*`）
+  - `TTS_TRANSLATION_PREFIX_CACHE_ENABLED`（为支持 Qwen/百炼的模型标记稳定前缀）
+  - `TTS_TRANSLATION_THREAD_TTL_SECONDS` / `TTS_TRANSLATION_MAX_THREADS`（限制匿名浏览器翻译线程的内存占用）
+  - `FISHSPEECH_BASE_URL` / `FISHSPEECH_API_KEY` / `FISHSPEECH_TIMEOUT_SECONDS`（外部 Fish Speech 服务）
+  - `FISHSPEECH_*` 其余参数（音频格式、speaker 前缀与生成参数）
+
+当前主链路不依赖 LangChain；`langchain-mcp` 是保留能力，不参与对话、导演或 TTS 请求。
 
 ## 数据准备（角色导入）
 
@@ -150,11 +163,15 @@ characters/
 
 ## 后端使用说明
 
-### 1) 可选：启动 IndexTTS MCP（仅在需要语音时）
+### 1) 可选：启动项目内 TTS MCP（仅在需要语音时）
 
 ```bash
-python mcp_service/server.py --http --host 127.0.0.1 --port 8890
+uv run python -m umamusume_agent.tts.mcp_server
 ```
+
+该 MCP 进程会调用 `FISHSPEECH_BASE_URL` 指向的外部 Fish Speech 服务。使用
+`docker-entrypoint.sh` 且设置 `ENABLE_TTS=true`、`TTS_MCP_AUTOSTART=true` 时会自动启动，
+不需要再手动执行上面的命令。
 
 ### 2) 启动对话服务
 
@@ -330,7 +347,14 @@ data: {}
 - 历史文件中 assistant 消息保存 `schema_version=2`、`content`、`action`、`dialogue`、`source_format`。
 - 传给 LLM 的历史上下文不会塞 raw JSON，而是压成自然语言：`角色动作：...` / `角色对白：...`。
 - `/history/import` 可导入 v2 JSON，也兼容旧 `role/content`、旧“动作：/对白：”文本和 Markdown 导出；`replace_current=true` 且 `messages=[]` 会清空当前 session 上下文。
-- TTS 只消费解析后的 `dialogue` 字段；`action` 不参与合成。
+- TTS 只为赛马娘的 `dialogue` 提交任务；角色动作、训练员输入、旁白和环境事件不配音。
+- 对话回复先返回，语音任务在后台经历 `queued -> translating -> validating -> synthesizing -> downloading -> ready`；失败不会回滚或阻塞文字对话。
+- 前端不会自动播放。任务 `ready` 后，对应角色对白旁才显示“播放日语配音”按钮。
+- TTS 开关取发送瞬间的状态。关闭期间产生的对白不会在重新开启时补合成，但公开历史仍可作为之后翻译称呼和语境的上下文。
+- 浏览器只缓存 `job_id` 和状态等轻量引用，不缓存音频 Blob、Base64 或播放 URL；后端音频响应使用 `no-store`，任务和临时音频按 TTL 清理。
+- TTS Agent 为每个“用户 + 场景/会话 + 角色”维护只追加翻译线程。稳定角色卡、演员表和称呼规则位于前缀，公开事件追加到尾部，以利于上游前缀缓存命中。
+
+完整链路、MCP 工具和生命周期见 [`docs/tts_pipeline.md`](docs/tts_pipeline.md)。
 
 ## 部署说明（GitHub Pages + HF Space）
 
@@ -339,7 +363,9 @@ data: {}
 - GitHub Pages：发布 `frontend/` 静态站点
 - Hugging Face Space：使用仓库根目录的 `app.py` 与 `Dockerfile` 运行 FastAPI
 - 前端生产环境默认直连 `https://quantumxiaol-umamusume-agent.hf.space`
-- 前后端默认关闭 TTS，当前部署仅保留文本对话
+- 当前 GitHub Pages 生产构建隐藏 TTS 开关（`VITE_ENABLE_TTS=false`）
+- 当前 Hugging Face 后端保持 `ENABLE_TTS=false`，不会启动项目内 TTS MCP 或提交语音任务
+- TTS 目前仅用于本地开发和测试
 - 后端支持可选 `X-API-Key` 软门槛与内存级请求限流
 
 ### GitHub Pages
@@ -363,6 +389,14 @@ Pages 目标地址将是：
 - `ROLEPLAY_LLM_MODEL_BASE_URL`
 - `ROLEPLAY_LLM_MODEL_API_KEY`
 
+当前 Hugging Face 生产部署不启用 TTS，无需配置 Fish Speech。若未来决定在生产环境启用，
+才需要增加：
+
+- `ENABLE_TTS=true`
+- `FISHSPEECH_BASE_URL`（必须是 Hugging Face 容器可访问的外部地址）
+- 可选 `FISHSPEECH_API_KEY`
+- 如不复用角色对话模型，再单独配置 `TTS_TRANSLATION_LLM_MODEL_NAME/BASE_URL/API_KEY`
+
 可选保护项：
 
 - `API_ACCESS_KEY`
@@ -373,7 +407,9 @@ Pages 目标地址将是：
 
 容器启动时会先执行 `docker-entrypoint.sh`，从仓库内的 `.env.template` 生成 `.env`，并用运行时环境变量替换占位符。
 
-如果 Space 上不启用 TTS，可以不配置 `INDEXTTS_MCP_*`，前端默认也是关闭语音生成。
+当前 Space 保持 `ENABLE_TTS=false`；GitHub Pages 同时使用
+`VITE_ENABLE_TTS=false`，因此生产前后端都是纯文本模式。本地开发时可在本地 `.env`
+中设置 `ENABLE_TTS=true`，而 `frontend/.env` 保持 `VITE_ENABLE_TTS=true`。
 
 导演模式复用现有 `ROLEPLAY_LLM_*` 模型配置，不需要增加第二套模型密钥。详细协议、
 范围和前缀复用约束见 [`docs/director_mode_v1.md`](docs/director_mode_v1.md)。
@@ -437,24 +473,32 @@ pnpm run dev
 │   ├── server/
 │   │   ├── dialogue_server.py     # FastAPI 入口、旧接口与服务装配
 │   │   └── director_routes.py     # /director API 与 SSE
-│   ├── tts/                       # 可选 IndexTTS MCP 客户端与服务
+│   ├── tts/                       # 异步日语配音链路
+│   │   ├── agent.py               # 固定规则的中文对白→日语配音文本 Agent
+│   │   ├── fish_client.py         # 外部 Fish Speech multipart HTTP 客户端
+│   │   ├── jobs.py                # 内存任务队列、并发、TTL 与临时音频
+│   │   ├── mcp_client.py          # TTS MCP 客户端及保留的 IndexTTS 兼容客户端
+│   │   ├── mcp_server.py          # 项目内 TTS MCP Server
+│   │   ├── models.py              # MCP 请求与任务状态契约
+│   │   └── service.py             # Dialogue/Director 到 MCP 的适配层
 │   └── client/                    # CLI 客户端
 ├── frontend/
 │   └── src/
 │       ├── App.vue                # 单角色/导演模式入口
 │       ├── components/
 │       │   └── DirectorMode.vue   # 多人场景选择、时间线与历史 UI
-│       ├── services/api.js        # 单聊与导演后端 API
+│       ├── services/api.js        # 单聊、导演与 TTS Job API
 │       └── stores/
-│           ├── chatStore.js       # 单角色状态、事件队列与历史缓存
-│           └── directorStore.js   # 场景状态、浏览器快照与恢复
+│           ├── chatStore.js       # 单角色状态、事件队列、历史与语音轮询
+│           └── directorStore.js   # 场景快照、恢复与语音轮询
 ├── scenes/                        # 公园、赛马场、河边等场景预设
 ├── characters/                    # 外部导入的角色卡、Prompt 与参考音频
 ├── docs/
 │   ├── dialogue_architecture.md   # 单角色 Runtime 架构
-│   └── director_mode_v1.md        # 多人导演协议与前缀约束
-├── tests/                         # 单聊、导演、历史和路由回归测试
-├── outputs/                       # 本地运行产物与后端 JSONL 副本
+│   ├── director_mode_v1.md        # 多人导演协议与前缀约束
+│   └── tts_pipeline.md            # 异步日语配音、MCP 与缓存边界
+├── tests/                         # 单聊、导演、TTS、历史和路由回归测试
+├── outputs/                       # JSONL 副本与有 TTL 的临时 TTS 音频
 ├── .github/workflows/
 │   └── deploy-pages.yml           # GitHub Pages 前端部署
 ├── app.py                         # Hugging Face / Uvicorn 启动入口
