@@ -12,7 +12,6 @@ COPY pyproject.toml uv.lock ./
 COPY src ./src
 COPY characters ./characters
 COPY scenes ./scenes
-COPY resources ./resources
 COPY umamusume_characters.json ./
 COPY .env.template ./
 COPY app.py ./

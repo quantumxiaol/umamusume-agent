@@ -16,7 +16,6 @@ from typing import Any, Dict
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
-from langchain_mcp_adapters.tools import load_mcp_tools
 
 
 def _maybe_parse_json(value: Any) -> Any:
@@ -84,8 +83,8 @@ async def async_main(base_url: str, prompt_path: str, transport: str, text_dir: 
     try:
         async with ClientSession(read, write) as session:
             await session.initialize()
-            tools = await load_mcp_tools(session)
-            print("Available tools:", [tool.name for tool in tools])
+            tools = await session.list_tools()
+            print("Available tools:", [tool.name for tool in tools.tools])
 
             synth_args = {
                 "text": "训练员你好，这是 IndexTTS MCP 工具测试。",

@@ -23,6 +23,11 @@ The `dialogue` package must not import FastAPI. Provider errors remain ordinary
 Python/OpenAI exceptions until the server layer translates them into HTTP
 responses.
 
+The active dialogue and director runtimes call the OpenAI-compatible SDK
+directly. IndexTTS uses the official MCP client directly. LangChain, LangGraph,
+and the LangChain MCP adapters remain available through the optional
+`langchain-mcp` dependency group for future orchestration and tool integrations.
+
 ## Module responsibilities
 
 - `dialogue/protocol.py`: structured reply schema, legacy parsing, JSON repair
@@ -84,6 +89,3 @@ Run the runtime-focused suite with:
   tests.test_dialogue_history \
   tests.test_dialogue_routes
 ```
-
-The older search and MCP scripts under `tests/` require the optional `extras`
-dependency set and are not part of the minimal dialogue runtime suite.

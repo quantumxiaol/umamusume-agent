@@ -17,8 +17,8 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 ## 目的
 
 构建一个赛马娘角色对话 Agent：
-- 角色人格来自 prompt（本地 `result-prompts/`）
-- 角色音色来自 voice 数据（本地 `result-voices/`）
+- 角色人格来自 `characters/<角色>/prompt.md`
+- 角色音色来自角色目录中的参考音频
 - 对话支持非流式请求与 SSE 流式请求；JSON 模式下不会把半截 JSON token 直接推给前端
 - 默认仅文本回复；当 `generate_voice=true` 时才会调用 IndexTTS MCP 合成语音，音频保存在 `outputs/<角色>_<时间戳>/reply_###.wav`
 
@@ -63,12 +63,20 @@ uv lock
 uv sync
 ```
 
-`uv sync` 默认安装精简版依赖：`dialogue_server` 主链路必需包（角色构建依赖已剥离至 `umamusume-character-build` 项目）。
+`uv sync` 默认安装对话、导演模式和 IndexTTS MCP 客户端所需依赖（角色构建依赖已剥离至 `umamusume-character-build` 项目）。
 
-如需启用其余可选能力，统一安装 `extras`：
+如需使用进程内 CosyVoice 辅助模块，再安装本地 TTS 可选依赖：
 
 ```bash
-uv sync --extra extras
+uv sync --extra local-tts
+```
+
+当前对话与导演运行时直接调用 OpenAI 兼容 SDK，IndexTTS 直接使用官方 MCP
+客户端。仓库同时保留 LangChain、LangGraph 和 MCP 适配器，供后续工具调用或
+调度能力使用：
+
+```bash
+uv sync --extra langchain-mcp
 ```
 
 ### .env
@@ -79,7 +87,6 @@ cat .env.template > .env
 
 - 主要配置：`ROLEPLAY_LLM_MODEL_NAME/BASE_URL/API_KEY`
 - 若使用 Qwen，可直接填兼容 OpenAI 的 Base URL
-- 代理可选：如未启用代理，建议注释 `HTTP_PROXY/HTTPS_PROXY`
 - JSON 回复协议配置：
   - `LLM_JSON_ENABLED`（默认 `true`，启用 JSON 回复主链路）
   - `LLM_JSON_OUTPUT_MODE`（默认 `auto`，可选 `auto/response_format/prompt_only/disabled`）
@@ -103,7 +110,7 @@ cat .env.template > .env
   - `DIRECTOR_LLM_TEMPERATURE` / `DIRECTOR_LLM_MAX_TOKENS`（导演计划 JSON 的生成参数）
   - `DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES`（默认 `25`，按导演或单个角色自己的回复次数重新注入约束）
   - `SCENE_TEMPLATES_DIRECTORY` / `DIRECTOR_HISTORY_DIRECTORY`（预制场景与独立场景历史目录）
-当前主链路主要依赖 `ROLEPLAY_LLM_*` 与 `INDEXTTS_MCP_*`；RAG/Web/旧模块需要安装 `extras` 后再配置。
+当前运行链路只依赖角色对话相关的 `ROLEPLAY_LLM_*`，以及启用语音时使用的 `INDEXTTS_MCP_*`；`langchain-mcp` 是预留能力，不参与当前请求链路。
 
 ## 数据准备（角色导入）
 
@@ -431,11 +438,7 @@ pnpm run dev
 │   │   ├── dialogue_server.py     # FastAPI 入口、旧接口与服务装配
 │   │   └── director_routes.py     # /director API 与 SSE
 │   ├── tts/                       # 可选 IndexTTS MCP 客户端与服务
-│   ├── client/                    # CLI 客户端
-│   ├── crawler/                   # 早期爬虫（当前主链路未使用）
-│   ├── rag/                       # 早期 RAG（当前主链路未使用）
-│   ├── search/                    # 早期搜索（当前主链路未使用）
-│   └── web/                       # 早期 Web MCP（当前主链路未使用）
+│   └── client/                    # CLI 客户端
 ├── frontend/
 │   └── src/
 │       ├── App.vue                # 单角色/导演模式入口
@@ -460,9 +463,3 @@ pnpm run dev
 ├── umamusume_characters.json      # 角色中英文映射
 └── README.md                      # 项目说明与部署配置
 ```
-
-## 保留模块说明
-
-- `src/umamusume_agent/crawler/`、`rag/`、`search/`、`web/` 为早期功能保留，当前对话流程未使用。
-- `resources/docs/`、`resources/prompt/`、`resources/results/` 为旧版本数据与样例，当前不参与主流程。
-- 未来可能还是需要 RAG + Web，取决于未来的 LLM 训练时是否构建了相应知识；如果基础模型本身知识足够，这部分可能就不再需要。
