@@ -425,7 +425,13 @@ onMounted(() => store.init(props.userUuid));
             :disabled="store.isLoading"
             @click="regenerateReply(event)"
           >
-            {{ store.isLoading ? '正在重新生成…' : '重新生成这条回复' }}
+            {{
+              store.regeneratingEventId === event.event_id
+                ? '正在重新生成…'
+                : store.isLoading
+                  ? '正在生成…'
+                  : '重新生成这条回复'
+            }}
           </button>
           <div
             v-if="props.ttsEnabled && event.event_type === 'character_reply' && event.voice?.job_id"
@@ -449,7 +455,11 @@ onMounted(() => store.init(props.userUuid));
           </div>
         </article>
         <div v-if="store.isLoading" class="director-working">
-          导演正在整理场景并安排角色回应…
+          {{
+            store.regeneratingEventId
+              ? '正在重新生成角色回复…'
+              : '导演正在整理场景并安排角色回应…'
+          }}
         </div>
       </section>
 

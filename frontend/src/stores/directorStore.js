@@ -317,6 +317,7 @@ export const useDirectorStore = defineStore('director', {
     isRestoring: false,
     isHistoryLoading: false,
     isLoading: false,
+    regeneratingEventId: '',
     error: null,
     historyError: null,
     voicePollers: {},
@@ -450,6 +451,7 @@ export const useDirectorStore = defineStore('director', {
       this.createdAt = '';
       this.lastActiveAt = '';
       this.queuedEvents = [];
+      this.regeneratingEventId = '';
     },
 
     _clearVoicePollers() {
@@ -856,6 +858,7 @@ export const useDirectorStore = defineStore('director', {
         delete this.voicePollers[eventId];
       }
       this.isLoading = true;
+      this.regeneratingEventId = eventId;
       this.error = null;
       try {
         if (jobId) {
@@ -904,6 +907,9 @@ export const useDirectorStore = defineStore('director', {
         }
         return false;
       } finally {
+        if (this.regeneratingEventId === eventId) {
+          this.regeneratingEventId = '';
+        }
         this.isLoading = false;
       }
     },
