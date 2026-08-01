@@ -1,6 +1,7 @@
 # 前端（对话控制台）
 
-这是基于本项目对话后端的新 UI：可选择角色、查看人格提示词、试听参考音色、进行多轮对话，并为每条回复生成语音。
+这是本项目的 Vue + Pinia 前端，包含单角色对话、剧情事件队列、多角色导演场景、
+浏览器历史恢复和可选异步日语配音。
 
 ## Environment
 
@@ -15,7 +16,7 @@ cd frontend
 pnpm install
 
 # 复制配置
-cat .env.template > .env
+cp .env.template .env
 
 # 启动开发服务器
 pnpm run dev
@@ -55,6 +56,9 @@ pnpm run dev
 - **角色选择**：从后端 `/characters` 获取已构建角色，点击即可加载
 - **提示词预览**：查看已加载角色的系统提示词
 - **流式 / 非流式**：支持实时输出和一次性回复
+- **剧情事件队列**：训练员对白、动作和环境事件可先加入，再整组触发一次回复
+- **导演模式**：选择预设或自定义场景，并选择 1～3 位角色共享公开时间线
+- **历史恢复**：单角色历史与导演场景按当前浏览器 `user_uuid` 隔离和恢复
 - **异步日语配音**：TTS 打开时只处理发送后新产生的角色对白，完成后手动点击播放
 - **导演回复重生成**：可重生成场景中最后一条角色回复；先取消旧配音任务，再原位置替换并只合成新版本
 - **错误回复不配音**：结构化解析最终失败的安全提示不会提交 TTS，也不会触发本轮后续角色接话
@@ -63,7 +67,8 @@ pnpm run dev
 
 ## GitHub Pages 发布
 
-仓库已提供工作流 [.github/workflows/deploy-pages.yml](/Users/quantumxiaol/Desktop/dev/umamusume-agent/.github/workflows/deploy-pages.yml:1)。
+仓库已提供工作流
+[`.github/workflows/deploy-pages.yml`](../.github/workflows/deploy-pages.yml)。
 
 - 推送 `main` 分支时自动构建 `frontend/`
 - 生产构建默认指向 `https://quantumxiaol-umamusume-agent.hf.space`
@@ -83,8 +88,9 @@ pnpm run dev
 
 ## 界面说明
 
-- 左侧：角色列表 + 搜索、音色试听、提示词预览
-- 右侧：聊天窗口 + 语音播放 + 输入区
+- 单角色页：角色列表、人格预览、参考音色、历史操作、聊天窗口和事件输入区
+- 导演页：场景与演员选择、共享时间线、环境状态、场景历史和事件输入区
+- 顶部工具栏：单角色/导演模式、流式开关和可用时的 TTS 开关
 
 ## 项目结构
 

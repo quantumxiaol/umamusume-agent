@@ -68,7 +68,8 @@ the LangChain MCP adapters remain available through the optional
 - Disabled JSON mode preserves the legacy token stream.
 - Assistant history remains schema version 2 and restores legacy records.
 - TTS receives only newly generated character `dialogue`; action,
-  trainer/environment input, and old off-period dialogue are never synthesized.
+  trainer/environment input, parse-error fallbacks, and old off-period dialogue
+  are never synthesized.
 - The Hugging Face entry point remains the root `app.py` importing
   `umamusume_agent.server.dialogue_server:app` on port 7860.
 
@@ -80,9 +81,11 @@ action, narration, or a scene event. Metadata is stored alongside semantic
 history, while the character model receives stable natural-language labels
 such as `【训练员动作】` and `【环境变化】`.
 
-The current UI remains a single-character session: environment events cause
-the selected character to react. Multi-character scheduling and shared scene
-memory remain phase 3 concerns and do not live in `DialogueService`.
+The single-character page remains a `DialogueService` session: environment
+events cause the selected character to react. Multi-character scheduling and
+shared scene memory are now implemented separately under `director/`.
+`DirectorService` reuses `CharacterRuntime`, while `DialogueService` remains
+unaware of director orchestration and keeps the legacy `/chat` boundary stable.
 
 The phase-2 composer may stage several events locally. On final send, earlier
 items are submitted as `context_events` and the last item remains the ordinary

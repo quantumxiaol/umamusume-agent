@@ -30,15 +30,41 @@ Trainer dialogue, trainer actions, environment events, narration, and character
 `action` fields are never synthesized. Turning TTS on does not scan or backfill
 older replies.
 
-In director mode, manually regenerating the latest reply first cancels its old
-job in the browser flow, replaces the text in place, and submits only the new
-event revision. Each revision uses a distinct idempotency key. If an old Fish
-Speech request has already completed before cancellation arrives, its audio is
-discarded from the current event and is never attached to the replacement.
-
 The submit request contains one current Chinese subtitle plus stable character
 metadata, cast names, and public context events. It never mutates dialogue or
 director history.
+
+## Invalid replies and manual regeneration
+
+Structured-output validation is the boundary between dialogue generation and
+voice generation. If the roleplay model returns empty content, malformed JSON,
+or a reply that still cannot be parsed after bounded repair, the dialogue layer
+may expose a safe fallback with `source_format=parse_error`. That fallback is a
+UI-visible error state, not an in-character line, and no TTS job is submitted
+for it.
+
+In director mode, a parse error also stops the remaining scheduled character
+replies for that turn. This prevents a synthetic fallback from becoming a
+shared scene fact or translation context for later speakers. The user can then
+manually regenerate the latest failed character event.
+
+Manual regeneration follows this sequence:
+
+1. The browser stops polling and requests cancellation of the old event's TTS
+   job, if one exists.
+2. The backend regenerates only the latest public character reply and replaces
+   it in place, keeping its event ID and sequence position.
+3. The event revision increases, so the replacement uses an idempotency key
+   such as `<event_id>:r<revision>` instead of reusing the old voice job.
+4. A new TTS job is submitted only when the replacement passes validation and
+   TTS was enabled for the regeneration request.
+5. If the replacement is still `source_format=parse_error`, the event remains
+   available for another manual attempt and no audio is synthesized.
+
+Cancellation is best effort. Fish Speech may already be synthesizing or may
+finish before the cancellation request arrives. In that case the old temporary
+audio can exist until normal job cleanup, but it is detached from the current
+event and the frontend never presents it as the replacement's audio.
 
 ## Translation and prefix reuse
 
@@ -103,6 +129,11 @@ The browser polls job status and shows a play button only after `ready`. It does
 not autoplay. Local browser history stores only lightweight `job_id` and status
 metadata; it never stores audio Blob/Base64 data or the short-lived audio URL.
 After refresh it queries the job again to recover a playable URL.
+
+The frontend keeps polling through `queued`, `translating`, `validating`,
+`synthesizing`, and `downloading`, and updates the same message card when the
+job becomes `ready`. A page refresh is not required. If a poll is interrupted,
+restoring the browser snapshot resumes status lookup from the stored `job_id`.
 
 Audio is a temporary backend file under `outputs/tts_jobs/`. Job TTL cleanup
 removes both the in-memory record and its file. Audio responses include
