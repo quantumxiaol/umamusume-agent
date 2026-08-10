@@ -116,11 +116,17 @@ app_port: 7860
 | Variable | `ROLEPLAY_LLM_MODEL_NAME` | 选择的模型 ID | 是 |
 | Variable | `ROLEPLAY_LLM_MODEL_BASE_URL` | 厂商官方 OpenAI 兼容 Base URL | 是 |
 | Secret | `ROLEPLAY_LLM_MODEL_API_KEY` | 真实 LLM API Key | 是 |
+| Variable | `LLM_JSON_MAX_TOKENS` | `1024` | 建议显式配置 |
+| Variable | `DIRECTOR_LLM_MAX_TOKENS` | `1536` | 建议显式配置 |
 | Variable | `ENABLE_TTS` | `false` | 建议显式配置 |
 | Secret | `API_ACCESS_KEY` | 自定义随机字符串 | 可选 |
 
 其他参数使用 `.env.template` 默认值。完整配置说明见
 [`configuration.md`](configuration.md)。
+
+部署包含动态预算逻辑的新版本后，还可按需覆盖
+`LLM_JSON_LENGTH_RETRY_ATTEMPTS=2` 和 `LLM_JSON_MAX_DYNAMIC_TOKENS=8192`。
+修改 HF Variable 会触发 Space 重启；新进程启动后才会读取新值。
 
 当前生产方案不启用 TTS，不要在 HF 填写本地
 `127.0.0.1:8002` Fish Speech 地址。

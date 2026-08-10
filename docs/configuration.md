@@ -46,7 +46,12 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `LLM_JSON_REGENERATE_ON_PARSE_FAILURE` | `true` | 修复失败后重生成 |
 | `LLM_JSON_MAX_REGENERATE_ATTEMPTS` | `1` | 最终安全降级前的重生成次数 |
 | `LLM_JSON_TEMPERATURE` | `0.35` | 角色 JSON 回复温度 |
-| `LLM_JSON_MAX_TOKENS` | `320` | 角色 JSON 回复上限 |
+| `LLM_JSON_MAX_TOKENS` | `1024` | 角色 JSON 回复的初始输出预算 |
+| `LLM_JSON_LENGTH_RETRY_ATTEMPTS` | `2` | `finish_reason=length` 时用原始消息翻倍预算重试的次数 |
+| `LLM_JSON_MAX_DYNAMIC_TOKENS` | `8192` | 动态扩大输出预算的硬上限 |
+
+截断输出不会进入 JSON repair 上下文。运行时会丢弃它，保持原始 messages 不变并将
+`max_tokens` 翻倍；只有 `finish_reason=stop` 且内容完整但无法解析时，才进行格式修复。
 
 详细协议和失败链路见 [`dialogue_protocol.md`](dialogue_protocol.md)。
 
@@ -73,7 +78,7 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `DIRECTOR_MAX_PARTICIPANTS` | `3` | 场景最多参加角色数 |
 | `DIRECTOR_MAX_SPEAKERS_PER_TURN` | `2` | 每轮最多顺序回应角色数 |
 | `DIRECTOR_LLM_TEMPERATURE` | `0.2` | 导演计划温度 |
-| `DIRECTOR_LLM_MAX_TOKENS` | `600` | 导演计划 JSON 上限 |
+| `DIRECTOR_LLM_MAX_TOKENS` | `1536` | 导演计划 JSON 的初始输出预算 |
 | `DIRECTOR_JSON_REPAIR_ATTEMPTS` | `1` | 导演计划 JSON 修复次数 |
 | `DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES` | `25` | 按导演/单角色自己的回复数再注入 |
 | `DIRECTOR_SESSION_TTL_SECONDS` | `3600` | 内存场景 TTL |

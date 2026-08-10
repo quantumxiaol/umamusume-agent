@@ -13,13 +13,14 @@ class _FakeMessage:
 
 
 class _FakeChoice:
-    def __init__(self, content: str):
+    def __init__(self, content: str, finish_reason: str = "stop"):
         self.message = _FakeMessage(content)
+        self.finish_reason = finish_reason
 
 
 class _FakeResponse:
-    def __init__(self, content: str):
-        self.choices = [_FakeChoice(content)]
+    def __init__(self, content: str, finish_reason: str = "stop"):
+        self.choices = [_FakeChoice(content, finish_reason)]
 
 
 class _FakeCompletions:
@@ -56,6 +57,9 @@ class DialogueJsonProtocolTests(unittest.TestCase):
             "LLM_JSON_MAX_RETRIES",
             "LLM_JSON_REGENERATE_ON_PARSE_FAILURE",
             "LLM_JSON_MAX_REGENERATE_ATTEMPTS",
+            "LLM_JSON_MAX_TOKENS",
+            "LLM_JSON_LENGTH_RETRY_ATTEMPTS",
+            "LLM_JSON_MAX_DYNAMIC_TOKENS",
             "ROLEPLAY_LLM_MODEL_BASE_URL",
             "ROLEPLAY_LLM_MODEL_NAME",
         ]
@@ -75,6 +79,9 @@ class DialogueJsonProtocolTests(unittest.TestCase):
         ds.config.LLM_JSON_MAX_RETRIES = 1
         ds.config.LLM_JSON_REGENERATE_ON_PARSE_FAILURE = True
         ds.config.LLM_JSON_MAX_REGENERATE_ATTEMPTS = 1
+        ds.config.LLM_JSON_MAX_TOKENS = 64
+        ds.config.LLM_JSON_LENGTH_RETRY_ATTEMPTS = 2
+        ds.config.LLM_JSON_MAX_DYNAMIC_TOKENS = 512
         ds.config.ROLEPLAY_LLM_MODEL_BASE_URL = "https://llm.example.test/v1"
         ds.config.ROLEPLAY_LLM_MODEL_NAME = "test-model"
 
@@ -169,6 +176,69 @@ class DialogueJsonProtocolTests(unittest.TestCase):
         self.assertEqual(len(completions.calls), 1)
         self.assertIn("response_format", completions.calls[0])
 
+    def test_length_retry_discards_partial_output_and_doubles_budget(self):
+        self._configure_json_auto()
+        original_messages = [{"role": "user", "content": "hi"}]
+        completions = _FakeCompletions(
+            [
+                _FakeResponse('{"action":"半截', finish_reason="length"),
+                _FakeResponse(
+                    '{"action":"无","dialogue":"收到。"}',
+                    finish_reason="stop",
+                ),
+            ]
+        )
+        ds.llm_client = _FakeLlmClient(completions)
+
+        text = asyncio.run(
+            ds._create_json_completion(
+                original_messages,
+                temperature=0.1,
+                max_tokens=64,
+            )
+        )
+
+        self.assertEqual(text, '{"action":"无","dialogue":"收到。"}')
+        self.assertEqual(
+            [call["max_tokens"] for call in completions.calls],
+            [64, 128],
+        )
+        self.assertEqual(
+            [call["messages"] for call in completions.calls],
+            [original_messages, original_messages],
+        )
+        self.assertNotIn("半截", str(completions.calls[1]["messages"]))
+
+    def test_exhausted_length_retry_never_enters_json_repair(self):
+        self._configure_json_auto()
+        ds.config.LLM_JSON_LENGTH_RETRY_ATTEMPTS = 1
+        ds.config.LLM_JSON_MAX_DYNAMIC_TOKENS = 128
+        original_messages = [
+            {"role": "system", "content": "只输出 JSON"},
+            {"role": "user", "content": "请回应"},
+        ]
+        completions = _FakeCompletions(
+            [
+                _FakeResponse('{"action":"第一次半截', finish_reason="length"),
+                _FakeResponse('{"action":"第二次半截', finish_reason="length"),
+            ]
+        )
+        ds.llm_client = _FakeLlmClient(completions)
+
+        reply = asyncio.run(ds._complete_structured_reply(original_messages))
+
+        self.assertEqual(reply.source_format, "parse_error")
+        self.assertEqual(len(completions.calls), 2)
+        self.assertEqual(
+            [call["max_tokens"] for call in completions.calls],
+            [64, 128],
+        )
+        self.assertEqual(
+            [call["messages"] for call in completions.calls],
+            [original_messages, original_messages],
+        )
+        self.assertNotIn("修复", str(completions.calls))
+
     def test_complete_structured_reply_regenerates_before_safe_fallback(self):
         self._configure_json_auto()
         completions = _FakeCompletions(
@@ -196,6 +266,10 @@ class DialogueJsonProtocolTests(unittest.TestCase):
         self.assertIn("response_format", completions.calls[0])
         self.assertNotIn("response_format", completions.calls[1])
         self.assertNotIn("response_format", completions.calls[2])
+        self.assertEqual(
+            completions.calls[1]["messages"][-2],
+            {"role": "assistant", "content": "not json"},
+        )
 
     def test_safe_fallback_is_character_neutral(self):
         self._configure_json_auto()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, MutableSet
 
 from openai import APIStatusError
@@ -23,6 +24,20 @@ from .protocol import (
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class JsonCompletionResult:
+    """One complete provider response after bounded length retries."""
+
+    content: str
+    finish_reason: str
+    max_tokens: int
+    length_retries: int = 0
+
+    @property
+    def can_parse(self) -> bool:
+        return self.finish_reason == "stop"
 
 
 class CharacterRuntime:
@@ -66,10 +81,18 @@ class CharacterRuntime:
         return str(content)
 
     @staticmethod
-    def log_usage(response: Any) -> None:
+    def extract_finish_reason(response: Any) -> str:
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            return "unknown"
+        value = getattr(choices[0], "finish_reason", None)
+        # Older OpenAI-compatible providers and test doubles may omit this
+        # field. Preserve their previous behavior by treating it as complete.
+        return str(value).strip().lower() if value else "stop"
+
+    @staticmethod
+    def log_usage(response: Any, *, finish_reason: str | None = None) -> None:
         usage = getattr(response, "usage", None)
-        if usage is None:
-            return
 
         def read(source: Any, key: str) -> Any:
             if isinstance(source, dict):
@@ -83,11 +106,24 @@ class CharacterRuntime:
             or read(usage, "input_tokens_details")
         )
         cached_tokens = read(details, "cached_tokens") if details else None
+        if cached_tokens is None:
+            cached_tokens = read(usage, "prompt_cache_hit_tokens")
+        completion_details = read(usage, "completion_tokens_details")
+        reasoning_tokens = (
+            read(completion_details, "reasoning_tokens")
+            if completion_details
+            else None
+        )
         logger.info(
-            "LLM usage model=%s prompt_tokens=%s completion_tokens=%s cached_tokens=%s",
+            "LLM usage request_id=%s model=%s finish_reason=%s "
+            "prompt_tokens=%s completion_tokens=%s reasoning_tokens=%s "
+            "cached_tokens=%s",
+            getattr(response, "id", None) or "unknown",
             getattr(response, "model", None) or "unknown",
+            finish_reason or CharacterRuntime.extract_finish_reason(response),
             prompt_tokens,
             completion_tokens,
+            reasoning_tokens,
             cached_tokens,
         )
 
@@ -128,6 +164,105 @@ class CharacterRuntime:
             and any(term in message for term in unsupported_terms)
         )
 
+    async def create_json_completion_result(
+        self,
+        messages: list[Dict[str, Any]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        force_prompt_only: bool = False,
+    ) -> JsonCompletionResult:
+        mode = json_output_mode(self.settings)
+        key = self._json_capability_key()
+        current_max_tokens = max(1, int(max_tokens))
+        length_retry_limit = max(
+            0,
+            int(getattr(self.settings, "LLM_JSON_LENGTH_RETRY_ATTEMPTS", 2)),
+        )
+        dynamic_token_limit = max(
+            current_max_tokens,
+            int(getattr(self.settings, "LLM_JSON_MAX_DYNAMIC_TOKENS", 8192)),
+        )
+        length_retries = 0
+        prompt_only = force_prompt_only
+
+        while True:
+            send_response_format = (
+                not prompt_only
+                and is_json_reply_enabled(self.settings)
+                and mode in {"auto", "response_format"}
+                and not (
+                    mode == "auto"
+                    and key in self.response_format_unsupported
+                )
+            )
+            kwargs: Dict[str, Any] = {
+                "model": self.settings.ROLEPLAY_LLM_MODEL_NAME,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": current_max_tokens,
+            }
+            if send_response_format:
+                kwargs["response_format"] = {"type": "json_object"}
+
+            try:
+                response = await self.llm_client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                if (
+                    send_response_format
+                    and mode == "auto"
+                    and self.settings.LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR
+                    and self._looks_like_unsupported_response_format(exc)
+                ):
+                    self.response_format_unsupported.add(key)
+                    prompt_only = True
+                    logger.warning(
+                        "LLM response_format=json_object unsupported for "
+                        "base_url=%s model=%s; fallback to prompt-only JSON.",
+                        key[0],
+                        key[1],
+                    )
+                    continue
+                raise
+
+            finish_reason = self.extract_finish_reason(response)
+            self.log_usage(response, finish_reason=finish_reason)
+            result = JsonCompletionResult(
+                content=self.extract_completion_text(response),
+                finish_reason=finish_reason,
+                max_tokens=current_max_tokens,
+                length_retries=length_retries,
+            )
+            if finish_reason != "length":
+                return result
+
+            if (
+                length_retries >= length_retry_limit
+                or current_max_tokens >= dynamic_token_limit
+            ):
+                logger.warning(
+                    "LLM completion remained truncated after %s length "
+                    "retries (max_tokens=%s); discard partial output",
+                    length_retries,
+                    current_max_tokens,
+                )
+                return result
+
+            next_max_tokens = min(
+                dynamic_token_limit,
+                current_max_tokens * 2,
+            )
+            length_retries += 1
+            logger.warning(
+                "LLM finish_reason=length; discard partial output and retry "
+                "original messages with max_tokens=%s (previous=%s, retry=%s/%s)",
+                next_max_tokens,
+                current_max_tokens,
+                length_retries,
+                length_retry_limit,
+            )
+            current_max_tokens = next_max_tokens
+
     async def create_json_completion(
         self,
         messages: list[Dict[str, Any]],
@@ -136,51 +271,39 @@ class CharacterRuntime:
         max_tokens: int,
         force_prompt_only: bool = False,
     ) -> str:
-        mode = json_output_mode(self.settings)
-        key = self._json_capability_key()
-        send_response_format = (
-            not force_prompt_only
-            and is_json_reply_enabled(self.settings)
-            and mode in {"auto", "response_format"}
-            and not (
-                mode == "auto"
-                and key in self.response_format_unsupported
-            )
+        """Compatibility wrapper returning only the final content string."""
+        result = await self.create_json_completion_result(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            force_prompt_only=force_prompt_only,
+        )
+        return result.content
+
+    @staticmethod
+    def _safe_parse_failure_reply() -> StructuredReply:
+        return StructuredReply(
+            action="无",
+            dialogue=SAFE_PARSE_FAILURE_REPLY,
+            source_format="parse_error",
         )
 
-        kwargs: Dict[str, Any] = {
-            "model": self.settings.ROLEPLAY_LLM_MODEL_NAME,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if send_response_format:
-            kwargs["response_format"] = {"type": "json_object"}
-
-        try:
-            response = await self.llm_client.chat.completions.create(**kwargs)
-            self.log_usage(response)
-            return self.extract_completion_text(response)
-        except Exception as exc:
-            if (
-                send_response_format
-                and mode == "auto"
-                and self.settings.LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR
-                and self._looks_like_unsupported_response_format(exc)
-            ):
-                self.response_format_unsupported.add(key)
-                logger.warning(
-                    "LLM response_format=json_object unsupported for base_url=%s model=%s; fallback to prompt-only JSON.",
-                    key[0],
-                    key[1],
-                )
-                return await self.create_json_completion(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    force_prompt_only=True,
-                )
-            raise
+    @staticmethod
+    def _can_parse_completion(
+        result: JsonCompletionResult,
+        *,
+        stage: str,
+    ) -> bool:
+        if result.can_parse:
+            return True
+        logger.warning(
+            "Skip JSON %s because finish_reason=%s after %s length retries; "
+            "partial output will not enter repair context",
+            stage,
+            result.finish_reason,
+            result.length_retries,
+        )
+        return False
 
     async def generate_reply(
         self,
@@ -198,11 +321,14 @@ class CharacterRuntime:
                 self.extract_completion_text(response)
             )
 
-        raw = await self.create_json_completion(
+        completion = await self.create_json_completion_result(
             messages,
             temperature=self.settings.LLM_JSON_TEMPERATURE,
             max_tokens=self.settings.LLM_JSON_MAX_TOKENS,
         )
+        if not self._can_parse_completion(completion, stage="reply"):
+            return self._safe_parse_failure_reply()
+        raw = completion.content
         try:
             return parse_structured_reply(raw)
         except Exception as first_error:
@@ -219,12 +345,15 @@ class CharacterRuntime:
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": REPAIR_JSON_PROMPT},
             ]
-            raw = await self.create_json_completion(
+            completion = await self.create_json_completion_result(
                 repair_messages,
                 temperature=self.settings.LLM_JSON_TEMPERATURE,
                 max_tokens=self.settings.LLM_JSON_MAX_TOKENS,
                 force_prompt_only=True,
             )
+            if not self._can_parse_completion(completion, stage="repair"):
+                return self._safe_parse_failure_reply()
+            raw = completion.content
             try:
                 return parse_structured_reply(
                     raw,
@@ -246,12 +375,18 @@ class CharacterRuntime:
                     *messages,
                     {"role": "user", "content": REGENERATE_JSON_PROMPT},
                 ]
-                raw = await self.create_json_completion(
+                completion = await self.create_json_completion_result(
                     regenerate_messages,
                     temperature=self.settings.LLM_JSON_TEMPERATURE,
                     max_tokens=self.settings.LLM_JSON_MAX_TOKENS,
                     force_prompt_only=True,
                 )
+                if not self._can_parse_completion(
+                    completion,
+                    stage="regeneration",
+                ):
+                    return self._safe_parse_failure_reply()
+                raw = completion.content
                 try:
                     return parse_structured_reply(
                         raw,
@@ -263,8 +398,4 @@ class CharacterRuntime:
                         regenerate_error,
                     )
 
-        return StructuredReply(
-            action="无",
-            dialogue=SAFE_PARSE_FAILURE_REPLY,
-            source_format="parse_error",
-        )
+        return self._safe_parse_failure_reply()

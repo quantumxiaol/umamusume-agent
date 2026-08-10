@@ -5,6 +5,7 @@ from pathlib import Path
 
 from umamusume_agent.dialogue.models import ActorRef, DialogueInputEvent
 from umamusume_agent.dialogue.protocol import StructuredReply
+from umamusume_agent.dialogue.runtime import JsonCompletionResult
 from umamusume_agent.director.context import (
     CharacterSceneContextBuilder,
     DirectorContextBuilder,
@@ -28,7 +29,7 @@ class _Settings:
     DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES = 25
     DIRECTOR_JSON_REPAIR_ATTEMPTS = 1
     DIRECTOR_LLM_TEMPERATURE = 0.2
-    DIRECTOR_LLM_MAX_TOKENS = 600
+    DIRECTOR_LLM_MAX_TOKENS = 1536
 
 
 class _Character:
@@ -107,9 +108,16 @@ class _FakeJsonRuntime:
         self.outputs = list(outputs)
         self.calls = []
 
-    async def create_json_completion(self, messages, **kwargs):
+    async def create_json_completion_result(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
-        return self.outputs.pop(0)
+        output = self.outputs.pop(0)
+        if isinstance(output, JsonCompletionResult):
+            return output
+        return JsonCompletionResult(
+            content=output,
+            finish_reason="stop",
+            max_tokens=kwargs["max_tokens"],
+        )
 
 
 class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -391,6 +399,8 @@ class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(json_runtime.calls), 2)
+        self.assertFalse(json_runtime.calls[0][1]["force_prompt_only"])
+        self.assertTrue(json_runtime.calls[1][1]["force_prompt_only"])
         self.assertEqual(plan.scene_patch.time, "夜晚")
         self.assertEqual([item.actor_id for item in plan.speakers], ["uma_a"])
         self.assertEqual(plan.speakers[0].target_actor_ids, ["player"])
@@ -412,6 +422,34 @@ class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(plan.narration, "风吹过河面。")
+        self.assertEqual([item.actor_id for item in plan.speakers], ["uma_b"])
+
+    async def test_director_runtime_does_not_repair_truncated_output(self):
+        json_runtime = _FakeJsonRuntime(
+            [
+                JsonCompletionResult(
+                    content='{"scene_patch":{},"speakers":[',
+                    finish_reason="length",
+                    max_tokens=6144,
+                    length_retries=2,
+                ),
+                json.dumps({"speakers": [{"actor_id": "uma_a", "intent": "不应调用"}]}),
+            ]
+        )
+        runtime = DirectorRuntime(
+            json_runtime=json_runtime,
+            settings=_Settings,
+            max_speakers=2,
+        )
+
+        plan = await runtime.generate_plan(
+            [{"role": "system", "content": "director"}],
+            allowed_actor_ids={"uma_a", "uma_b"},
+            allowed_target_ids={"player", "uma_a", "uma_b"},
+            fallback_actor_ids=["uma_b"],
+        )
+
+        self.assertEqual(len(json_runtime.calls), 1)
         self.assertEqual([item.actor_id for item in plan.speakers], ["uma_b"])
 
 

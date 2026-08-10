@@ -109,11 +109,24 @@ class DirectorRuntime:
         attempts = max(0, int(self.settings.DIRECTOR_JSON_REPAIR_ATTEMPTS)) + 1
         request_messages = list(messages)
         for attempt in range(attempts):
-            raw = await self.json_runtime.create_json_completion(
+            completion = await self.json_runtime.create_json_completion_result(
                 request_messages,
                 temperature=float(self.settings.DIRECTOR_LLM_TEMPERATURE),
                 max_tokens=max(64, int(self.settings.DIRECTOR_LLM_MAX_TOKENS)),
+                force_prompt_only=attempt > 0,
             )
+            if not completion.can_parse:
+                logger.warning(
+                    "Director plan discarded because finish_reason=%s after "
+                    "%s length retries; partial output will not enter repair context",
+                    completion.finish_reason,
+                    completion.length_retries,
+                )
+                return self._fallback_plan(
+                    fallback_actor_ids,
+                    allowed_actor_ids,
+                )
+            raw = completion.content
             try:
                 plan = self._parse_plan(raw)
                 sanitized = self._sanitize_plan(

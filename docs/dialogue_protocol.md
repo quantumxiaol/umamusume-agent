@@ -111,11 +111,19 @@ API Key、模型名和 Base URL 等普通错误不会被当成能力降级。
 
 默认失败链路：
 
-1. 正常 JSON 请求。
-2. 解析失败后进行有界 prompt-only JSON 修复。
-3. 修复仍失败时，移除失败输出，基于最近训练员事件重生成。
-4. 仍无可用 `dialogue` 才返回角色中性安全提示：
+1. 正常 JSON 请求使用初始输出预算。
+2. 若上游返回 `finish_reason=length`，丢弃截断内容，保持本阶段原始
+   `messages` 不变，将 `max_tokens` 翻倍后有界重试；截断内容不会进入 repair。
+3. 只有 `finish_reason=stop`、内容完整但 JSON 解析失败时，才进行有界
+   prompt-only JSON 修复。
+4. 修复仍失败时，移除失败输出，基于最近训练员事件重生成。
+5. 仍无可用 `dialogue` 才返回角色中性安全提示：
    `抱歉，刚才有点没听清，可以再说一次吗？`
+
+默认角色初始预算为 `1024`，导演计划初始预算为 `1536`；动态重试最多两次，
+并受 `LLM_JSON_MAX_DYNAMIC_TOKENS=8192` 硬上限约束。每次上游响应的日志会记录
+`finish_reason`、`completion_tokens`、`reasoning_tokens` 与缓存 token，方便定位
+思考模型消耗和输出截断。
 
 安全提示以 `source_format=parse_error` 写入历史，不包含任何角色名、角色自称或
 特定训练员称呼。
