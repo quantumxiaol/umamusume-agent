@@ -171,6 +171,7 @@ class CharacterRuntime:
         temperature: float,
         max_tokens: int,
         force_prompt_only: bool = False,
+        thinking: bool | None = None,
     ) -> JsonCompletionResult:
         mode = json_output_mode(self.settings)
         key = self._json_capability_key()
@@ -204,6 +205,12 @@ class CharacterRuntime:
             }
             if send_response_format:
                 kwargs["response_format"] = {"type": "json_object"}
+            if thinking is not None:
+                kwargs["extra_body"] = {
+                    "thinking": {
+                        "type": "enabled" if thinking else "disabled",
+                    }
+                }
 
             try:
                 response = await self.llm_client.chat.completions.create(**kwargs)

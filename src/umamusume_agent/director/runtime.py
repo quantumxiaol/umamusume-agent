@@ -7,7 +7,18 @@ from typing import Any
 
 from ..dialogue.protocol import load_json_object_from_text
 from ..dialogue.runtime import CharacterRuntime
-from .models import DirectorPlan, DirectorSpeakerPlan
+from .models import (
+    DirectorApproachAction,
+    DirectorFaceAction,
+    DirectorFaceActorAction,
+    DirectorFollowAction,
+    DirectorMoveAction,
+    DirectorPlan,
+    DirectorSpeakerPlan,
+    DirectorStageAction,
+    DirectorStopFollowAction,
+    DirectorStopAction,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -24,10 +35,14 @@ class DirectorRuntime:
         json_runtime: CharacterRuntime,
         settings: Any,
         max_speakers: int,
+        max_stage_actions: int = 4,
+        thinking_mode: str = "auto",
     ):
         self.json_runtime = json_runtime
         self.settings = settings
         self.max_speakers = max(1, max_speakers)
+        self.max_stage_actions = max(0, max_stage_actions)
+        self.thinking_mode = thinking_mode.strip().lower()
 
     @staticmethod
     def _parse_plan(raw: str) -> DirectorPlan:
@@ -39,6 +54,8 @@ class DirectorRuntime:
             normalized["narration"] = ""
         if not isinstance(normalized.get("speakers"), list):
             normalized["speakers"] = []
+        if not isinstance(normalized.get("stage_actions"), list):
+            normalized["stage_actions"] = []
         return DirectorPlan.model_validate(normalized)
 
     def _sanitize_plan(
@@ -47,6 +64,9 @@ class DirectorRuntime:
         *,
         allowed_actor_ids: set[str],
         allowed_target_ids: set[str],
+        allowed_anchor_ids: set[str] | None,
+        allowed_stage_actor_ids: set[str] | None,
+        allowed_stage_target_actor_ids: set[str] | None,
     ) -> DirectorPlan:
         speakers: list[DirectorSpeakerPlan] = []
         seen: set[str] = set()
@@ -75,7 +95,103 @@ class DirectorRuntime:
             seen.add(actor_id)
             if len(speakers) >= self.max_speakers:
                 break
-        return plan.model_copy(update={"speakers": speakers}, deep=True)
+        stage_actions: list[DirectorStageAction] = []
+        if (
+            allowed_anchor_ids is not None
+            and allowed_stage_actor_ids is not None
+            and self.max_stage_actions > 0
+        ):
+            for action in plan.stage_actions:
+                actor_id = action.actor_id.strip()
+                if (
+                    not actor_id
+                    or actor_id not in allowed_stage_actor_ids
+                ):
+                    continue
+                if isinstance(action, DirectorMoveAction):
+                    anchor_id = action.anchor_id.strip()
+                    if not anchor_id or anchor_id not in allowed_anchor_ids:
+                        continue
+                    stage_actions.append(
+                        DirectorMoveAction(
+                            type="actor.move_to",
+                            actor_id=actor_id,
+                            anchor_id=anchor_id,
+                            slot_id=(action.slot_id or "").strip() or None,
+                        )
+                    )
+                elif isinstance(action, DirectorFaceAction):
+                    stage_actions.append(
+                        DirectorFaceAction(
+                            type="actor.face",
+                            actor_id=actor_id,
+                            facing=action.facing,
+                        )
+                    )
+                elif isinstance(action, DirectorFaceActorAction):
+                    target_actor_id = action.target_actor_id.strip()
+                    if (
+                        allowed_stage_target_actor_ids is None
+                        or target_actor_id not in allowed_stage_target_actor_ids
+                        or target_actor_id == actor_id
+                    ):
+                        continue
+                    stage_actions.append(
+                        DirectorFaceActorAction(
+                            type="actor.face_actor",
+                            actor_id=actor_id,
+                            target_actor_id=target_actor_id,
+                        )
+                    )
+                elif isinstance(action, DirectorApproachAction):
+                    target_actor_id = action.target_actor_id.strip()
+                    if (
+                        allowed_stage_target_actor_ids is None
+                        or target_actor_id not in allowed_stage_target_actor_ids
+                        or target_actor_id == actor_id
+                    ):
+                        continue
+                    stage_actions.append(
+                        DirectorApproachAction(
+                            type="actor.approach",
+                            actor_id=actor_id,
+                            target_actor_id=target_actor_id,
+                            distance_tiles=action.distance_tiles,
+                        )
+                    )
+                elif isinstance(action, DirectorFollowAction):
+                    target_actor_id = action.target_actor_id.strip()
+                    if (
+                        allowed_stage_target_actor_ids is None
+                        or target_actor_id not in allowed_stage_target_actor_ids
+                        or target_actor_id == actor_id
+                    ):
+                        continue
+                    stage_actions.append(
+                        DirectorFollowAction(
+                            type="actor.follow",
+                            actor_id=actor_id,
+                            target_actor_id=target_actor_id,
+                            distance_tiles=action.distance_tiles,
+                        )
+                    )
+                elif isinstance(action, DirectorStopFollowAction):
+                    stage_actions.append(
+                        DirectorStopFollowAction(
+                            type="actor.stop_follow",
+                            actor_id=actor_id,
+                        )
+                    )
+                elif isinstance(action, DirectorStopAction):
+                    stage_actions.append(
+                        DirectorStopAction(type="actor.stop", actor_id=actor_id)
+                    )
+                if len(stage_actions) >= self.max_stage_actions:
+                    break
+        return plan.model_copy(
+            update={"speakers": speakers, "stage_actions": stage_actions},
+            deep=True,
+        )
 
     @staticmethod
     def _fallback_plan(
@@ -105,6 +221,10 @@ class DirectorRuntime:
         allowed_actor_ids: set[str],
         allowed_target_ids: set[str],
         fallback_actor_ids: list[str],
+        allowed_anchor_ids: set[str] | None = None,
+        allowed_stage_actor_ids: set[str] | None = None,
+        allowed_stage_target_actor_ids: set[str] | None = None,
+        require_speaker: bool = True,
     ) -> DirectorPlan:
         attempts = max(0, int(self.settings.DIRECTOR_JSON_REPAIR_ATTEMPTS)) + 1
         request_messages = list(messages)
@@ -114,6 +234,7 @@ class DirectorRuntime:
                 temperature=float(self.settings.DIRECTOR_LLM_TEMPERATURE),
                 max_tokens=max(64, int(self.settings.DIRECTOR_LLM_MAX_TOKENS)),
                 force_prompt_only=attempt > 0,
+                thinking=self._thinking_enabled(),
             )
             if not completion.can_parse:
                 logger.warning(
@@ -122,9 +243,10 @@ class DirectorRuntime:
                     completion.finish_reason,
                     completion.length_retries,
                 )
-                return self._fallback_plan(
-                    fallback_actor_ids,
-                    allowed_actor_ids,
+                return (
+                    self._fallback_plan(fallback_actor_ids, allowed_actor_ids)
+                    if require_speaker
+                    else DirectorPlan()
                 )
             raw = completion.content
             try:
@@ -133,8 +255,11 @@ class DirectorRuntime:
                     plan,
                     allowed_actor_ids=allowed_actor_ids,
                     allowed_target_ids=allowed_target_ids,
+                    allowed_anchor_ids=allowed_anchor_ids,
+                    allowed_stage_actor_ids=allowed_stage_actor_ids,
+                    allowed_stage_target_actor_ids=allowed_stage_target_actor_ids,
                 )
-                if not sanitized.speakers:
+                if require_speaker and not sanitized.speakers:
                     fallback = self._fallback_plan(
                         fallback_actor_ids,
                         allowed_actor_ids,
@@ -157,4 +282,15 @@ class DirectorRuntime:
                 ]
 
         logger.warning("Director plan fallback activated after parse failures")
-        return self._fallback_plan(fallback_actor_ids, allowed_actor_ids)
+        return (
+            self._fallback_plan(fallback_actor_ids, allowed_actor_ids)
+            if require_speaker
+            else DirectorPlan()
+        )
+
+    def _thinking_enabled(self) -> bool | None:
+        if self.thinking_mode == "enabled":
+            return True
+        if self.thinking_mode == "disabled":
+            return False
+        return None

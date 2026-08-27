@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -101,11 +101,67 @@ class DirectorSpeakerPlan(BaseModel):
     intent: str
 
 
+class DirectorMoveAction(BaseModel):
+    type: Literal["actor.move_to"]
+    actor_id: str
+    anchor_id: str
+    slot_id: str | None = None
+
+
+class DirectorFaceAction(BaseModel):
+    type: Literal["actor.face"]
+    actor_id: str
+    facing: Literal["down", "left", "right", "up"]
+
+
+class DirectorFaceActorAction(BaseModel):
+    type: Literal["actor.face_actor"]
+    actor_id: str
+    target_actor_id: str
+
+
+class DirectorApproachAction(BaseModel):
+    type: Literal["actor.approach"]
+    actor_id: str
+    target_actor_id: str
+    distance_tiles: int = Field(default=1, ge=1, le=4)
+
+
+class DirectorFollowAction(BaseModel):
+    type: Literal["actor.follow"]
+    actor_id: str
+    target_actor_id: str
+    distance_tiles: int = Field(default=2, ge=1, le=4)
+
+
+class DirectorStopFollowAction(BaseModel):
+    type: Literal["actor.stop_follow"]
+    actor_id: str
+
+
+class DirectorStopAction(BaseModel):
+    type: Literal["actor.stop"]
+    actor_id: str
+
+
+DirectorStageAction = Annotated[
+    DirectorMoveAction
+    | DirectorFaceAction
+    | DirectorFaceActorAction
+    | DirectorApproachAction
+    | DirectorFollowAction
+    | DirectorStopFollowAction
+    | DirectorStopAction,
+    Field(discriminator="type"),
+]
+
+
 class DirectorPlan(BaseModel):
     schema_version: int = DIRECTOR_SCHEMA_VERSION
     scene_patch: SceneStatePatch = Field(default_factory=SceneStatePatch)
     narration: str = ""
     speakers: list[DirectorSpeakerPlan] = Field(default_factory=list)
+    stage_actions: list[DirectorStageAction] = Field(default_factory=list)
 
 
 class SceneRecoverySnapshot(BaseModel):

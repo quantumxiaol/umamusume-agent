@@ -73,7 +73,9 @@ from ..director.session import SceneSession
 from ..director.templates import SceneTemplateRepository
 from ..tts import MCPToolError, TTSMCPClient, VoiceService
 from ..config import config
+from ..stage import StageDirectorContextBuilder, StageSceneService
 from .director_routes import create_director_router
+from .stage_routes import create_stage_router
 
 # 配置日志
 logging.basicConfig(
@@ -114,6 +116,7 @@ _CHAT_ENDPOINTS = {
     "/chat_stream",
     "/director/turn",
     "/director/turn_stream",
+    "/stage/turn",
 }
 _rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
 _rate_limit_lock = asyncio.Lock()
@@ -141,11 +144,22 @@ director_context_builder = DirectorContextBuilder(
     settings=config,
     max_speakers=config.DIRECTOR_MAX_SPEAKERS_PER_TURN,
 )
+stage_director_context_builder = StageDirectorContextBuilder(
+    settings=config,
+    max_speakers=config.DIRECTOR_MAX_SPEAKERS_PER_TURN,
+)
 character_scene_context_builder = CharacterSceneContextBuilder(settings=config)
 director_runtime = DirectorRuntime(
     json_runtime=character_runtime,
     settings=config,
     max_speakers=config.DIRECTOR_MAX_SPEAKERS_PER_TURN,
+)
+stage_director_runtime = DirectorRuntime(
+    json_runtime=character_runtime,
+    settings=config,
+    max_speakers=config.DIRECTOR_MAX_SPEAKERS_PER_TURN,
+    max_stage_actions=config.DIRECTOR_MAX_STAGE_ACTIONS_PER_TURN,
+    thinking_mode=config.STAGE_DIRECTOR_LLM_THINKING_MODE,
 )
 director_service = DirectorService(
     character_manager=character_manager,
@@ -157,6 +171,17 @@ director_service = DirectorService(
     history_dir=DIRECTOR_HISTORY_DIR,
     max_participants=config.DIRECTOR_MAX_PARTICIPANTS,
 )
+stage_director_service = DirectorService(
+    character_manager=character_manager,
+    character_runtime=character_runtime,
+    director_runtime=stage_director_runtime,
+    template_repository=scene_template_repository,
+    director_context_builder=stage_director_context_builder,
+    character_context_builder=character_scene_context_builder,
+    history_dir=DIRECTOR_HISTORY_DIR,
+    max_participants=config.DIRECTOR_MAX_PARTICIPANTS,
+)
+stage_scene_service = StageSceneService(stage_director_service)
 
 # FastAPI 应用
 app = FastAPI(title="Umamusume-Dialogue-Server", version="0.2.0")
@@ -178,6 +203,16 @@ app.include_router(
         session_ttl_seconds=config.DIRECTOR_SESSION_TTL_SECONDS,
         voice_service=voice_service,
         enable_tts=ENABLE_TTS,
+    )
+)
+stage_sessions: dict[str, SceneSession] = {}
+app.include_router(
+    create_stage_router(
+        director_service=stage_director_service,
+        stage_service=stage_scene_service,
+        sessions=stage_sessions,
+        session_ttl_seconds=config.DIRECTOR_SESSION_TTL_SECONDS,
+        max_stage_actions=config.DIRECTOR_MAX_STAGE_ACTIONS_PER_TURN,
     )
 )
 
@@ -846,6 +881,8 @@ async def capabilities():
         "director_history_resume": 1,
         "director_browser_recovery": 1,
         "director_reply_regenerate": 1,
+        "stage_api": 1,
+        "stage_api_schema_version": "agent_stage_api.v1",
         "tts_jobs": 1 if ENABLE_TTS else 0,
         "tts_manual_playback": 1 if ENABLE_TTS else 0,
         "director_max_participants": config.DIRECTOR_MAX_PARTICIPANTS,

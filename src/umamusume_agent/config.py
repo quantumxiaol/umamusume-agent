@@ -226,11 +226,18 @@ class Config:
     DIRECTOR_MAX_SPEAKERS_PER_TURN: int = int(os.getenv("DIRECTOR_MAX_SPEAKERS_PER_TURN", "2"))
     DIRECTOR_LLM_TEMPERATURE: float = float(os.getenv("DIRECTOR_LLM_TEMPERATURE", "0.2"))
     DIRECTOR_LLM_MAX_TOKENS: int = int(os.getenv("DIRECTOR_LLM_MAX_TOKENS", "1536"))
+    STAGE_DIRECTOR_LLM_THINKING_MODE: str = os.getenv(
+        "STAGE_DIRECTOR_LLM_THINKING_MODE",
+        "auto",
+    )
     DIRECTOR_JSON_REPAIR_ATTEMPTS: int = int(os.getenv("DIRECTOR_JSON_REPAIR_ATTEMPTS", "1"))
     DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES: int = int(
         os.getenv("DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES", "25")
     )
     DIRECTOR_SESSION_TTL_SECONDS: int = int(os.getenv("DIRECTOR_SESSION_TTL_SECONDS", "3600"))
+    DIRECTOR_MAX_STAGE_ACTIONS_PER_TURN: int = int(
+        os.getenv("DIRECTOR_MAX_STAGE_ACTIONS_PER_TURN", "4")
+    )
     _scene_templates_dir = os.getenv("SCENE_TEMPLATES_DIRECTORY", "./scenes")
     SCENE_TEMPLATES_DIRECTORY: str = _resolve_project_path(_scene_templates_dir)
     DIRECTOR_HISTORY_DIRECTORY: str = _resolve_project_path(

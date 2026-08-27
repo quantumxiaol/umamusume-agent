@@ -32,6 +32,7 @@ from .models import (
     ActorInstance,
     CustomSceneDefinition,
     DirectorPlan,
+    DirectorStageAction,
     SceneEvent,
     SceneRecoverySnapshot,
     SceneState,
@@ -65,6 +66,32 @@ class DirectorService:
         self.character_context_builder = character_context_builder
         self.history_dir = history_dir
         self.max_participants = max(1, max_participants)
+
+    @staticmethod
+    def _stage_anchor_ids(stage_context: dict | None) -> set[str] | None:
+        if stage_context is None:
+            return None
+        anchors = stage_context.get("anchors")
+        if not isinstance(anchors, list):
+            return set()
+        return {
+            anchor["id"]
+            for anchor in anchors
+            if isinstance(anchor, dict) and isinstance(anchor.get("id"), str)
+        }
+
+    @staticmethod
+    def _stage_actor_ids(stage_context: dict | None) -> set[str] | None:
+        if stage_context is None:
+            return None
+        actors = stage_context.get("actors")
+        if not isinstance(actors, list):
+            return set()
+        return {
+            actor["actor_id"]
+            for actor in actors
+            if isinstance(actor, dict) and isinstance(actor.get("actor_id"), str)
+        }
 
     async def create_session(
         self,
@@ -637,6 +664,10 @@ class DirectorService:
         self,
         session: SceneSession,
         input_events: list[DialogueInputEvent],
+        *,
+        stage_context: dict | None = None,
+        allowed_stage_actor_ids: set[str] | None = None,
+        stage_actions_output: list[DirectorStageAction] | None = None,
     ) -> AsyncIterator[SceneEvent]:
         if not input_events:
             raise ValueError("至少需要一个输入事件")
@@ -649,10 +680,24 @@ class DirectorService:
                 fallback_actor_ids.extend(event.target_actor_ids)
                 yield event
 
-            self.director_context_builder.append_turn(
-                session.director_thread,
-                timeline=session.timeline,
-            )
+            if stage_context is None:
+                self.director_context_builder.append_turn(
+                    session.director_thread,
+                    timeline=session.timeline,
+                )
+            else:
+                append_stage_turn = getattr(
+                    self.director_context_builder,
+                    "append_stage_turn",
+                    None,
+                )
+                if append_stage_turn is None:
+                    raise ValueError("当前导演会话不支持舞台上下文")
+                append_stage_turn(
+                    session.director_thread,
+                    timeline=session.timeline,
+                    stage_context=stage_context,
+                )
             plan = await self.director_runtime.generate_plan(
                 session.director_thread.snapshot(),
                 allowed_actor_ids=set(session.character_actor_ids),
@@ -661,6 +706,9 @@ class DirectorService:
                     *session.character_actor_ids,
                 },
                 fallback_actor_ids=list(dict.fromkeys(fallback_actor_ids)),
+                allowed_anchor_ids=self._stage_anchor_ids(stage_context),
+                allowed_stage_actor_ids=allowed_stage_actor_ids,
+                allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
             )
             self.director_context_builder.record_plan(
                 session.director_thread,
@@ -676,6 +724,9 @@ class DirectorService:
                     hidden=True,
                 )
             )
+
+            if stage_actions_output is not None:
+                stage_actions_output.extend(plan.stage_actions)
 
             if plan.scene_patch.updates():
                 scene_event = session.append_event(
@@ -823,3 +874,134 @@ class DirectorService:
             event
             async for event in self.stream_turn(session, input_events)
         ]
+
+    async def execute_single_character_stage_turn(
+        self,
+        session: SceneSession,
+        input_events: list[DialogueInputEvent],
+        *,
+        stage_context: dict,
+        allowed_stage_actor_ids: set[str],
+    ) -> tuple[list[SceneEvent], list[DirectorStageAction]]:
+        """Generate the character reply, then let Director stage that reply."""
+
+        if not input_events:
+            raise ValueError("至少需要一个输入事件")
+        if len(session.character_actor_ids) != 1:
+            raise ValueError("单角色舞台链路要求会话中恰好有一个角色")
+
+        async with session.lock:
+            session.turn_index += 1
+            events = [
+                self._append_input_event(session, item)
+                for item in input_events
+            ]
+            actor_id = session.character_actor_ids[0]
+            participant = next(
+                item
+                for item in session.participants
+                if item.actor.actor_id == actor_id
+            )
+            actor = participant.actor
+            intent = (
+                "直接回应训练员最新输入；若其中包含行动要求，"
+                "在语言动作和对白中自然体现，不要替训练员发言。"
+            )
+            session.append_event(
+                SceneEvent(
+                    turn_index=session.turn_index,
+                    event_type="actor_directive",
+                    actor=self._director_actor(),
+                    target_actor_ids=[actor_id],
+                    visible_to=[actor_id],
+                    content=intent,
+                    hidden=True,
+                )
+            )
+            thread = session.actor_threads[actor_id]
+            context = self.character_context_builder.build_reply_context(
+                thread,
+                actor=actor,
+                timeline=session.timeline,
+                intent=intent,
+                target_actor_ids=[session.player.actor_id],
+            )
+            reply = await self.character_runtime.generate_reply(context)
+            self.character_context_builder.record_reply(thread, reply)
+            reply_event = session.append_event(
+                SceneEvent(
+                    turn_index=session.turn_index,
+                    event_type="character_reply",
+                    actor=actor,
+                    target_actor_ids=[session.player.actor_id],
+                    action=reply.action,
+                    dialogue=reply.dialogue,
+                    content=reply.dialogue,
+                    source_format=reply.source_format,
+                )
+            )
+            thread.last_seen_sequence = reply_event.sequence
+            events.append(reply_event)
+
+            append_stage_turn = getattr(
+                self.director_context_builder,
+                "append_stage_turn",
+                None,
+            )
+            if append_stage_turn is None:
+                raise ValueError("当前导演会话不支持舞台上下文")
+            append_stage_turn(
+                session.director_thread,
+                timeline=session.timeline,
+                stage_context=stage_context,
+                action_only=True,
+            )
+            plan = await self.director_runtime.generate_plan(
+                session.director_thread.snapshot(),
+                allowed_actor_ids=set(session.character_actor_ids),
+                allowed_target_ids={
+                    session.player.actor_id,
+                    *session.character_actor_ids,
+                },
+                fallback_actor_ids=[],
+                allowed_anchor_ids=self._stage_anchor_ids(stage_context),
+                allowed_stage_actor_ids=allowed_stage_actor_ids,
+                allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
+                require_speaker=False,
+            )
+            self.director_context_builder.record_plan(
+                session.director_thread,
+                plan,
+            )
+            session.append_event(
+                SceneEvent(
+                    turn_index=session.turn_index,
+                    event_type="director_plan",
+                    actor=self._director_actor(),
+                    content=plan.model_dump_json(exclude_none=True),
+                    visible_to=[],
+                    hidden=True,
+                )
+            )
+            return events, list(plan.stage_actions)
+
+    async def execute_stage_turn(
+        self,
+        session: SceneSession,
+        input_events: list[DialogueInputEvent],
+        *,
+        stage_context: dict,
+        allowed_stage_actor_ids: set[str],
+    ) -> tuple[list[SceneEvent], list[DirectorStageAction]]:
+        stage_actions: list[DirectorStageAction] = []
+        events = [
+            event
+            async for event in self.stream_turn(
+                session,
+                input_events,
+                stage_context=stage_context,
+                allowed_stage_actor_ids=allowed_stage_actor_ids,
+                stage_actions_output=stage_actions,
+            )
+        ]
+        return events, stage_actions

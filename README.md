@@ -182,6 +182,18 @@ curl http://127.0.0.1:1111/characters
 }
 ```
 
+### Stage 演出 API（增量接口）
+
+`umamusume-agent-stage` 使用独立的浏览器权威 Runtime；本服务不会反向连接或直接控制浏览器。新增接口只复用导演模式的角色、会话和生成能力，不改变 `/chat` 与 `/director/*`：
+
+- `GET /stage/capabilities`：Stage 协议版本及动作类型；
+- `POST /stage/sessions`：建立使用 Stage 专用导演提示词的角色会话；
+- `POST /stage/turn`：接收 `live_stage + actor_bindings + events`，返回公开事件与 `stage_actions`。
+
+`stage_actions` 当前包含 `actor.move_to`、`actor.approach`、`actor.follow`、`actor.stop_follow`、`actor.face`、`actor.stop` 和由角色回复生成的 `dialogue.say`。`actor.approach` 只走近一次；`actor.follow` 会持续追踪目标，直到 `actor.stop_follow`、`actor.stop` 或其他移动命令替换它。浏览器负责将动作转换成自己的 `StageCommand`，并执行碰撞、寻路和控制权检查。
+
+普通 `/director/*` 与 `/stage/*` 使用两个独立的 `DirectorRuntime` 实例：共享实现，但普通 Director 保持供应商原始模型配置；只有 Stage Director 读取 `STAGE_DIRECTOR_LLM_THINKING_MODE`。本地建议设为 `disabled` 以降低纯动作 JSON 规划的延迟。普通导演会话不会注入 Stage 上下文，也不会向外发送请求。
+
 ### 2. 启动前端
 
 ```bash

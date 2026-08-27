@@ -82,6 +82,8 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `DIRECTOR_JSON_REPAIR_ATTEMPTS` | `1` | 导演计划 JSON 修复次数 |
 | `DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES` | `25` | 按导演/单角色自己的回复数再注入 |
 | `DIRECTOR_SESSION_TTL_SECONDS` | `3600` | 内存场景 TTL |
+| `DIRECTOR_MAX_STAGE_ACTIONS_PER_TURN` | `4` | Stage Director 每轮最多返回的舞台动作数 |
+| `STAGE_DIRECTOR_LLM_THINKING_MODE` | `auto` | 仅控制 `/stage/*` Director 的思考模式；`disabled` 可降低动作规划延迟，不影响普通 `/director/*` |
 | `SCENE_TEMPLATES_DIRECTORY` | `./scenes` | 场景预设目录 |
 | `DIRECTOR_HISTORY_DIRECTORY` | `./outputs/director` | 导演 JSONL 副本目录 |
 

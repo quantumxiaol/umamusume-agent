@@ -406,10 +406,11 @@ class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.speakers[0].target_actor_ids, ["player"])
 
     async def test_director_runtime_adds_one_fallback_speaker_to_empty_plan(self):
+        json_runtime = _FakeJsonRuntime(
+            [json.dumps({"narration": "风吹过河面。", "speakers": []})]
+        )
         runtime = DirectorRuntime(
-            json_runtime=_FakeJsonRuntime(
-                [json.dumps({"narration": "风吹过河面。", "speakers": []})]
-            ),
+            json_runtime=json_runtime,
             settings=_Settings,
             max_speakers=2,
         )
@@ -423,6 +424,28 @@ class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plan.narration, "风吹过河面。")
         self.assertEqual([item.actor_id for item in plan.speakers], ["uma_b"])
+        self.assertIsNone(json_runtime.calls[0][1]["thinking"])
+
+    async def test_stage_director_can_disable_thinking_independently(self):
+        json_runtime = _FakeJsonRuntime(
+            [json.dumps({"stage_actions": [], "speakers": []})]
+        )
+        runtime = DirectorRuntime(
+            json_runtime=json_runtime,
+            settings=_Settings,
+            max_speakers=2,
+            thinking_mode="disabled",
+        )
+
+        await runtime.generate_plan(
+            [{"role": "system", "content": "stage director"}],
+            allowed_actor_ids={"uma_a"},
+            allowed_target_ids={"player", "uma_a"},
+            fallback_actor_ids=[],
+            require_speaker=False,
+        )
+
+        self.assertFalse(json_runtime.calls[0][1]["thinking"])
 
     async def test_director_runtime_does_not_repair_truncated_output(self):
         json_runtime = _FakeJsonRuntime(
