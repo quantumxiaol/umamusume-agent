@@ -667,6 +667,7 @@ class DirectorService:
         *,
         stage_context: dict | None = None,
         allowed_stage_actor_ids: set[str] | None = None,
+        allowed_dialogue_actor_ids: set[str] | None = None,
         stage_actions_output: list[DirectorStageAction] | None = None,
     ) -> AsyncIterator[SceneEvent]:
         if not input_events:
@@ -698,12 +699,15 @@ class DirectorService:
                     timeline=session.timeline,
                     stage_context=stage_context,
                 )
+            dialogue_actor_ids = set(session.character_actor_ids)
+            if allowed_dialogue_actor_ids is not None:
+                dialogue_actor_ids.intersection_update(allowed_dialogue_actor_ids)
             plan = await self.director_runtime.generate_plan(
                 session.director_thread.snapshot(),
-                allowed_actor_ids=set(session.character_actor_ids),
+                allowed_actor_ids=dialogue_actor_ids,
                 allowed_target_ids={
                     session.player.actor_id,
-                    *session.character_actor_ids,
+                    *dialogue_actor_ids,
                 },
                 fallback_actor_ids=list(dict.fromkeys(fallback_actor_ids)),
                 allowed_anchor_ids=self._stage_anchor_ids(stage_context),
@@ -992,6 +996,7 @@ class DirectorService:
         *,
         stage_context: dict,
         allowed_stage_actor_ids: set[str],
+        allowed_agent_actor_ids: set[str] | None = None,
     ) -> tuple[list[SceneEvent], list[DirectorStageAction]]:
         stage_actions: list[DirectorStageAction] = []
         events = [
@@ -1001,6 +1006,7 @@ class DirectorService:
                 input_events,
                 stage_context=stage_context,
                 allowed_stage_actor_ids=allowed_stage_actor_ids,
+                allowed_dialogue_actor_ids=allowed_agent_actor_ids,
                 stage_actions_output=stage_actions,
             )
         ]

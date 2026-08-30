@@ -344,6 +344,52 @@ class StageIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     actor_bindings=[],
                 )
 
+    async def test_stage_service_allows_unbound_character_in_another_scene(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            director_runtime = _StageAwareDirectorRuntime()
+            director_service = DirectorService(
+                character_manager=_CharacterManager(),
+                character_runtime=_FakeCharacterRuntime(),
+                director_runtime=director_runtime,
+                template_repository=_TemplateRepository(),
+                director_context_builder=StageDirectorContextBuilder(
+                    settings=_Settings,
+                    max_speakers=2,
+                ),
+                character_context_builder=CharacterSceneContextBuilder(
+                    settings=_Settings
+                ),
+                history_dir=Path(temp_dir),
+                max_participants=3,
+            )
+            session = await director_service.create_session(
+                user_uuid="00000000-0000-4000-8000-000000000001",
+                template_id="test_scene",
+                character_names=["角色A", "角色B"],
+            )
+
+            result = await StageSceneService(director_service).execute_turn(
+                session,
+                [
+                    DialogueInputEvent(
+                        content="你在这里跑步吧",
+                        target_actor_ids=["uma_a"],
+                    )
+                ],
+                live_stage=_live_stage(),
+                actor_bindings=[
+                    StageActorBinding(agent_actor_id="uma_a", stage_actor_id="uma_a")
+                ],
+            )
+
+            self.assertEqual(
+                [action.type for action in result.actions],
+                ["actor.move_to", "dialogue.say"],
+            )
+            _, kwargs = director_runtime.calls[0]
+            self.assertEqual(kwargs["allowed_actor_ids"], {"uma_a"})
+            self.assertEqual(kwargs["allowed_target_ids"], {"player", "uma_a"})
+
 
 if __name__ == "__main__":
     unittest.main()

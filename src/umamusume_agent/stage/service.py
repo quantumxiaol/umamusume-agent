@@ -36,6 +36,7 @@ class StageSceneService:
     ) -> StageTurnResult:
         binding_by_agent = self._validate_bindings(
             session,
+            input_events=input_events,
             live_stage=live_stage,
             actor_bindings=actor_bindings,
         )
@@ -83,6 +84,7 @@ class StageSceneService:
                 allowed_stage_actor_ids={
                     binding.stage_actor_id for binding in actor_bindings
                 },
+                allowed_agent_actor_ids=set(binding_by_agent),
             )
             actions = list(director_actions)
         for event in events:
@@ -108,6 +110,7 @@ class StageSceneService:
     def _validate_bindings(
         session: SceneSession,
         *,
+        input_events: list[DialogueInputEvent],
         live_stage: LiveStageContext,
         actor_bindings: list[StageActorBinding],
     ) -> dict[str, StageActorBinding]:
@@ -132,7 +135,18 @@ class StageSceneService:
             binding_by_agent[binding.agent_actor_id] = binding
             seen_stage_ids.add(binding.stage_actor_id)
 
-        missing = set(session.character_actor_ids) - set(binding_by_agent)
+        required_agent_ids: set[str] = set()
+        for event in input_events:
+            if event.target_actor_ids is None:
+                required_agent_ids.update(session.character_actor_ids)
+            else:
+                required_agent_ids.update(event.target_actor_ids)
+        unknown = required_agent_ids - set(session.character_actor_ids)
+        if unknown:
+            raise ValueError(
+                f"本轮目标角色不属于当前会话: {', '.join(sorted(unknown))}"
+            )
+        missing = required_agent_ids - set(binding_by_agent)
         if missing:
             raise ValueError(f"缺少 Stage 角色绑定: {', '.join(sorted(missing))}")
         return binding_by_agent
