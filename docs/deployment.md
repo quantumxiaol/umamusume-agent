@@ -116,8 +116,8 @@ app_port: 7860
 | Variable | `ROLEPLAY_LLM_MODEL_NAME` | 选择的模型 ID | 是 |
 | Variable | `ROLEPLAY_LLM_MODEL_BASE_URL` | 厂商官方 OpenAI 兼容 Base URL | 是 |
 | Secret | `ROLEPLAY_LLM_MODEL_API_KEY` | 真实 LLM API Key | 是 |
-| Variable | `LLM_JSON_MAX_TOKENS` | `1024` | 建议显式配置 |
-| Variable | `DIRECTOR_LLM_MAX_TOKENS` | `1536` | 建议显式配置 |
+| Variable | `LLM_JSON_MAX_TOKENS` | `6144` | 可选；不填则使用仓库模板值 |
+| Variable | `DIRECTOR_LLM_MAX_TOKENS` | `6144` | 可选；不填则使用仓库模板值 |
 | Variable | `ENABLE_TTS` | `false` | 建议显式配置 |
 | Secret | `API_ACCESS_KEY` | 自定义随机字符串 | 可选 |
 
@@ -125,8 +125,12 @@ app_port: 7860
 [`configuration.md`](configuration.md)。
 
 部署包含动态预算逻辑的新版本后，还可按需覆盖
-`LLM_JSON_LENGTH_RETRY_ATTEMPTS=2` 和 `LLM_JSON_MAX_DYNAMIC_TOKENS=8192`。
+`LLM_JSON_LENGTH_RETRY_ATTEMPTS=2` 和 `LLM_JSON_MAX_DYNAMIC_TOKENS=12288`。
 修改 HF Variable 会触发 Space 重启；新进程启动后才会读取新值。
+
+使用 `https://api.deepseek.com` 时，前端会自动显示当前浏览器在本次 Space 实例中的
+最近 token 用量和缓存命中率。该功能直接读取模型响应的 usage 字段，不需要添加余额
+Secret，也不会调用余额接口；Space 重启后统计会重新开始。
 
 当前生产方案不启用 TTS，不要在 HF 填写本地
 `127.0.0.1:8002` Fish Speech 地址。

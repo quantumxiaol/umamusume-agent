@@ -12,6 +12,7 @@ from openai import APIConnectionError, APITimeoutError, APIStatusError
 
 from ..director.service import DirectorService
 from ..director.session import SceneSession
+from ..llm_usage import DeepSeekUsageTracker
 from ..stage.models import CreateStageSessionRequest, StageTurnRequest
 from ..stage.service import StageSceneService
 
@@ -45,6 +46,7 @@ def create_stage_router(
     sessions: MutableMapping[str, SceneSession],
     session_ttl_seconds: int,
     max_stage_actions: int,
+    usage_tracker: DeepSeekUsageTracker | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/stage", tags=["stage"])
     ttl_seconds = max(0, session_ttl_seconds)
@@ -122,12 +124,24 @@ def create_stage_router(
             )
         session = get_session(request.session_id, request.user_uuid)
         try:
-            result = await stage_service.execute_turn(
-                session,
-                request.events,
-                live_stage=request.live_stage,
-                actor_bindings=request.actor_bindings,
-            )
+            if usage_tracker is None:
+                result = await stage_service.execute_turn(
+                    session,
+                    request.events,
+                    live_stage=request.live_stage,
+                    actor_bindings=request.actor_bindings,
+                )
+            else:
+                with usage_tracker.operation(
+                    user_uuid=session.user_uuid,
+                    feature="stage_turn",
+                ):
+                    result = await stage_service.execute_turn(
+                        session,
+                        request.events,
+                        live_stage=request.live_stage,
+                        actor_bindings=request.actor_bindings,
+                    )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:

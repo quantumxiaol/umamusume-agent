@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import MutableMapping
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -17,6 +18,7 @@ from ..dialogue.models import DialogueInputEvent
 from ..director.models import CustomSceneDefinition, SceneRecoverySnapshot
 from ..director.service import DirectorService
 from ..director.session import SceneSession
+from ..llm_usage import DeepSeekUsageTracker
 
 
 class CreateDirectorSessionRequest(BaseModel):
@@ -77,6 +79,7 @@ def create_director_router(
     session_ttl_seconds: int,
     voice_service: Any | None = None,
     enable_tts: bool = False,
+    usage_tracker: DeepSeekUsageTracker | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/director", tags=["director"])
     ttl_seconds = max(0, session_ttl_seconds)
@@ -311,7 +314,14 @@ def create_director_router(
     async def director_turn(request: DirectorTurnRequest) -> dict[str, Any]:
         session = get_session(request.session_id, request.user_uuid)
         try:
-            events = await service.execute_turn(session, request.events)
+            if usage_tracker is None:
+                events = await service.execute_turn(session, request.events)
+            else:
+                with usage_tracker.operation(
+                    user_uuid=session.user_uuid,
+                    feature="director_turn",
+                ):
+                    events = await service.execute_turn(session, request.events)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -342,10 +352,20 @@ def create_director_router(
     ) -> dict[str, Any]:
         session = get_session(session_id, request.user_uuid)
         try:
-            event = await service.regenerate_reply(
-                session,
-                event_id=event_id,
-            )
+            if usage_tracker is None:
+                event = await service.regenerate_reply(
+                    session,
+                    event_id=event_id,
+                )
+            else:
+                with usage_tracker.operation(
+                    user_uuid=session.user_uuid,
+                    feature="director_regenerate",
+                ):
+                    event = await service.regenerate_reply(
+                        session,
+                        event_id=event_id,
+                    )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -369,19 +389,28 @@ def create_director_router(
 
         async def event_generator():
             try:
-                async for event in service.stream_turn(session, request.events):
-                    event_name = (
-                        "character_reply"
-                        if event.event_type == "character_reply"
-                        else "scene_event"
+                operation = (
+                    usage_tracker.operation(
+                        user_uuid=session.user_uuid,
+                        feature="director_turn",
                     )
-                    event_payload = event.model_dump(mode="json")
-                    if request.generate_voice:
-                        voice = await submit_event_voice(session, event)
-                        if voice:
-                            event_payload["voice"] = voice
-                    payload = json.dumps(event_payload, ensure_ascii=False)
-                    yield f"event: {event_name}\ndata: {payload}\n\n"
+                    if usage_tracker is not None
+                    else nullcontext()
+                )
+                with operation:
+                    async for event in service.stream_turn(session, request.events):
+                        event_name = (
+                            "character_reply"
+                            if event.event_type == "character_reply"
+                            else "scene_event"
+                        )
+                        event_payload = event.model_dump(mode="json")
+                        if request.generate_voice:
+                            voice = await submit_event_voice(session, event)
+                            if voice:
+                                event_payload["voice"] = voice
+                        payload = json.dumps(event_payload, ensure_ascii=False)
+                        yield f"event: {event_name}\ndata: {payload}\n\n"
                 state_payload = json.dumps(
                     session.timeline.state.model_dump(mode="json"),
                     ensure_ascii=False,

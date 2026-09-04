@@ -86,10 +86,11 @@ The director uses only actor IDs and compact cast metadata. A compact role
 constraint is appended according to that runtime's own reply count, controlled
 by `DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES`.
 
-Provider usage logs include `prompt_tokens`, `completion_tokens`, and
-`cached_tokens` when the compatible API returns those fields. A future history
-checkpoint may intentionally reset the prefix once; V1 keeps the event stream
-uncompacted.
+Provider usage logs include `prompt_tokens`, `completion_tokens`, reasoning and
+cache-hit tokens when the compatible API returns those fields. With an official
+DeepSeek base URL, a bounded in-memory ledger also groups these responses by
+browser and director turn for `GET /usage/recent`. A future history checkpoint
+may intentionally reset the prefix once; V1 keeps the event stream uncompacted.
 
 ## API
 

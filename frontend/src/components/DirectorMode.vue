@@ -31,6 +31,7 @@ const props = defineProps({
     default: false,
   },
 });
+const emit = defineEmits(['usage-changed']);
 
 const store = useDirectorStore();
 const input = ref('');
@@ -119,6 +120,7 @@ const regenerateReply = async (event) => {
     event,
     props.ttsEnabled && props.voiceEnabled,
   );
+  emit('usage-changed');
 };
 
 const toggleCharacter = (name) => {
@@ -170,7 +172,11 @@ const send = async () => {
   }
   const text = input.value;
   input.value = '';
-  await store.sendTurn(text, props.ttsEnabled && props.voiceEnabled);
+  await store.sendTurn(
+    text,
+    props.ttsEnabled && props.voiceEnabled,
+  );
+  emit('usage-changed');
 };
 
 const handleKeydown = async (event) => {

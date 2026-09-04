@@ -66,6 +66,7 @@ from ..dialogue.protocol import (
 from ..dialogue.runtime import CharacterRuntime
 from ..dialogue.service import DialogueService
 from ..dialogue.session import DialogueSession
+from ..llm_usage import DeepSeekUsageTracker
 from ..director.context import CharacterSceneContextBuilder, DirectorContextBuilder
 from ..director.runtime import DirectorRuntime
 from ..director.service import DirectorService
@@ -122,6 +123,13 @@ _rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
 _rate_limit_lock = asyncio.Lock()
 _response_format_unsupported: set[tuple[str, str]] = set()
 
+llm_usage_tracker = DeepSeekUsageTracker(
+    base_url=config.ROLEPLAY_LLM_MODEL_BASE_URL,
+    max_events=config.LLM_USAGE_MAX_EVENTS,
+    recent_operations=config.LLM_USAGE_RECENT_OPERATIONS,
+    display_timezone=config.LLM_USAGE_TIMEZONE,
+)
+
 voice_service = VoiceService(
     client=tts_client,
     outputs_dir=OUTPUTS_DIR,
@@ -131,6 +139,7 @@ character_runtime = CharacterRuntime(
     llm_client=llm_client,
     settings=config,
     response_format_unsupported=_response_format_unsupported,
+    usage_tracker=llm_usage_tracker,
 )
 legacy_context_builder = LegacyDialogueContextBuilder(settings=config)
 dialogue_service = DialogueService(
@@ -203,6 +212,7 @@ app.include_router(
         session_ttl_seconds=config.DIRECTOR_SESSION_TTL_SECONDS,
         voice_service=voice_service,
         enable_tts=ENABLE_TTS,
+        usage_tracker=llm_usage_tracker,
     )
 )
 stage_sessions: dict[str, SceneSession] = {}
@@ -213,6 +223,7 @@ app.include_router(
         sessions=stage_sessions,
         session_ttl_seconds=config.DIRECTOR_SESSION_TTL_SECONDS,
         max_stage_actions=config.DIRECTOR_MAX_STAGE_ACTIONS_PER_TURN,
+        usage_tracker=llm_usage_tracker,
     )
 )
 
@@ -833,6 +844,10 @@ async def _submit_single_voice(
 
 @app.on_event("startup")
 async def startup_session_cleanup():
+    logger.info(
+        "DeepSeek usage tracker %s (scope=current backend instance)",
+        "enabled" if llm_usage_tracker.enabled else "disabled",
+    )
     if SESSION_TTL_SECONDS <= 0:
         logger.info("Session TTL disabled, cleanup worker not started")
         app.state.session_cleanup_task = None
@@ -881,6 +896,7 @@ async def capabilities():
         "director_history_resume": 1,
         "director_browser_recovery": 1,
         "director_reply_regenerate": 1,
+        "deepseek_usage": 1 if llm_usage_tracker.enabled else 0,
         "stage_api": 1,
         "stage_api_schema_version": "agent_stage_api.v1",
         "tts_jobs": 1 if ENABLE_TTS else 0,
@@ -896,6 +912,14 @@ async def capabilities():
             "scene_event",
         ],
     }
+
+
+@app.get("/usage/recent")
+async def recent_llm_usage(user_uuid: str):
+    """Return this browser's in-memory DeepSeek usage, never account balance."""
+
+    normalized_user_uuid = _require_valid_user_uuid(user_uuid)
+    return llm_usage_tracker.snapshot(user_uuid=normalized_user_uuid)
 
 
 @app.post("/load_character")
@@ -958,15 +982,19 @@ async def chat(request: DialogueRequest):
     
     try:
         _sync_character_runtime_client()
-        turn_result = await dialogue_service.execute_turn(
-            session=session,
-            message=request.message,
-            text_only=request.text_only,
-            speaker=request.speaker,
-            event_type=request.event_type,
-            target_actor_ids=request.target_actor_ids,
-            context_events=request.context_events,
-        )
+        with llm_usage_tracker.operation(
+            user_uuid=session.user_uuid,
+            feature="dialogue_turn",
+        ):
+            turn_result = await dialogue_service.execute_turn(
+                session=session,
+                message=request.message,
+                text_only=request.text_only,
+                speaker=request.speaker,
+                event_type=request.event_type,
+                target_actor_ids=request.target_actor_ids,
+                context_events=request.context_events,
+            )
         result = turn_result.to_api_dict()
         
         # TTS submission is quick; translation and Fish Speech run inside the
@@ -1003,15 +1031,19 @@ async def chat_stream(request: DialogueRequest):
         try:
             if _is_json_reply_enabled():
                 _sync_character_runtime_client()
-                turn_result = await dialogue_service.execute_turn(
-                    session=session,
-                    message=request.message,
-                    text_only=request.text_only,
-                    speaker=request.speaker,
-                    event_type=request.event_type,
-                    target_actor_ids=request.target_actor_ids,
-                    context_events=request.context_events,
-                )
+                with llm_usage_tracker.operation(
+                    user_uuid=session.user_uuid,
+                    feature="dialogue_turn",
+                ):
+                    turn_result = await dialogue_service.execute_turn(
+                        session=session,
+                        message=request.message,
+                        text_only=request.text_only,
+                        speaker=request.speaker,
+                        event_type=request.event_type,
+                        target_actor_ids=request.target_actor_ids,
+                        context_events=request.context_events,
+                    )
 
                 payload = json.dumps(
                     turn_result.to_api_dict(),
@@ -1050,23 +1082,44 @@ async def chat_stream(request: DialogueRequest):
                 **_story_event_metadata(request, session),
             )
             
-            # 流式调用 LLM
-            stream = await llm_client.chat.completions.create(
-                model=config.ROLEPLAY_LLM_MODEL_NAME,
-                messages=session.get_messages(text_only=request.text_only),
-                temperature=0.7,
-                stream=True
-            )
-            
+            # 流式调用 LLM。DeepSeek 的最后一个 chunk 携带整次请求的
+            # usage；在同一个 operation scope 中记录，避免轮询余额接口。
+            stream_kwargs: Dict[str, Any] = {
+                "model": config.ROLEPLAY_LLM_MODEL_NAME,
+                "messages": session.get_messages(text_only=request.text_only),
+                "temperature": 0.7,
+                "stream": True,
+            }
+            if llm_usage_tracker.enabled:
+                stream_kwargs["stream_options"] = {"include_usage": True}
+
             full_reply_raw = ""
-            async for chunk in stream:
-                content = _extract_stream_delta_text(chunk)
-                if not content:
-                    continue
-                full_reply_raw += content
-                
-                # 发送 SSE 事件
-                yield f"data: {content}\n\n"
+            with llm_usage_tracker.operation(
+                user_uuid=session.user_uuid,
+                feature="dialogue_turn",
+            ):
+                request_started = monotonic()
+                stream = await llm_client.chat.completions.create(
+                    **stream_kwargs
+                )
+                async for chunk in stream:
+                    if getattr(chunk, "usage", None) is not None:
+                        character_runtime.log_usage(
+                            chunk,
+                            finish_reason=(
+                                character_runtime.extract_finish_reason(chunk)
+                            ),
+                            latency_ms=round(
+                                (monotonic() - request_started) * 1000
+                            ),
+                        )
+                    content = _extract_stream_delta_text(chunk)
+                    if not content:
+                        continue
+                    full_reply_raw += content
+
+                    # 发送 SSE 事件
+                    yield f"data: {content}\n\n"
 
             full_reply = _normalize_structured_reply(full_reply_raw)
             structured_reply = _structured_reply_from_legacy_text(full_reply, source_format="legacy_text")

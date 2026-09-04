@@ -46,14 +46,31 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `LLM_JSON_REGENERATE_ON_PARSE_FAILURE` | `true` | 修复失败后重生成 |
 | `LLM_JSON_MAX_REGENERATE_ATTEMPTS` | `1` | 最终安全降级前的重生成次数 |
 | `LLM_JSON_TEMPERATURE` | `0.35` | 角色 JSON 回复温度 |
-| `LLM_JSON_MAX_TOKENS` | `1024` | 角色 JSON 回复的初始输出预算 |
+| `LLM_JSON_MAX_TOKENS` | `6144` | 角色 JSON 回复的初始输出预算 |
 | `LLM_JSON_LENGTH_RETRY_ATTEMPTS` | `2` | `finish_reason=length` 时用原始消息翻倍预算重试的次数 |
-| `LLM_JSON_MAX_DYNAMIC_TOKENS` | `8192` | 动态扩大输出预算的硬上限 |
+| `LLM_JSON_MAX_DYNAMIC_TOKENS` | `12288` | 动态扩大输出预算的硬上限 |
 
 截断输出不会进入 JSON repair 上下文。运行时会丢弃它，保持原始 messages 不变并将
 `max_tokens` 翻倍；只有 `finish_reason=stop` 且内容完整但无法解析时，才进行格式修复。
 
 详细协议和失败链路见 [`dialogue_protocol.md`](dialogue_protocol.md)。
+
+## DeepSeek 最近用量
+
+仅当 `ROLEPLAY_LLM_MODEL_BASE_URL` 的主机名属于 DeepSeek 官方域名时，后端启用
+`GET /usage/recent?user_uuid=...`。统计直接累加 Chat Completions 响应中的
+`prompt_cache_hit_tokens`、`prompt_cache_miss_tokens`、`completion_tokens` 和
+`reasoning_tokens`，不会请求 `/user/balance`，也不会把 API Key 或账户余额发给前端。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `LLM_USAGE_MAX_EVENTS` | `10000` | 当前进程最多保留的模型响应记录数 |
+| `LLM_USAGE_RECENT_OPERATIONS` | `6` | 前端可查看的最近回合数量 |
+| `LLM_USAGE_TIMEZONE` | `Asia/Shanghai` | “今日”统计的时区 |
+
+账本按浏览器 `user_uuid` 隔离，并且只存在于当前后端进程内存。HF Space 休眠、重启、
+重新构建或切换实例后会从零开始；这是“最近用量”而不是供应商账单的永久副本。前端只在
+页面初始化和一次对话/导演回合完成后读取一次本地统计，没有定时轮询 DeepSeek。
 
 ## 单角色会话
 
@@ -78,12 +95,12 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `DIRECTOR_MAX_PARTICIPANTS` | `3` | 场景最多参加角色数 |
 | `DIRECTOR_MAX_SPEAKERS_PER_TURN` | `2` | 每轮最多顺序回应角色数 |
 | `DIRECTOR_LLM_TEMPERATURE` | `0.2` | 导演计划温度 |
-| `DIRECTOR_LLM_MAX_TOKENS` | `1536` | 导演计划 JSON 的初始输出预算 |
+| `DIRECTOR_LLM_MAX_TOKENS` | `6144` | 导演计划 JSON 的初始输出预算 |
 | `DIRECTOR_JSON_REPAIR_ATTEMPTS` | `1` | 导演计划 JSON 修复次数 |
 | `DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES` | `25` | 按导演/单角色自己的回复数再注入 |
 | `DIRECTOR_SESSION_TTL_SECONDS` | `3600` | 内存场景 TTL |
 | `DIRECTOR_MAX_STAGE_ACTIONS_PER_TURN` | `4` | Stage Director 每轮最多返回的舞台动作数 |
-| `STAGE_DIRECTOR_LLM_THINKING_MODE` | `auto` | 仅控制 `/stage/*` Director 的思考模式；`disabled` 可降低动作规划延迟，不影响普通 `/director/*` |
+| `STAGE_DIRECTOR_LLM_THINKING_MODE` | `disabled` | 仅控制 `/stage/*` Director 的思考模式；`disabled` 可降低动作规划延迟，不影响普通 `/director/*` |
 | `SCENE_TEMPLATES_DIRECTORY` | `./scenes` | 场景预设目录 |
 | `DIRECTOR_HISTORY_DIRECTORY` | `./outputs/director` | 导演 JSONL 副本目录 |
 

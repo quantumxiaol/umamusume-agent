@@ -120,8 +120,8 @@ API Key、模型名和 Base URL 等普通错误不会被当成能力降级。
 5. 仍无可用 `dialogue` 才返回角色中性安全提示：
    `抱歉，刚才有点没听清，可以再说一次吗？`
 
-默认角色初始预算为 `1024`，导演计划初始预算为 `1536`；动态重试最多两次，
-并受 `LLM_JSON_MAX_DYNAMIC_TOKENS=8192` 硬上限约束。每次上游响应的日志会记录
+默认角色初始预算为 `6144`，导演计划初始预算为 `6144`；动态重试最多两次，
+并受 `LLM_JSON_MAX_DYNAMIC_TOKENS=12288` 硬上限约束。每次上游响应的日志会记录
 `finish_reason`、`completion_tokens`、`reasoning_tokens` 与缓存 token，方便定位
 思考模型消耗和输出截断。
 

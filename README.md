@@ -40,6 +40,7 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - **手动重生成**：可在原位替换导演场景最后一条角色回复，保留事件顺序和 revision。
 - **异步 TTS**：只处理校验成功的新角色对白；不配音动作、环境、旁白或解析错误提示。
 - **前缀复用**：导演、每位角色和 TTS 翻译分别维护稳定线程，便于供应商前缀缓存命中。
+- **DeepSeek 最近用量**：按当前浏览器展示本实例内的缓存输入、未缓存输入、输出与推理 token，不读取账户余额。
 
 详细协议见 [对话协议](docs/dialogue_protocol.md)、
 [导演模式](docs/director_mode_v1.md) 和 [TTS 链路](docs/tts_pipeline.md)。

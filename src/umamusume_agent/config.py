@@ -83,12 +83,22 @@ class Config:
     LLM_JSON_REGENERATE_ON_PARSE_FAILURE: bool = _env_bool("LLM_JSON_REGENERATE_ON_PARSE_FAILURE", True)
     LLM_JSON_MAX_REGENERATE_ATTEMPTS: int = int(os.getenv("LLM_JSON_MAX_REGENERATE_ATTEMPTS", "1"))
     LLM_JSON_TEMPERATURE: float = float(os.getenv("LLM_JSON_TEMPERATURE", "0.35"))
-    LLM_JSON_MAX_TOKENS: int = int(os.getenv("LLM_JSON_MAX_TOKENS", "1024"))
+    LLM_JSON_MAX_TOKENS: int = int(os.getenv("LLM_JSON_MAX_TOKENS", "6144"))
     LLM_JSON_LENGTH_RETRY_ATTEMPTS: int = int(
         os.getenv("LLM_JSON_LENGTH_RETRY_ATTEMPTS", "2")
     )
     LLM_JSON_MAX_DYNAMIC_TOKENS: int = int(
-        os.getenv("LLM_JSON_MAX_DYNAMIC_TOKENS", "8192")
+        os.getenv("LLM_JSON_MAX_DYNAMIC_TOKENS", "12288")
+    )
+    # DeepSeek Chat Completions already returns exact cache/token usage. Keep a
+    # bounded per-browser ledger in process memory instead of polling balance.
+    LLM_USAGE_MAX_EVENTS: int = int(os.getenv("LLM_USAGE_MAX_EVENTS", "10000"))
+    LLM_USAGE_RECENT_OPERATIONS: int = int(
+        os.getenv("LLM_USAGE_RECENT_OPERATIONS", "6")
+    )
+    LLM_USAGE_TIMEZONE: str = os.getenv(
+        "LLM_USAGE_TIMEZONE",
+        "Asia/Shanghai",
     )
 
     # API protection
@@ -225,10 +235,10 @@ class Config:
     DIRECTOR_MAX_PARTICIPANTS: int = int(os.getenv("DIRECTOR_MAX_PARTICIPANTS", "3"))
     DIRECTOR_MAX_SPEAKERS_PER_TURN: int = int(os.getenv("DIRECTOR_MAX_SPEAKERS_PER_TURN", "2"))
     DIRECTOR_LLM_TEMPERATURE: float = float(os.getenv("DIRECTOR_LLM_TEMPERATURE", "0.2"))
-    DIRECTOR_LLM_MAX_TOKENS: int = int(os.getenv("DIRECTOR_LLM_MAX_TOKENS", "1536"))
+    DIRECTOR_LLM_MAX_TOKENS: int = int(os.getenv("DIRECTOR_LLM_MAX_TOKENS", "6144"))
     STAGE_DIRECTOR_LLM_THINKING_MODE: str = os.getenv(
         "STAGE_DIRECTOR_LLM_THINKING_MODE",
-        "auto",
+        "disabled",
     )
     DIRECTOR_JSON_REPAIR_ATTEMPTS: int = int(os.getenv("DIRECTOR_JSON_REPAIR_ATTEMPTS", "1"))
     DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES: int = int(

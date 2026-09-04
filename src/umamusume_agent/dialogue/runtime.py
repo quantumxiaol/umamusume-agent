@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Dict, MutableSet
 
 from openai import APIStatusError
 
 from ..config import config
+from ..llm_usage import DeepSeekUsageTracker
 from .models import CharacterReplyContext
 from .protocol import (
     REGENERATE_JSON_PROMPT,
@@ -53,6 +55,7 @@ class CharacterRuntime:
         llm_client: Any,
         settings=config,
         response_format_unsupported: MutableSet[tuple[str, str]] | None = None,
+        usage_tracker: DeepSeekUsageTracker | None = None,
     ):
         self.llm_client = llm_client
         self.settings = settings
@@ -61,6 +64,7 @@ class CharacterRuntime:
             if response_format_unsupported is not None
             else set()
         )
+        self.usage_tracker = usage_tracker
 
     @staticmethod
     def extract_completion_text(response: Any) -> str:
@@ -90,8 +94,13 @@ class CharacterRuntime:
         # field. Preserve their previous behavior by treating it as complete.
         return str(value).strip().lower() if value else "stop"
 
-    @staticmethod
-    def log_usage(response: Any, *, finish_reason: str | None = None) -> None:
+    def log_usage(
+        self,
+        response: Any,
+        *,
+        finish_reason: str | None = None,
+        latency_ms: int | None = None,
+    ) -> None:
         usage = getattr(response, "usage", None)
 
         def read(source: Any, key: str) -> Any:
@@ -117,7 +126,7 @@ class CharacterRuntime:
         logger.info(
             "LLM usage request_id=%s model=%s finish_reason=%s "
             "prompt_tokens=%s completion_tokens=%s reasoning_tokens=%s "
-            "cached_tokens=%s",
+            "cached_tokens=%s latency_ms=%s",
             getattr(response, "id", None) or "unknown",
             getattr(response, "model", None) or "unknown",
             finish_reason or CharacterRuntime.extract_finish_reason(response),
@@ -125,7 +134,20 @@ class CharacterRuntime:
             completion_tokens,
             reasoning_tokens,
             cached_tokens,
+            latency_ms,
         )
+        if self.usage_tracker is not None:
+            try:
+                self.usage_tracker.record_response(
+                    response,
+                    finish_reason=(
+                        finish_reason or self.extract_finish_reason(response)
+                    ),
+                    latency_ms=latency_ms,
+                )
+            except Exception:
+                # Observability must never break a successful roleplay request.
+                logger.exception("Failed to record DeepSeek usage")
 
     def _json_capability_key(self) -> tuple[str, str]:
         return (
@@ -182,7 +204,7 @@ class CharacterRuntime:
         )
         dynamic_token_limit = max(
             current_max_tokens,
-            int(getattr(self.settings, "LLM_JSON_MAX_DYNAMIC_TOKENS", 8192)),
+            int(getattr(self.settings, "LLM_JSON_MAX_DYNAMIC_TOKENS", 12288)),
         )
         length_retries = 0
         prompt_only = force_prompt_only
@@ -213,6 +235,7 @@ class CharacterRuntime:
                 }
 
             try:
+                request_started = monotonic()
                 response = await self.llm_client.chat.completions.create(**kwargs)
             except Exception as exc:
                 if (
@@ -233,7 +256,11 @@ class CharacterRuntime:
                 raise
 
             finish_reason = self.extract_finish_reason(response)
-            self.log_usage(response, finish_reason=finish_reason)
+            self.log_usage(
+                response,
+                finish_reason=finish_reason,
+                latency_ms=round((monotonic() - request_started) * 1000),
+            )
             result = JsonCompletionResult(
                 content=self.extract_completion_text(response),
                 finish_reason=finish_reason,
@@ -318,12 +345,16 @@ class CharacterRuntime:
     ) -> StructuredReply:
         messages = list(context.messages)
         if not is_json_reply_enabled(self.settings):
+            request_started = monotonic()
             response = await self.llm_client.chat.completions.create(
                 model=self.settings.ROLEPLAY_LLM_MODEL_NAME,
                 messages=messages,
                 temperature=0.7,
             )
-            self.log_usage(response)
+            self.log_usage(
+                response,
+                latency_ms=round((monotonic() - request_started) * 1000),
+            )
             return structured_reply_from_legacy_text(
                 self.extract_completion_text(response)
             )

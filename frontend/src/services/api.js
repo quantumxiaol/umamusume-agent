@@ -65,6 +65,17 @@ export const fetchCapabilities = async () => {
   }
 };
 
+export const fetchRecentLlmUsage = async (userUuid) => {
+  try {
+    const response = await apiClient.get('/usage/recent', {
+      params: { user_uuid: userUuid },
+    });
+    return response.data || {};
+  } catch (error) {
+    throw parseError(error);
+  }
+};
+
 export const fetchTtsJob = async (jobId, userUuid) => {
   try {
     const response = await apiClient.get(

@@ -8,6 +8,7 @@ import {
   watch,
 } from 'vue';
 import DirectorMode from '@/components/DirectorMode.vue';
+import { fetchRecentLlmUsage } from '@/services/api';
 import { DIALOGUE_INPUT_MODES, useChatStore } from '@/stores/chatStore';
 
 const chatStore = useChatStore();
@@ -23,6 +24,8 @@ const promptOpen = ref(true);
 const audioRefs = ref({});
 const historyFileInput = ref(null);
 const appMode = ref('dialogue');
+const llmUsage = ref(null);
+const llmUsageLoading = ref(false);
 
 watch(appMode, (value) => {
   localStorage.setItem(APP_MODE_STORAGE_KEY, value);
@@ -50,6 +53,12 @@ const directorMaxParticipants = computed(() => Number(
 ));
 const directorMaxSpeakers = computed(() => Number(
   chatStore.capabilities?.director_max_speakers_per_turn || 2,
+));
+const llmUsageEnabled = computed(() => (
+  Number(chatStore.capabilities?.deepseek_usage || 0) >= 1
+));
+const latestLlmOperation = computed(() => (
+  llmUsage.value?.recent_operations?.[0] || null
 ));
 const inputMode = computed(() => chatStore.inputMode);
 const inputModeOptions = Object.entries(DIALOGUE_INPUT_MODES).map(([value, preset]) => ({
@@ -119,9 +128,11 @@ const handleSend = async () => {
     }
     isEditingLastUser.value = false;
     await chatStore.regenerateFromLastUser(text, inputMode.value);
+    await refreshLlmUsage();
     return;
   }
   await chatStore.sendMessage(text, inputMode.value);
+  await refreshLlmUsage();
 };
 
 const handleQueueMessage = async () => {
@@ -199,6 +210,7 @@ const handleRegenerateLast = async () => {
   isEditingLastUser.value = false;
   messageInput.value = '';
   await chatStore.regenerateFromLastUser(lastUserMessage.value.content);
+  await refreshLlmUsage();
 };
 
 const handleEditLastUser = async () => {
@@ -460,8 +472,48 @@ const formatMessage = (text) => {
   };
 };
 
+const formatTokenCount = (value) => new Intl.NumberFormat('zh-CN').format(
+  Number(value || 0),
+);
+
+const formatCacheRate = (value) => `${Math.round(Number(value || 0) * 100)}%`;
+
+const formatUsageDuration = (value) => {
+  const milliseconds = Number(value || 0);
+  if (milliseconds < 1000) {
+    return `${milliseconds}ms`;
+  }
+  return `${(milliseconds / 1000).toFixed(1)}s`;
+};
+
+const usageFeatureLabel = (feature) => ({
+  dialogue_turn: '单角色对话',
+  director_turn: '导演回合',
+  director_regenerate: '重新生成',
+  stage_turn: '舞台回合',
+}[feature] || '模型调用');
+
+const refreshLlmUsage = async () => {
+  if (
+    !llmUsageEnabled.value
+    || !userUuid.value
+    || llmUsageLoading.value
+  ) {
+    return;
+  }
+  llmUsageLoading.value = true;
+  try {
+    llmUsage.value = await fetchRecentLlmUsage(userUuid.value);
+  } catch (_err) {
+    // Usage is optional observability. A stale card must not block dialogue.
+  } finally {
+    llmUsageLoading.value = false;
+  }
+};
+
 onMounted(async () => {
   await chatStore.initCharacters();
+  await refreshLlmUsage();
   const savedMode = localStorage.getItem(APP_MODE_STORAGE_KEY);
   if (savedMode === 'director' && directorEnabled.value) {
     appMode.value = 'director';
@@ -500,6 +552,50 @@ onMounted(async () => {
           </button>
         </div>
         <div class="status-pill">{{ streamMode ? '流式' : '非流式' }}</div>
+        <details v-if="llmUsageEnabled" class="usage-details">
+          <summary class="status-pill usage-summary">
+            DeepSeek
+            <template v-if="llmUsage?.today">
+              · 命中 {{ formatCacheRate(llmUsage.today.cache_hit_rate) }}
+            </template>
+          </summary>
+          <div class="usage-popover">
+            <div class="usage-popover-heading">
+              <div>
+                <strong>最近用量</strong>
+                <span>仅当前浏览器</span>
+              </div>
+              <span v-if="llmUsageLoading">更新中…</span>
+            </div>
+            <div class="usage-section">
+              <div class="usage-section-title">
+                <span>今日（本实例）</span>
+                <span>{{ formatTokenCount(llmUsage?.today?.request_count) }} 次请求</span>
+              </div>
+              <div class="usage-grid">
+                <span>缓存输入<strong>{{ formatTokenCount(llmUsage?.today?.cached_input_tokens) }}</strong></span>
+                <span>未缓存输入<strong>{{ formatTokenCount(llmUsage?.today?.uncached_input_tokens) }}</strong></span>
+                <span>输出<strong>{{ formatTokenCount(llmUsage?.today?.completion_tokens) }}</strong></span>
+                <span>其中推理<strong>{{ formatTokenCount(llmUsage?.today?.reasoning_tokens) }}</strong></span>
+              </div>
+            </div>
+            <div v-if="latestLlmOperation" class="usage-section latest">
+              <div class="usage-section-title">
+                <span>最近一轮 · {{ usageFeatureLabel(latestLlmOperation.feature) }}</span>
+                <span>{{ formatUsageDuration(latestLlmOperation.latency_ms) }}</span>
+              </div>
+              <div class="usage-grid">
+                <span>请求<strong>{{ formatTokenCount(latestLlmOperation.request_count) }}</strong></span>
+                <span>缓存命中<strong>{{ formatCacheRate(latestLlmOperation.cache_hit_rate) }}</strong></span>
+                <span>未缓存输入<strong>{{ formatTokenCount(latestLlmOperation.uncached_input_tokens) }}</strong></span>
+                <span>输出<strong>{{ formatTokenCount(latestLlmOperation.completion_tokens) }}</strong></span>
+              </div>
+            </div>
+            <p class="usage-note">
+              HF Space 休眠、重启或换实例后会重新累计。
+            </p>
+          </div>
+        </details>
         <button
           v-if="ttsEnabled"
           type="button"
@@ -766,6 +862,7 @@ onMounted(async () => {
       :max-speakers="directorMaxSpeakers"
       :tts-enabled="ttsEnabled"
       :voice-enabled="voiceEnabled"
+      @usage-changed="refreshLlmUsage"
     />
   </div>
 </template>
@@ -810,7 +907,8 @@ onMounted(async () => {
 
 .topbar {
   position: relative;
-  z-index: 1;
+  /* Keep header popovers above the dialogue/director cards that follow it. */
+  z-index: 30;
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -844,9 +942,102 @@ h1 {
 }
 
 .status-panel {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
+}
+
+.usage-details {
+  position: relative;
+}
+
+.usage-summary {
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+
+.usage-summary::-webkit-details-marker {
+  display: none;
+}
+
+.usage-details[open] .usage-summary {
+  border-color: var(--accent);
+  background: rgba(26, 111, 107, 0.1);
+}
+
+.usage-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 40;
+  box-sizing: border-box;
+  width: min(390px, calc(100vw - 40px));
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: #fffdf8;
+  box-shadow: 0 16px 40px rgba(33, 41, 38, 0.18);
+}
+
+.usage-popover-heading,
+.usage-popover-heading > div,
+.usage-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.usage-popover-heading > div {
+  justify-content: flex-start;
+}
+
+.usage-popover-heading span,
+.usage-section-title,
+.usage-note {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.usage-section {
+  margin-top: 13px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.usage-section.latest {
+  border-top-style: dashed;
+}
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.usage-grid span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--panel-strong);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.usage-grid strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.usage-note {
+  margin: 12px 0 0;
+  line-height: 1.55;
 }
 
 .app-mode-switch {
@@ -1421,6 +1612,16 @@ textarea {
   .topbar {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .status-panel {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .usage-popover {
+    right: auto;
+    left: 0;
   }
 
   .toggle-group {
