@@ -11,6 +11,7 @@ from typing import Any, Dict, MutableSet
 from openai import APIStatusError
 
 from ..config import config
+from ..llm_diagnostics import LLMRequestDiagnostics
 from ..llm_usage import DeepSeekUsageTracker
 from .models import CharacterReplyContext
 from .protocol import (
@@ -65,6 +66,9 @@ class CharacterRuntime:
             else set()
         )
         self.usage_tracker = usage_tracker
+        self.diagnostics = LLMRequestDiagnostics(
+            enabled=getattr(settings, "LLM_REQUEST_DIAGNOSTICS_ENABLED", True),
+        )
 
     @staticmethod
     def extract_completion_text(response: Any) -> str:
@@ -194,6 +198,8 @@ class CharacterRuntime:
         max_tokens: int,
         force_prompt_only: bool = False,
         thinking: bool | None = None,
+        attempt: int = 1,
+        retry_reason: str = "initial",
     ) -> JsonCompletionResult:
         mode = json_output_mode(self.settings)
         key = self._json_capability_key()
@@ -234,10 +240,17 @@ class CharacterRuntime:
                     }
                 }
 
+            call_id = self.diagnostics.start(
+                kwargs,
+                attempt=attempt,
+                retry_reason=retry_reason,
+                length_retries=length_retries,
+            )
             try:
                 request_started = monotonic()
                 response = await self.llm_client.chat.completions.create(**kwargs)
             except Exception as exc:
+                self.diagnostics.error(call_id, exc)
                 if (
                     send_response_format
                     and mode == "auto"
@@ -246,6 +259,7 @@ class CharacterRuntime:
                 ):
                     self.response_format_unsupported.add(key)
                     prompt_only = True
+                    retry_reason = "response_format_unsupported"
                     logger.warning(
                         "LLM response_format=json_object unsupported for "
                         "base_url=%s model=%s; fallback to prompt-only JSON.",
@@ -266,6 +280,9 @@ class CharacterRuntime:
                 finish_reason=finish_reason,
                 max_tokens=current_max_tokens,
                 length_retries=length_retries,
+            )
+            self.diagnostics.finish(
+                call_id, response, content=result.content, finish_reason=finish_reason,
             )
             if finish_reason != "length":
                 return result
@@ -296,6 +313,7 @@ class CharacterRuntime:
                 length_retry_limit,
             )
             current_max_tokens = next_max_tokens
+            retry_reason = "length"
 
     async def create_json_completion(
         self,
@@ -378,7 +396,8 @@ class CharacterRuntime:
 
         retries = max(0, self.settings.LLM_JSON_MAX_RETRIES)
         for _attempt in range(retries):
-            repair_messages = [
+            empty_output = not raw.strip()
+            repair_messages = messages if empty_output else [
                 *messages,
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": REPAIR_JSON_PROMPT},
@@ -387,7 +406,9 @@ class CharacterRuntime:
                 repair_messages,
                 temperature=self.settings.LLM_JSON_TEMPERATURE,
                 max_tokens=self.settings.LLM_JSON_MAX_TOKENS,
-                force_prompt_only=True,
+                force_prompt_only=not empty_output,
+                attempt=_attempt + 2,
+                retry_reason="empty_output" if empty_output else "json_repair",
             )
             if not self._can_parse_completion(completion, stage="repair"):
                 return self._safe_parse_failure_reply()
@@ -395,11 +416,12 @@ class CharacterRuntime:
             try:
                 return parse_structured_reply(
                     raw,
-                    source_format="json_v2_repaired",
+                    source_format="json_v2_regenerated" if empty_output else "json_v2_repaired",
                 )
             except Exception as repair_error:
                 logger.warning(
-                    "Failed to parse repaired JSON reply: %s",
+                    "Failed to parse JSON retry reply, retry_reason=%s: %s",
+                    "empty_output" if empty_output else "json_repair",
                     repair_error,
                 )
 
@@ -409,7 +431,8 @@ class CharacterRuntime:
                 self.settings.LLM_JSON_MAX_REGENERATE_ATTEMPTS,
             )
             for _attempt in range(regenerate_attempts):
-                regenerate_messages = [
+                empty_output = not raw.strip()
+                regenerate_messages = messages if empty_output else [
                     *messages,
                     {"role": "user", "content": REGENERATE_JSON_PROMPT},
                 ]
@@ -417,7 +440,9 @@ class CharacterRuntime:
                     regenerate_messages,
                     temperature=self.settings.LLM_JSON_TEMPERATURE,
                     max_tokens=self.settings.LLM_JSON_MAX_TOKENS,
-                    force_prompt_only=True,
+                    force_prompt_only=not empty_output,
+                    attempt=retries + _attempt + 2,
+                    retry_reason="empty_output" if empty_output else "json_regenerate",
                 )
                 if not self._can_parse_completion(
                     completion,

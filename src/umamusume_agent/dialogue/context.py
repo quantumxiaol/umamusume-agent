@@ -85,19 +85,24 @@ class LegacyDialogueContextBuilder:
             messages.extend(history)
             return
 
-        for index, message in enumerate(history, start=1):
-            messages.append(message)
-            if index % self.hidden_reinjection_interval_messages == 0:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            HIDDEN_JSON_FORMAT_REINJECTION_PROMPT
-                            if is_json_reply_enabled(self.settings)
-                            else HIDDEN_LEGACY_FORMAT_REINJECTION_PROMPT
-                        ),
-                    }
+        last_reminder_boundary = 0
+        for index, message in enumerate(history):
+            boundary = index // self.hidden_reinjection_interval_messages
+            if message.get("role") == "user" and boundary > last_reminder_boundary:
+                # Attach to the first new user message after a boundary. Never
+                # amend an earlier message when more history arrives, and keep
+                # the reminder on that same message on every subsequent build.
+                reminder = (
+                    HIDDEN_JSON_FORMAT_REINJECTION_PROMPT
+                    if is_json_reply_enabled(self.settings)
+                    else HIDDEN_LEGACY_FORMAT_REINJECTION_PROMPT
                 )
+                message = {
+                    **message,
+                    "content": f"{message['content']}\n\n{reminder}",
+                }
+                last_reminder_boundary = boundary
+            messages.append(message)
 
     def build(
         self,
@@ -129,4 +134,3 @@ class LegacyDialogueContextBuilder:
         messages = [system_message]
         self._append_history(messages, history)
         return CharacterReplyContext(messages=messages)
-

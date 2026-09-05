@@ -83,6 +83,7 @@ class SceneSession:
             {
                 "event": "scene_event",
                 **stored.model_dump(mode="json"),
+                **({"model_content": stored.model_content} if stored.model_content else {}),
             }
         )
         return stored
@@ -112,6 +113,7 @@ class SceneSession:
                 {
                     "event": "scene_event",
                     **stored.model_dump(mode="json"),
+                    **({"model_content": stored.model_content} if stored.model_content else {}),
                 }
             )
             return stored

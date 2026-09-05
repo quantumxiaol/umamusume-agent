@@ -24,8 +24,9 @@ Director mode is a separate multi-character scene layer. It reuses
 - Scene history is text-only. Each browser stores its full public scene snapshot
   in `localStorage`, scoped by that browser's generated `user_uuid`.
 - The backend also writes a best-effort JSONL copy under `outputs/director`.
-  JSONL can exactly rebuild every prompt thread while the Space filesystem
-  survives; the browser snapshot can rebuild a fresh append-only context after
+  With the same prompt configuration and character cards, JSONL can exactly
+  rebuild every prompt thread while the Space filesystem survives; the browser
+  snapshot can rebuild a fresh append-only context after
   an ephemeral Hugging Face container loses both memory and files.
 - There is no autonomous loop, private memory, relationship inheritance, or
   mid-scene cast expansion in V1.
@@ -65,9 +66,21 @@ user(next turn packet)
 assistant(...)
 ```
 
-Dynamic state snapshots, unseen events, and one-turn instructions are appended
-at the tail. Earlier messages are never reordered or rewritten, so the entire
-previous request is an exact prefix of the next request for that runtime.
+Each thread receives a full `current_scene_state` initially. Later packets
+include only changed fields in `scene_state_patch`, including explicit nulls
+for removed fields, and omit state when unchanged. The full initial state and
+all subsequent patches remain in history; there is no window or compression.
+Unseen events and one-turn instructions are also appended at the tail. Earlier
+messages are never reordered or rewritten, so the entire previous normal-turn
+request is an exact prefix of the next normal-turn request for that runtime.
+
+Validated character replies and director plans retain their original JSON
+text when no fields were normalized, removed, or added by validation. That
+text is used for the assistant message and persisted as internal `model_content`
+in backend JSONL; public event responses and browser snapshots exclude it.
+Modified replies and plans use the accepted, normalized representation.
+Director plans are asked to omit unchanged `scene_patch` fields instead of
+repeating null values.
 
 Manual regeneration is the single bounded exception at the mutable tail: the
 latest character assistant message is replaced only after a retry succeeds.
@@ -83,8 +96,13 @@ characters as hidden knowledge and is not treated as a mandatory script.
 
 Each character uses its full character card in its own static system prefix.
 The director uses only actor IDs and compact cast metadata. A compact role
-constraint is appended according to that runtime's own reply count, controlled
-by `DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES`.
+constraint is included in the new user packet's `backend_reminder` field according
+to that runtime's own reply count, controlled by
+`DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES`. Normal director and character
+threads keep a single static system message even at turns 26 and 51. Reminders
+remain on their original user packets when history grows or is restored.
+Application message prefix equality does not guarantee provider cache hits;
+request diagnostics and provider usage must be compared together.
 
 Provider usage logs include `prompt_tokens`, `completion_tokens`, reasoning and
 cache-hit tokens when the compatible API returns those fields. With an official

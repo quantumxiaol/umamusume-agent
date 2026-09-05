@@ -123,6 +123,7 @@ class DialogueSession:
         target_actor_ids: Optional[list[str]] = None,
         event_schema_version: Optional[int] = None,
         utterance_id: Optional[str] = None,
+        model_content: str = "",
     ):
         """Add a message to model history and append its JSONL event."""
 
@@ -134,6 +135,7 @@ class DialogueSession:
                     "action": action,
                     "dialogue": dialogue,
                     "source_format": source_format,
+                    "model_content": model_content,
                     "schema_version": (
                         schema_version or STRUCTURED_REPLY_SCHEMA_VERSION
                     ),
@@ -185,6 +187,8 @@ class DialogueSession:
                 }
             )
         if role == "assistant":
+            if model_content:
+                payload["model_content"] = model_content
             payload.update(
                 {
                     "action": semantic_record.get("action") or "无",
@@ -248,6 +252,7 @@ class DialogueSession:
                 target_actor_ids=message.get("target_actor_ids"),
                 event_schema_version=message.get("event_schema_version"),
                 utterance_id=message.get("utterance_id"),
+                model_content=message.get("model_content") or "",
             )
 
     def get_messages(self, text_only: bool = False) -> list:

@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any, Dict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config import config
 
@@ -117,6 +117,7 @@ class StructuredReply(BaseModel):
     dialogue: str
     source_format: str = "json_v2"
     schema_version: int = STRUCTURED_REPLY_SCHEMA_VERSION
+    model_content: str = Field(default="", exclude=True)
 
 
 def json_output_mode(settings=config) -> str:
@@ -349,6 +350,16 @@ def load_json_object_from_text(text: str) -> Dict[str, Any]:
     return payload
 
 
+def matching_json_content(raw: Any, payload: Dict[str, Any]) -> str:
+    """Retain original JSON only when it exactly represents accepted fields."""
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    try:
+        return raw if json.loads(raw) == payload else ""
+    except (ValueError, TypeError):
+        return ""
+
+
 def parse_structured_reply(raw: str, *, source_format: str = "json_v2") -> StructuredReply:
     payload = load_json_object_from_text(raw)
     action = payload.get("action", "无")
@@ -359,11 +370,15 @@ def parse_structured_reply(raw: str, *, source_format: str = "json_v2") -> Struc
     if not isinstance(dialogue, str) or not dialogue.strip():
         raise ValueError("JSON output missing non-empty dialogue")
 
-    return StructuredReply(
+    reply = StructuredReply(
         action=action.strip() or "无",
         dialogue=dialogue.strip(),
         source_format=source_format,
     )
+    reply.model_content = matching_json_content(
+        raw, {"action": reply.action, "dialogue": reply.dialogue},
+    )
+    return reply
 
 
 def structured_reply_from_legacy_text(
@@ -537,6 +552,11 @@ def to_compact_context_message(record: Dict[str, Any]) -> Dict[str, str]:
     assistant_record = normalize_assistant_record({**record, "role": "assistant"})
     action = str(assistant_record.get("action") or "").strip()
     dialogue = str(assistant_record.get("dialogue") or assistant_record.get("content") or "").strip()
+    model_content = matching_json_content(
+        assistant_record.get("model_content"), {"action": action or "无", "dialogue": dialogue},
+    )
+    if model_content:
+        return {"role": "assistant", "content": model_content}
     if action and action != "无":
         content = f"角色动作：{action}\n角色对白：{dialogue}"
     else:

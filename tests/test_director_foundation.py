@@ -8,6 +8,8 @@ from umamusume_agent.dialogue.protocol import StructuredReply
 from umamusume_agent.director.context import (
     CharacterSceneContextBuilder,
     DirectorContextBuilder,
+    PromptThread,
+    scene_state_update,
 )
 from umamusume_agent.director.models import (
     ActorInstance,
@@ -63,6 +65,20 @@ def _template() -> SceneTemplate:
 
 
 class DirectorFoundationTests(unittest.TestCase):
+    def test_state_updates_reconstruct_full_state_without_repetition(self):
+        thread = PromptThread(messages=[])
+        state = SceneState(location="训练场", sub_location="跑道", props=["毛巾"])
+        packet = scene_state_update(thread, state)
+        reconstructed = packet["current_scene_state"].copy()
+        self.assertEqual(scene_state_update(thread, state), {})
+
+        changed = state.model_copy(update={"sub_location": None, "weather": "雨", "props": []})
+        patch = scene_state_update(thread, changed)["scene_state_patch"]
+        self.assertEqual(patch, {"weather": "雨", "props": [], "sub_location": None})
+        reconstructed.update(patch)
+        self.assertEqual(SceneState.model_validate(reconstructed), changed)
+        self.assertEqual(scene_state_update(thread, changed), {})
+
     def test_timeline_is_append_only_and_reduces_scene_patches(self):
         timeline = SceneTimeline(initial_state=_template().initial_state)
         first = timeline.append(
@@ -220,8 +236,8 @@ class DirectorFoundationTests(unittest.TestCase):
         )
 
         self.assertEqual(thread.reply_count, 1)
-        self.assertEqual(thread.messages[-2]["role"], "system")
-        self.assertIn("多人场景 JSON", thread.messages[-2]["content"])
+        self.assertEqual(sum(m["role"] == "system" for m in thread.messages), 1)
+        self.assertIn("多人场景 JSON", json.loads(thread.messages[-1]["content"])["backend_reminder"])
         self.assertEqual(thread.messages[-1]["role"], "user")
 
     def test_scene_template_repository_loads_json_templates(self):

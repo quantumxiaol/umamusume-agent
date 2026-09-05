@@ -114,8 +114,9 @@ API Key、模型名和 Base URL 等普通错误不会被当成能力降级。
 1. 正常 JSON 请求使用初始输出预算。
 2. 若上游返回 `finish_reason=length`，丢弃截断内容，保持本阶段原始
    `messages` 不变，将 `max_tokens` 翻倍后有界重试；截断内容不会进入 repair。
-3. 只有 `finish_reason=stop`、内容完整但 JSON 解析失败时，才进行有界
-   prompt-only JSON 修复。
+3. `finish_reason=stop` 但输出为空或只有空白时，直接用原始 `messages` 和原输出模式
+   重试，不追加空 assistant 或修复指令。非空内容无法通过 JSON 校验时，才进行
+   prompt-only JSON 修复。两种分支共用现有重试次数上限。
 4. 修复仍失败时，移除失败输出，基于最近训练员事件重生成。
 5. 仍无可用 `dialogue` 才返回角色中性安全提示：
    `抱歉，刚才有点没听清，可以再说一次吗？`
@@ -138,7 +139,12 @@ API Key、模型名和 Base URL 等普通错误不会被当成能力降级。
 
 - Assistant 记录保存 `schema_version=2`、`content`、`action`、`dialogue` 和
   `source_format`。
-- LLM 历史不直接堆叠 raw JSON，而是压缩成稳定自然语言标签。
+- 校验后字段和内容未被修改的原始 JSON，以内部 `model_content` 字段保存在
+  后端 JSONL 中，后续请求直接使用原文，避免重新序列化最近一条模型回复。
+  该字段不出现在公开回复或浏览器导出中。
+- 旧历史、浏览器导入及经过规范化修改的回复，继续使用稳定自然语言标签。
+  不会为补齐原始回复而重写已有历史；浏览器导入恢复的是公开剧情语义，
+  不保证与后端原始模型消息逐字一致。
 - `/history/import` 可导入 v2 JSON，也兼容旧 `role/content`、旧两行文本和项目
   Markdown 导出。
 - `replace_current=true` 且 `messages=[]` 会清空当前 session 上下文。

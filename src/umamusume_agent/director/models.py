@@ -89,6 +89,8 @@ class SceneEvent(BaseModel):
     action: str = ""
     dialogue: str = ""
     source_format: str = ""
+    # Persisted explicitly in JSONL, omitted from public events/snapshots.
+    model_content: str = Field(default="", exclude=True)
     revision: int = 0
     scene_patch: SceneStatePatch | None = None
     hidden: bool = False
@@ -162,6 +164,7 @@ class DirectorPlan(BaseModel):
     narration: str = ""
     speakers: list[DirectorSpeakerPlan] = Field(default_factory=list)
     stage_actions: list[DirectorStageAction] = Field(default_factory=list)
+    model_content: str = Field(default="", exclude=True)
 
 
 class SceneRecoverySnapshot(BaseModel):

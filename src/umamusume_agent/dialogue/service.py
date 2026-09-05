@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4
 
+from ..llm_diagnostics import llm_request_scope
 from .context import LegacyDialogueContextBuilder
 from .models import (
     EVENT_SCHEMA_VERSION,
@@ -91,7 +92,14 @@ class DialogueService:
             history=session.history,
             text_only=text_only,
         )
-        reply = await self.runtime.generate_reply(context)
+        with llm_request_scope(
+            purpose="dialogue_reply",
+            session_id=session.session_id,
+            actor_id=session.character.id,
+            history_messages=len(session.history),
+            turn_index=sum(item.get("role") == "assistant" for item in session.history) + 1,
+        ):
+            reply = await self.runtime.generate_reply(context)
 
         reply_actor = (
             actor_from_character(session.character)
@@ -118,6 +126,7 @@ class DialogueService:
             action=reply.action,
             dialogue=reply.dialogue,
             source_format=reply.source_format,
+            model_content=reply.model_content,
             schema_version=reply.schema_version,
             utterance_id=utterance_id,
             **reply_metadata,

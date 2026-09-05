@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -18,6 +19,7 @@ from ..dialogue.models import (
 )
 from ..dialogue.runtime import CharacterRuntime
 from ..dialogue.protocol import StructuredReply
+from ..llm_diagnostics import llm_request_scope
 from .context import CharacterSceneContextBuilder, DirectorContextBuilder
 from .history import (
     InvalidSceneHistory,
@@ -43,6 +45,9 @@ from .runtime import DirectorRuntime
 from .session import SceneSession
 from .templates import SceneTemplateRepository
 from .timeline import SceneTimeline
+
+
+logger = logging.getLogger(__name__)
 
 
 class DirectorService:
@@ -295,6 +300,7 @@ class DirectorService:
                 )
                 try:
                     plan = DirectorPlan.model_validate_json(event.content)
+                    plan.model_content = event.model_content
                 except Exception as exc:
                     raise InvalidSceneHistory("历史中的导演计划无法解析") from exc
                 self.director_context_builder.record_plan(
@@ -348,6 +354,7 @@ class DirectorService:
                     StructuredReply(
                         action=event.action or "无",
                         dialogue=event.dialogue or event.content,
+                        model_content=event.model_content,
                     ),
                 )
                 stored = self._replay_checked(session, event)
@@ -362,6 +369,10 @@ class DirectorService:
             default=0,
         )
         session.last_active_at = history.updated_at
+        logger.info(
+            "Scene context rebuilt source=server_history session_id=%s turn_index=%s director_messages=%s",
+            session.session_id, session.turn_index, len(session.director_thread.messages),
+        )
         return session
 
     async def _load_history_character(self, actor: ActorRef):
@@ -474,7 +485,7 @@ class DirectorService:
         previous_sequence = -1
         total_text_length = 0
         for event in snapshot.events:
-            if event.hidden or event.visible_to != "all":
+            if event.hidden or event.visible_to != "all" or event.model_content:
                 raise InvalidSceneHistory("浏览器场景快照不能包含隐藏事件")
             if event.event_type not in allowed_event_types:
                 raise InvalidSceneHistory("浏览器场景快照包含内部事件")
@@ -573,6 +584,10 @@ class DirectorService:
             session.append_event(event)
         session.turn_index = snapshot.turn_index
         session.touch()
+        logger.info(
+            "Scene context rebuilt source=browser_snapshot session_id=%s turn_index=%s public_events=%s",
+            session.session_id, session.turn_index, len(snapshot.events),
+        )
         return session
 
     @staticmethod
@@ -702,18 +717,24 @@ class DirectorService:
             dialogue_actor_ids = set(session.character_actor_ids)
             if allowed_dialogue_actor_ids is not None:
                 dialogue_actor_ids.intersection_update(allowed_dialogue_actor_ids)
-            plan = await self.director_runtime.generate_plan(
-                session.director_thread.snapshot(),
-                allowed_actor_ids=dialogue_actor_ids,
-                allowed_target_ids={
-                    session.player.actor_id,
-                    *dialogue_actor_ids,
-                },
-                fallback_actor_ids=list(dict.fromkeys(fallback_actor_ids)),
-                allowed_anchor_ids=self._stage_anchor_ids(stage_context),
-                allowed_stage_actor_ids=allowed_stage_actor_ids,
-                allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
-            )
+            with llm_request_scope(
+                purpose="director_plan" if stage_context is None else "stage_plan",
+                session_id=session.session_id,
+                turn_index=session.turn_index,
+                actor_id="director",
+            ):
+                plan = await self.director_runtime.generate_plan(
+                    session.director_thread.snapshot(),
+                    allowed_actor_ids=dialogue_actor_ids,
+                    allowed_target_ids={
+                        session.player.actor_id,
+                        *dialogue_actor_ids,
+                    },
+                    fallback_actor_ids=list(dict.fromkeys(fallback_actor_ids)),
+                    allowed_anchor_ids=self._stage_anchor_ids(stage_context),
+                    allowed_stage_actor_ids=allowed_stage_actor_ids,
+                    allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
+                )
             self.director_context_builder.record_plan(
                 session.director_thread,
                 plan,
@@ -724,6 +745,7 @@ class DirectorService:
                     event_type="director_plan",
                     actor=self._director_actor(),
                     content=plan.model_dump_json(exclude_none=True),
+                    model_content=plan.model_content,
                     visible_to=[],
                     hidden=True,
                 )
@@ -781,7 +803,14 @@ class DirectorService:
                     intent=speaker_plan.intent,
                     target_actor_ids=speaker_plan.target_actor_ids,
                 )
-                reply = await self.character_runtime.generate_reply(context)
+                with llm_request_scope(
+                    purpose="scene_reply" if stage_context is None else "stage_reply",
+                    session_id=session.session_id,
+                    turn_index=session.turn_index,
+                    actor_id=actor.actor_id,
+                    actor_reply_index=thread.reply_count + 1,
+                ):
+                    reply = await self.character_runtime.generate_reply(context)
                 self.character_context_builder.record_reply(thread, reply)
                 reply_event = session.append_event(
                     SceneEvent(
@@ -793,6 +822,7 @@ class DirectorService:
                         dialogue=reply.dialogue,
                         content=reply.dialogue,
                         source_format=reply.source_format,
+                        model_content=reply.model_content,
                     )
                 )
                 # The actor's own reply is already the assistant tail in its
@@ -842,9 +872,17 @@ class DirectorService:
                     ),
                 },
             ]
-            reply = await self.character_runtime.generate_reply(
-                CharacterReplyContext(messages=retry_messages)
-            )
+            with llm_request_scope(
+                purpose="scene_reply",
+                operation="user_regenerate",
+                session_id=session.session_id,
+                turn_index=session.turn_index,
+                actor_id=actor_id,
+                actor_reply_index=thread.reply_count,
+            ):
+                reply = await self.character_runtime.generate_reply(
+                    CharacterReplyContext(messages=retry_messages)
+                )
 
             # Commit the prompt-thread replacement only after generation
             # succeeds. The retry-only instruction is intentionally transient:
@@ -863,6 +901,7 @@ class DirectorService:
                     dialogue=reply.dialogue,
                     content=reply.dialogue,
                     source_format=reply.source_format,
+                    model_content=reply.model_content,
                     created_at=datetime.now(),
                 ),
             )
@@ -930,7 +969,14 @@ class DirectorService:
                 intent=intent,
                 target_actor_ids=[session.player.actor_id],
             )
-            reply = await self.character_runtime.generate_reply(context)
+            with llm_request_scope(
+                purpose="stage_reply",
+                session_id=session.session_id,
+                turn_index=session.turn_index,
+                actor_id=actor_id,
+                actor_reply_index=thread.reply_count + 1,
+            ):
+                reply = await self.character_runtime.generate_reply(context)
             self.character_context_builder.record_reply(thread, reply)
             reply_event = session.append_event(
                 SceneEvent(
@@ -942,6 +988,7 @@ class DirectorService:
                     dialogue=reply.dialogue,
                     content=reply.dialogue,
                     source_format=reply.source_format,
+                    model_content=reply.model_content,
                 )
             )
             thread.last_seen_sequence = reply_event.sequence
@@ -960,19 +1007,25 @@ class DirectorService:
                 stage_context=stage_context,
                 action_only=True,
             )
-            plan = await self.director_runtime.generate_plan(
-                session.director_thread.snapshot(),
-                allowed_actor_ids=set(session.character_actor_ids),
-                allowed_target_ids={
-                    session.player.actor_id,
-                    *session.character_actor_ids,
-                },
-                fallback_actor_ids=[],
-                allowed_anchor_ids=self._stage_anchor_ids(stage_context),
-                allowed_stage_actor_ids=allowed_stage_actor_ids,
-                allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
-                require_speaker=False,
-            )
+            with llm_request_scope(
+                purpose="stage_plan",
+                session_id=session.session_id,
+                turn_index=session.turn_index,
+                actor_id="director",
+            ):
+                plan = await self.director_runtime.generate_plan(
+                    session.director_thread.snapshot(),
+                    allowed_actor_ids=set(session.character_actor_ids),
+                    allowed_target_ids={
+                        session.player.actor_id,
+                        *session.character_actor_ids,
+                    },
+                    fallback_actor_ids=[],
+                    allowed_anchor_ids=self._stage_anchor_ids(stage_context),
+                    allowed_stage_actor_ids=allowed_stage_actor_ids,
+                    allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
+                    require_speaker=False,
+                )
             self.director_context_builder.record_plan(
                 session.director_thread,
                 plan,
@@ -983,6 +1036,7 @@ class DirectorService:
                     event_type="director_plan",
                     actor=self._director_actor(),
                     content=plan.model_dump_json(exclude_none=True),
+                    model_content=plan.model_content,
                     visible_to=[],
                     hidden=True,
                 )

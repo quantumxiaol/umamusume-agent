@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from umamusume_agent.dialogue.models import ActorRef, DialogueInputEvent
-from umamusume_agent.dialogue.protocol import StructuredReply
+from umamusume_agent.dialogue.protocol import StructuredReply, parse_structured_reply
 from umamusume_agent.dialogue.runtime import JsonCompletionResult
 from umamusume_agent.director.context import (
     CharacterSceneContextBuilder,
@@ -73,7 +73,7 @@ class _FakeDirectorRuntime:
 
     async def generate_plan(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
-        return DirectorPlan(
+        plan = DirectorPlan(
             speakers=[
                 DirectorSpeakerPlan(
                     actor_id="uma_a",
@@ -87,6 +87,8 @@ class _FakeDirectorRuntime:
                 ),
             ]
         )
+        plan.model_content = json.dumps(plan.model_dump(), ensure_ascii=False, indent=2)
+        return plan
 
 
 class _FakeCharacterRuntime:
@@ -96,10 +98,11 @@ class _FakeCharacterRuntime:
     async def generate_reply(self, context):
         self.contexts.append(context)
         index = len(self.contexts)
-        return StructuredReply(
-            action=f"动作{index}",
-            dialogue=f"角色回复{index}",
-            source_format="json_v2",
+        return parse_structured_reply(
+            json.dumps(
+                {"dialogue": f"角色回复{index}", "action": f"动作{index}"},
+                ensure_ascii=False, indent=2,
+            )
         )
 
 
@@ -138,6 +141,38 @@ class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
             history_dir=Path(temp_dir),
             max_participants=3,
         )
+
+    async def test_51_turns_preserve_prefixes_and_restore_reminders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._service(temp_dir)
+            session = await service.create_session(
+                user_uuid="00000000-0000-4000-8000-000000000001",
+                template_id="test_scene",
+                character_names=["角色A", "角色B"],
+            )
+            previous = {}
+            for turn in range(1, 52):
+                await service.execute_turn(session, [DialogueInputEvent(content=f"第{turn}轮")])
+                threads = {"director": session.director_thread, **session.actor_threads}
+                for actor_id, thread in threads.items():
+                    messages = thread.snapshot()
+                    old = previous.get(actor_id, [])
+                    self.assertEqual(messages[:len(old)], old)
+                    self.assertEqual(sum(m["role"] == "system" for m in messages), 1)
+                    packet = json.loads(messages[-2]["content"])
+                    self.assertEqual("backend_reminder" in packet, turn in {26, 51})
+                    previous[actor_id] = messages
+            restored = await service.restore_session(
+                user_uuid=session.user_uuid, session_id=session.session_id,
+            )
+            for actor_id, thread in {"director": restored.director_thread, **restored.actor_threads}.items():
+                self.assertEqual(thread.messages, previous[actor_id])
+            self.assertTrue(any(event.model_content for event in session.timeline.events))
+            self.assertEqual(session.timeline.events, restored.timeline.events)
+            self.assertTrue(all("model_content" not in event for event in session.public_snapshot()["events"]))
+            await service.execute_turn(restored, [DialogueInputEvent(content="继续")])
+            self.assertNotIn("current_scene_state", json.loads(restored.director_thread.messages[-2]["content"]))
+            self.assertNotIn("scene_state_patch", json.loads(restored.director_thread.messages[-2]["content"]))
 
     async def test_sequential_characters_share_a_public_timeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -402,8 +437,32 @@ class DirectorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(json_runtime.calls[0][1]["force_prompt_only"])
         self.assertTrue(json_runtime.calls[1][1]["force_prompt_only"])
         self.assertEqual(plan.scene_patch.time, "夜晚")
+        self.assertEqual(plan.model_content, "")  # This plan needed speaker sanitization.
         self.assertEqual([item.actor_id for item in plan.speakers], ["uma_a"])
         self.assertEqual(plan.speakers[0].target_actor_ids, ["player"])
+
+    async def test_director_runtime_keeps_original_json_for_an_unmodified_plan(self):
+        raw = '{\n "speakers": [{"actor_id":"uma_a","target_actor_ids":["player"],"intent":"回应"}]\n}'
+        runtime = DirectorRuntime(json_runtime=_FakeJsonRuntime([raw]), settings=_Settings, max_speakers=2)
+        plan = await runtime.generate_plan(
+            [{"role": "user", "content": "继续"}], allowed_actor_ids={"uma_a"},
+            allowed_target_ids={"player"}, fallback_actor_ids=[],
+        )
+        self.assertEqual(plan.model_content, raw)
+        self.assertNotIn("model_content", plan.model_dump())
+
+    async def test_director_empty_output_retries_original_request_without_repair(self):
+        json_runtime = _FakeJsonRuntime([" \n", '{"speakers": []}'])
+        runtime = DirectorRuntime(json_runtime=json_runtime, settings=_Settings, max_speakers=2)
+        messages = [{"role": "system", "content": "director"}, {"role": "user", "content": "继续"}]
+        await runtime.generate_plan(
+            messages, allowed_actor_ids={"uma_a"},
+            allowed_target_ids={"player"}, fallback_actor_ids=["uma_a"],
+        )
+        self.assertEqual([call[0] for call in json_runtime.calls], [messages, messages])
+        self.assertFalse(json_runtime.calls[1][1]["force_prompt_only"])
+        self.assertEqual(json_runtime.calls[1][1]["retry_reason"], "empty_output")
+        self.assertIsNone(json_runtime.calls[1][1]["thinking"])
 
     async def test_director_runtime_adds_one_fallback_speaker_to_empty_plan(self):
         json_runtime = _FakeJsonRuntime(

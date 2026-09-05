@@ -42,7 +42,7 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `LLM_JSON_OUTPUT_MODE` | `auto` | `auto/response_format/prompt_only/disabled` |
 | `LLM_JSON_RETRY_WITHOUT_RESPONSE_FORMAT_ON_ERROR` | `true` | 不支持 JSON mode 时降级 |
 | `LLM_JSON_PARSE_LOOSE_JSON` | `true` | 允许从代码块或嵌入文本取出 JSON object |
-| `LLM_JSON_MAX_RETRIES` | `1` | 解析失败后的 prompt-only 修复次数 |
+| `LLM_JSON_MAX_RETRIES` | `1` | 空输出原样重试或非空 JSON 格式修复的次数 |
 | `LLM_JSON_REGENERATE_ON_PARSE_FAILURE` | `true` | 修复失败后重生成 |
 | `LLM_JSON_MAX_REGENERATE_ATTEMPTS` | `1` | 最终安全降级前的重生成次数 |
 | `LLM_JSON_TEMPERATURE` | `0.35` | 角色 JSON 回复温度 |
@@ -52,8 +52,36 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 
 截断输出不会进入 JSON repair 上下文。运行时会丢弃它，保持原始 messages 不变并将
 `max_tokens` 翻倍；只有 `finish_reason=stop` 且内容完整但无法解析时，才进行格式修复。
+对于空字符串或纯空白输出，使用原始 messages 和原输出模式重试，不追加空 assistant
+或格式修复指令，也不额外增加重试预算。普通角色与导演均采用这一区分。
 
 详细协议和失败链路见 [`dialogue_protocol.md`](dialogue_protocol.md)。
+
+## 模型请求诊断
+
+`LLM_REQUEST_DIAGNOSTICS_ENABLED=true`（默认）为 JSON 生成链路记录 `LLM request`
+和 `LLM result` 日志，不记录提示词、角色回复正文或 API Key。
+
+请求日志包含 `purpose`、`session_id`、`turn_index`、`actor_id`、`call_id`、
+`attempt`、`retry_reason`、`length_retries` 和实际传入的输出模式、温度、输出上限等参数。
+未显式指定的思考模式或强度记为 `provider_default`，不推测供应商实际默认值。
+`attempt` 是应用层生成/修复次数，`length_retries` 单独记录额度重试；SDK 内部的网络
+重试不会分别产生这些日志。
+
+`system_count`、`system_hash`、`messages_hash` 和 `parameter_hash` 用于比较请求变化。
+`previous_call_id` 指向同会话、同用途、同角色的前一次请求；`common_prefix_messages`
+和 `common_prefix_chars` 表示完整相同消息的公共前缀，`previous_messages_preserved`
+表示此前的全部消息是否仍是当前消息的前缀。这里的字符数和哈希是应用层诊断，
+不等于供应商编码后的 token 数或缓存键。只保留最近 128 个线程的指纹，进程重启后清空。
+
+前缀检查仅比较当前进程内的请求，不将比较基线写入会话历史或浏览器快照，也不做
+跨重启恢复校验。进程重启或线程指纹被淘汰后的首次请求没有比较基线，
+`previous_call_id`、`common_prefix_messages`、`common_prefix_chars`、
+`previous_messages_preserved` 和 `parameters_changed` 均为 `null`，表示尚不能比较，
+不代表前缀损坏。日志中的哈希仅供诊断，不是可恢复的检查点。
+
+结果日志通过 `call_id` 关联请求，通过上游 `request_id` 关联原有 `LLM usage` 日志，
+并记录 `content_chars`、`content_empty`、`content_whitespace_only` 和结束原因。
 
 ## DeepSeek 最近用量
 
@@ -87,6 +115,8 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 
 `DIALOGUE_SESSION_HISTORY_MAX_MESSAGES=0` 有利于保留稳定前缀，但长期会话会增加上下文
 成本，应根据供应商上下文上限调整。
+格式提醒附在达到间隔后的第一条 user 消息上，之后始终保留在同一条历史消息中。
+不会增加中途 system 消息，也不会将提醒移到每轮最新消息上。
 
 ## 导演模式
 
@@ -105,6 +135,12 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `DIRECTOR_HISTORY_DIRECTORY` | `./outputs/director` | 导演 JSONL 副本目录 |
 
 详细上下文和缓存边界见 [`director_mode_v1.md`](director_mode_v1.md)。
+普通导演及场景角色的周期提醒写入当轮 user 消息的 `backend_reminder` 字段，
+初始 system 保持固定。完整后端历史恢复会重建同样的消息分组；浏览器快照仍允许用
+公开剧情重建可继续的上下文，不要求复原已丢失的内部导演计划或保留旧供应商缓存。
+消息精确重建以提示词配置和角色卡未改变为前提。后端历史同时保留通过校验且未被
+修改的原始 JSON 回复；浏览器公开快照不包含该内部字段。每个普通导演/场景角色
+线程首次接收完整场景状态，后续只追加变化字段，不变时省略；所有历史仍完整保留。
 
 ## API 保护与限流
 

@@ -20,16 +20,7 @@ DIRECTOR_SYSTEM_PROMPT = """你是多人角色扮演场景的导演。
 结合最新事件、当前场景和角色关系，输出一个 JSON object，格式必须是：
 {
   "schema_version": 1,
-  "scene_patch": {
-    "location": null,
-    "sub_location": null,
-    "time": null,
-    "weather": null,
-    "lighting": null,
-    "atmosphere": null,
-    "ambient_sound": null,
-    "props": null
-  },
+  "scene_patch": {},
   "narration": "可选的简短环境或过渡旁白",
   "speakers": [
     {
@@ -39,13 +30,16 @@ DIRECTOR_SYSTEM_PROMPT = """你是多人角色扮演场景的导演。
     }
   ]
 }
-每轮最多安排给定上限数量的角色，每个角色最多一次。没有变化的 scene_patch 字段使用 null。"""
+每轮最多安排给定上限数量的角色，每个角色最多一次。
+scene_patch 只包含发生变化的字段；没有变化时输出 {}。可更新 location、sub_location、time、weather、lighting、atmosphere、ambient_sound、props，其中 props 是字符串数组。
+输入中的 current_scene_state 是完整状态，scene_state_patch 是在上次状态上应用的变化字段；没有这两个字段时沿用先前状态。"""
 
 
 CHARACTER_SCENE_INSTRUCTION = """你正在多人共享场景中扮演当前角色。
 事件按真实发生顺序提供。你能听到其他角色和训练员的公开发言；不要把其他角色的发言误认为训练员发言。
 导演提示只规定本轮意图，不替你写台词。你的性格、措辞和最终行为仍必须遵循角色设定。
-只回应到当前时刻，不要替其他角色行动或发言，不要自行开始无限连续对话。"""
+只回应到当前时刻，不要替其他角色行动或发言，不要自行开始无限连续对话。
+输入中的 current_scene_state 是完整状态，scene_state_patch 是在上次状态上应用的变化字段；没有这两个字段时沿用先前状态。"""
 
 CHARACTER_SCENE_RESPONSE_FORMAT = """【多人场景 JSON 回复格式硬性规范】
 你必须只输出一个合法 JSON object，不要输出 Markdown、解释或其他文字。
@@ -64,6 +58,7 @@ class PromptThread:
     messages: list[dict[str, Any]]
     last_seen_sequence: int = 0
     reply_count: int = 0
+    last_scene_state: dict[str, Any] | None = None
 
     def append(self, role: str, content: str) -> None:
         self.messages.append({"role": role, "content": content})
@@ -95,6 +90,18 @@ def _system_message(content: str, settings: Any) -> dict[str, Any]:
 
 def scene_state_payload(state: SceneState) -> dict[str, Any]:
     return state.model_dump(exclude_none=True)
+
+
+def scene_state_update(thread: PromptThread, state: SceneState) -> dict[str, Any]:
+    """Append a full initial state, then only changed fields (no history loss)."""
+    current = scene_state_payload(state)
+    previous = thread.last_scene_state
+    thread.last_scene_state = current
+    if previous is None:
+        return {"current_scene_state": current}
+    patch = {key: value for key, value in current.items() if previous.get(key) != value}
+    patch.update({key: None for key in previous if key not in current})
+    return {"scene_state_patch": patch} if patch else {}
 
 
 def render_scene_event(event: SceneEvent) -> str:
@@ -185,14 +192,14 @@ class DirectorContextBuilder:
             0,
             int(self.settings.DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES),
         )
-        if thread.reply_count > 0 and interval > 0 and thread.reply_count % interval == 0:
-            thread.append("system", DIRECTOR_SYSTEM_PROMPT)
         events = timeline.since(thread.last_seen_sequence)
         packet = {
-            "current_scene_state": scene_state_payload(timeline.state),
+            **scene_state_update(thread, timeline.state),
             "new_events": _event_packet(events),
             "instruction": "为当前最新事件制定一次导演计划。",
         }
+        if thread.reply_count > 0 and interval > 0 and thread.reply_count % interval == 0:
+            packet["backend_reminder"] = DIRECTOR_SYSTEM_PROMPT
         thread.append(
             "user",
             json.dumps(packet, ensure_ascii=False, separators=(",", ":")),
@@ -203,7 +210,7 @@ class DirectorContextBuilder:
     def record_plan(thread: PromptThread, plan: DirectorPlan) -> None:
         thread.append(
             "assistant",
-            plan.model_dump_json(exclude_none=True),
+            plan.model_content or plan.model_dump_json(exclude_none=True),
         )
         thread.reply_count += 1
 
@@ -246,23 +253,22 @@ class CharacterSceneContextBuilder:
             0,
             int(self.settings.DIRECTOR_ROLE_REINJECTION_INTERVAL_REPLIES),
         )
-        if thread.reply_count > 0 and interval > 0 and thread.reply_count % interval == 0:
-            thread.append(
-                "system",
-                f"{CHARACTER_SCENE_INSTRUCTION}\n\n{CHARACTER_SCENE_RESPONSE_FORMAT}",
-            )
         events = timeline.since(
             thread.last_seen_sequence,
             actor_id=actor.actor_id,
         )
         packet = {
-            "current_scene_state": scene_state_payload(timeline.state),
+            **scene_state_update(thread, timeline.state),
             "new_visible_events": _event_packet(events),
             "director_instruction_for_this_reply": {
                 "intent": intent,
                 "target_actor_ids": target_actor_ids,
             },
         }
+        if thread.reply_count > 0 and interval > 0 and thread.reply_count % interval == 0:
+            packet["backend_reminder"] = (
+                f"{CHARACTER_SCENE_INSTRUCTION}\n\n{CHARACTER_SCENE_RESPONSE_FORMAT}"
+            )
         thread.append(
             "user",
             json.dumps(packet, ensure_ascii=False, separators=(",", ":")),
@@ -274,7 +280,7 @@ class CharacterSceneContextBuilder:
     def record_reply(thread: PromptThread, reply: StructuredReply) -> None:
         thread.append(
             "assistant",
-            json.dumps(
+            reply.model_content or json.dumps(
                 {"action": reply.action, "dialogue": reply.dialogue},
                 ensure_ascii=False,
                 separators=(",", ":"),

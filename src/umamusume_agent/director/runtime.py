@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -228,13 +229,17 @@ class DirectorRuntime:
     ) -> DirectorPlan:
         attempts = max(0, int(self.settings.DIRECTOR_JSON_REPAIR_ATTEMPTS)) + 1
         request_messages = list(messages)
+        prompt_only = False
+        retry_reason = "initial"
         for attempt in range(attempts):
             completion = await self.json_runtime.create_json_completion_result(
                 request_messages,
                 temperature=float(self.settings.DIRECTOR_LLM_TEMPERATURE),
                 max_tokens=max(64, int(self.settings.DIRECTOR_LLM_MAX_TOKENS)),
-                force_prompt_only=attempt > 0,
+                force_prompt_only=prompt_only,
                 thinking=self._thinking_enabled(),
+                attempt=attempt + 1,
+                retry_reason=retry_reason,
             )
             if not completion.can_parse:
                 logger.warning(
@@ -268,6 +273,18 @@ class DirectorRuntime:
                         update={"speakers": fallback.speakers},
                         deep=True,
                     )
+                # Do not replay an unsanitized plan or unrecognized fields.
+                # Whitespace/key order may be kept only if accepted semantics
+                # and the complete JSON payload were left unchanged.
+                try:
+                    original = DirectorPlan.model_validate_json(raw)
+                    if (
+                        json.loads(raw) == original.model_dump(mode="json", exclude_unset=True)
+                        and original.model_dump() == sanitized.model_dump()
+                    ):
+                        sanitized.model_content = raw
+                except (ValueError, TypeError):
+                    pass
                 return sanitized
             except Exception as exc:
                 logger.warning(
@@ -275,7 +292,10 @@ class DirectorRuntime:
                     attempt + 1,
                     exc,
                 )
-                request_messages = [
+                empty_output = not raw.strip()
+                prompt_only = not empty_output
+                retry_reason = "empty_output" if empty_output else "json_repair"
+                request_messages = list(messages) if empty_output else [
                     *messages,
                     {"role": "assistant", "content": raw},
                     {"role": "user", "content": DIRECTOR_REPAIR_PROMPT},

@@ -134,6 +134,17 @@ class DialogueHistoryAndSessionTests(unittest.TestCase):
                 },
             )
 
+            original_json = '{\n  "dialogue": "收到。",\n  "action": "点头。"\n}'
+            session.add_message(
+                "assistant", "收到。", action="点头。", dialogue="收到。",
+                model_content=original_json,
+            )
+            self.assertEqual(session.history[-1]["content"], original_json)
+            restored_with_raw = load_persistent_history(
+                history_dir, user_uuid, character, history_max_messages=0,
+            )
+            self.assertEqual(restored_with_raw, session.history)
+
 
 if __name__ == "__main__":
     unittest.main()
