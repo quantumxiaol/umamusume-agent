@@ -14,12 +14,16 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 
 ![Umamusume Agent 界面预览](resources/png/example.png)
 
-[Agent 体验](https://quantumxiaol.github.io/umamusume-agent/)
-供体验，无TTS。
+[Agent 对话体验](https://quantumxiaol.github.io/umamusume-agent/)
+供体验，无TTS，不作为长期服务承诺，随着成本的攀升可能停止提供服务。
 
-注意，当前后端采用 DeepSeek V4 Flash，1M 上下文，设计上向尽可能缓存命中靠拢，暂时没有历史压缩和窗口功能，所有历史都发送便于前缀命中复用缓存。如果要体验，尽量在波谷时间（非工作日工作时间），我可以节省一些开支。对于长期使用体验，建议自己在github和hugging face 分别fork，接入自己的[DeepSeek API](https://api-docs.deepseek.com/zh-cn/)，搭建属于自己的服务，确保服务稳定和数据安全，参见[搭建流程](./docs/deployment.md)。
+注意，当前后端采用 DeepSeek V4 Flash，1M 上下文，设计上向尽可能缓存命中靠拢，暂时没有历史压缩和窗口功能，所有历史都发送便于前缀命中复用缓存。如果要体验，尽量在波谷时间（非工作日工作时间），我可以节省一些开支。
 
-当历史超出上下文会有问题，但要达到1M上下文，大概需要近千轮对话。
+对于长期使用体验，建议自己在 github 和 hugging face 分别fork本项目，接入自己的[DeepSeek API](https://api-docs.deepseek.com/zh-cn/)，搭建属于自己的服务，确保服务稳定和数据安全，参见[搭建流程](./docs/deployment.md)。
+
+当历史超出上下文限制会有问题，但要达到1M上下文，大概需要近千轮对话。
+
+由于大陆地区规定禁止提供AI虚拟角色陪同类服务，我不能提供收费方式来回收部分成本，否则就构成提供付费服务了。因此随着成本的攀升可能停止提供服务。代码仓库本身为MIT LICENSE，可以自行部署服务。
 
 ## 目的
 
@@ -255,6 +259,8 @@ Fish Speech 请求、MCP 工具、翻译重试、取消和临时音频见
 ## TODO
 
 - [ ] 完善 Stage 演出模式及独立舞台前端接入。
+- [ ] 上线《马娘乐园》。
+
 
 ## 文档
 
