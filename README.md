@@ -15,7 +15,11 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 ![Umamusume Agent 界面预览](resources/png/example.png)
 
 [Agent 体验](https://quantumxiaol.github.io/umamusume-agent/)
-供体验
+供体验，无TTS。
+
+注意，当前后端采用 DeepSeek V4 Flash，1M 上下文，设计上向尽可能缓存命中靠拢，暂时没有历史压缩和窗口功能，所有历史都发送便于前缀命中复用缓存。如果要体验，尽量在波谷时间（非工作日工作时间），我可以节省一些开支。对于长期使用体验，建议自己在github和hugging face 分别fork，接入自己的[DeepSeek API](https://api-docs.deepseek.com/zh-cn/)，搭建属于自己的服务，确保服务稳定和数据安全，参见[搭建流程](./docs/deployment.md)。
+
+当历史超出上下文会有问题，但要达到1M上下文，大概需要近千轮对话。
 
 ## 目的
 
@@ -40,7 +44,7 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 - **手动重生成**：可在原位替换导演场景最后一条角色回复，保留事件顺序和 revision。
 - **异步 TTS**：只处理校验成功的新角色对白；不配音动作、环境、旁白或解析错误提示。
 - **前缀复用**：导演、每位角色和 TTS 翻译分别维护稳定线程，便于供应商前缀缓存命中。
-- **DeepSeek 最近用量**：按当前浏览器展示本实例内的缓存输入、未缓存输入、输出与推理 token，不读取账户余额。
+- **DeepSeek 最近用量**：按当前浏览器展示本实例内的缓存输入、未缓存输入、输出与推理 token，不包括账户余额。
 
 详细协议见 [对话协议](docs/dialogue_protocol.md)、
 [导演模式](docs/director_mode_v1.md) 和 [TTS 链路](docs/tts_pipeline.md)。
@@ -102,6 +106,8 @@ git lfs pull
 
 ### 后端
 
+推荐使用uv来管理环境。
+
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
@@ -113,7 +119,7 @@ uv sync
 ```bash
 conda create -n umamusume-agent python=3.12
 conda activate umamusume-agent
-uv sync
+pip install .
 ```
 
 ### 前端
@@ -140,8 +146,8 @@ cp frontend/.env.template frontend/.env
 后端最少需要：
 
 ```text
-ROLEPLAY_LLM_MODEL_NAME=qwen-plus
-ROLEPLAY_LLM_MODEL_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+ROLEPLAY_LLM_MODEL_NAME=deepseek-v4-flash
+ROLEPLAY_LLM_MODEL_BASE_URL=https://api.deepseek.com
 ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 ```
 
