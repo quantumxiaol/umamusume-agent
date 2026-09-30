@@ -48,14 +48,25 @@ characters/
 │   │   ├── context.py             # 导演/角色独立 PromptThread
 │   │   ├── history.py             # 导演 JSONL 和 revision 恢复
 │   │   ├── models.py              # 场景、计划、事件和快照
+│   │   ├── recovery.py            # JSONL 回放与浏览器快照校验恢复
 │   │   ├── runtime.py             # DirectorRuntime 与计划校验
-│   │   ├── service.py             # 调度、顺序生成与恢复
+│   │   ├── service.py             # 会话生命周期、调度与重生成
 │   │   ├── session.py             # SceneSession
 │   │   ├── templates.py           # 场景预设仓库
 │   │   └── timeline.py            # 共享事件流与场景状态
 │   ├── server/
-│   │   ├── dialogue_server.py     # FastAPI 入口、中间件和路由装配
-│   │   └── director_routes.py     # /director API 与 SSE
+│   │   ├── dialogue_server.py     # 保持兼容的 Uvicorn / HF 启动入口
+│   │   ├── app.py                 # 应用工厂、路由挂载与启动/退出生命周期
+│   │   ├── services.py            # 每个应用独立的依赖装配与测试注入点
+│   │   ├── middleware.py          # API Key 与应用独立的限流状态
+│   │   ├── schemas.py             # 单角色 HTTP 请求模型
+│   │   ├── sessions.py            # 单角色会话注册、恢复与过期清理
+│   │   ├── http_utils.py          # HTTP 错误和浏览器 UUID 转换
+│   │   ├── dialogue_routes.py     # 单聊、会话、角色与历史 API
+│   │   ├── streaming.py           # 旧两行协议的 token 流式响应
+│   │   ├── tts_routes.py          # 音频、TTS Job API 与单聊配音适配
+│   │   ├── director_routes.py     # /director API 与 SSE
+│   │   └── stage_routes.py        # /stage API
 │   ├── tts/                       # 异步日语配音链路
 │   │   ├── agent.py               # 中文对白→日语配音文本
 │   │   ├── audio_utils.py          # 可选本地音频处理工具

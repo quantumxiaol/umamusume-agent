@@ -1,11 +1,15 @@
 import unittest
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from umamusume_agent.server import dialogue_server as ds
+from umamusume_agent.dialogue.protocol import to_compact_context_message
+from umamusume_agent.server.app import create_app
+from umamusume_agent.server.services import build_services
+from tests.server_support import test_settings
 
 
 class _FakeMessage:
@@ -89,7 +93,8 @@ class _FakeCharacter:
 
 
 class _FakeSession:
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, context_builder):
+        self.context_builder = context_builder
         self.session_id = session_id
         self.user_uuid = "00000000-0000-4000-8000-000000000001"
         self.character = _FakeCharacter()
@@ -109,7 +114,7 @@ class _FakeSession:
         return None
 
     def get_messages(self, text_only: bool = False):
-        context = ds.legacy_context_builder.build(
+        context = self.context_builder.build(
             character=self.character,
             history=self.history,
             text_only=text_only,
@@ -124,10 +129,10 @@ class _FakeSession:
                 "content": content,
                 **metadata,
             }
-            self.history.append(ds._to_compact_context_message(record))
+            self.history.append(to_compact_context_message(record))
         else:
             self.history.append(
-                ds._to_compact_context_message(
+                to_compact_context_message(
                     {"role": role, "content": content, **metadata}
                 )
             )
@@ -137,45 +142,23 @@ class _FakeSession:
 
 class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self._original_llm_client = ds.llm_client
-        self._original_api_access_key = ds.API_ACCESS_KEY
-        self._original_rate_limit_enabled = ds.API_RATE_LIMIT_ENABLED
-        self._original_enable_tts = ds.ENABLE_TTS
-        self._original_json_enabled = ds.config.LLM_JSON_ENABLED
-        self._original_json_output_mode = ds.config.LLM_JSON_OUTPUT_MODE
-        self._original_sessions = dict(ds.sessions)
-
-        ds.API_ACCESS_KEY = ""
-        ds.API_RATE_LIMIT_ENABLED = False
-        ds.ENABLE_TTS = False
-        ds.config.LLM_JSON_ENABLED = True
-        ds.config.LLM_JSON_OUTPUT_MODE = "auto"
-        ds.sessions.clear()
-        ds._rate_limit_buckets.clear()
-
-        self.transport = httpx.ASGITransport(app=ds.app)
-        self.client = httpx.AsyncClient(
-            transport=self.transport,
-            base_url="http://testserver",
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.settings = test_settings(Path(self.temp_dir.name))
+        self.services = build_services(
+            settings=self.settings, llm_client=_FakeLlmClient("unused"),
+            tts_client=object(),
         )
-
-    async def asyncTearDown(self):
-        await self.client.aclose()
-        ds.llm_client = self._original_llm_client
-        ds.API_ACCESS_KEY = self._original_api_access_key
-        ds.API_RATE_LIMIT_ENABLED = self._original_rate_limit_enabled
-        ds.ENABLE_TTS = self._original_enable_tts
-        ds.config.LLM_JSON_ENABLED = self._original_json_enabled
-        ds.config.LLM_JSON_OUTPUT_MODE = self._original_json_output_mode
-        ds.sessions.clear()
-        ds.sessions.update(self._original_sessions)
-        ds._rate_limit_buckets.clear()
-        ds._sync_character_runtime_client()
+        self.app = create_app(services=self.services)
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app), base_url="http://testserver",
+        )
+        self.addAsyncCleanup(self.client.aclose)
 
     def _prepare_session(self, session_id: str = "route-test") -> _FakeSession:
-        session = _FakeSession(session_id)
-        ds.sessions[session_id] = session
-        ds.llm_client = _FakeLlmClient(
+        session = _FakeSession(session_id, self.services.dialogue_service.context_builder)
+        self.services.session_store.sessions[session_id] = session
+        self.services.character_runtime.llm_client = _FakeLlmClient(
             '{"action":"测试角色轻轻点头。","dialogue":"收到。"}'
         )
         return session
@@ -236,7 +219,7 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             "测试角色",
         )
 
-        completion_call = ds.llm_client.completions.calls[0]
+        completion_call = self.services.character_runtime.llm_client.completions.calls[0]
         self.assertEqual(
             completion_call["messages"][-1],
             {
@@ -291,8 +274,8 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(ds.llm_client.completions.calls), 1)
-        completion_messages = ds.llm_client.completions.calls[0]["messages"]
+        self.assertEqual(len(self.services.character_runtime.llm_client.completions.calls), 1)
+        completion_messages = self.services.character_runtime.llm_client.completions.calls[0]["messages"]
         self.assertEqual(
             completion_messages[-3:],
             [
@@ -359,8 +342,8 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_stream_keeps_token_and_done_protocol(self):
         session = self._prepare_session("legacy-stream-test")
-        ds.config.LLM_JSON_OUTPUT_MODE = "disabled"
-        ds.llm_client = _FakeLlmClient(
+        self.settings.LLM_JSON_OUTPUT_MODE = "disabled"
+        self.services.character_runtime.llm_client = _FakeLlmClient(
             "动作：测试角色挥了挥手。\n对白：晚上好。"
         )
 
@@ -381,7 +364,7 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_chat_tts_receives_dialogue_without_action(self):
         session = self._prepare_session("tts-test")
-        ds.ENABLE_TTS = True
+        self.settings.ENABLE_TTS = True
         submit_voice = AsyncMock(
             return_value={
                 "job_id": "tts-test-job",
@@ -390,7 +373,7 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        with patch.object(ds, "_submit_single_voice", submit_voice):
+        with patch.object(self.services.voice_service, "submit_dialogue", submit_voice):
             response = await self.client.post(
                 "/chat",
                 json={
@@ -404,17 +387,45 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("voice", response.json())
         self.assertEqual(submit_voice.await_count, 1)
         self.assertEqual(
-            submit_voice.await_args.kwargs["dialogue"],
+            submit_voice.await_args.kwargs["dialogue_text"],
             "收到。",
         )
 
+    async def test_stream_voice_event_order_in_both_protocols(self):
+        self.settings.ENABLE_TTS = True
+        for mode in ("auto", "disabled"):
+            with self.subTest(mode=mode):
+                session = self._prepare_session(f"voice-stream-{mode}")
+                self.settings.LLM_JSON_OUTPUT_MODE = mode
+                if mode == "disabled":
+                    self.services.character_runtime.llm_client = _FakeLlmClient(
+                        "动作：她挥手。\n对白：晚上好。"
+                    )
+                submit = AsyncMock(return_value={"job_id": "voice-job", "state": "queued"})
+                with patch.object(self.services.voice_service, "submit_dialogue", submit):
+                    response = await self.client.post("/chat_stream", json={
+                        "session_id": session.session_id, "message": "hi", "generate_voice": True,
+                    })
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(submit.await_count, 1)
+                done = response.text.index("event: done")
+                voice = response.text.index("event: voice_pending")
+                if mode == "auto":
+                    self.assertLess(response.text.index("event: structured_reply"), voice)
+                    self.assertLess(voice, done)
+                else:
+                    self.assertLess(done, voice)
+                self.assertEqual(
+                    submit.await_args.kwargs["context_events"][-1]["actor_id"], "player",
+                )
+
     async def test_chat_parse_error_fallback_never_submits_tts(self):
         session = self._prepare_session("tts-parse-error-test")
-        ds.ENABLE_TTS = True
-        ds.llm_client = _FakeLlmClient("not json")
+        self.settings.ENABLE_TTS = True
+        self.services.character_runtime.llm_client = _FakeLlmClient("not json")
         submit_voice = AsyncMock()
 
-        with patch.object(ds, "_submit_single_voice", submit_voice):
+        with patch.object(self.services.voice_service, "submit_dialogue", submit_voice):
             response = await self.client.post(
                 "/chat",
                 json={
@@ -434,7 +445,7 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reenabling_tts_does_not_backfill_previous_reply(self):
         session = self._prepare_session("tts-toggle-test")
-        ds.ENABLE_TTS = True
+        self.settings.ENABLE_TTS = True
         submit_voice = AsyncMock(
             return_value={
                 "job_id": "tts-current-job",
@@ -443,7 +454,7 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        with patch.object(ds, "_submit_single_voice", submit_voice):
+        with patch.object(self.services.voice_service, "submit_dialogue", submit_voice):
             disabled_response = await self.client.post(
                 "/chat",
                 json={
@@ -466,7 +477,7 @@ class DialogueRouteCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enabled_response.status_code, 200)
         self.assertEqual(submit_voice.await_count, 1)
         self.assertEqual(
-            submit_voice.await_args.kwargs["dialogue"],
+            submit_voice.await_args.kwargs["dialogue_text"],
             enabled_response.json()["dialogue"],
         )
 

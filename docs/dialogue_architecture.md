@@ -53,8 +53,28 @@ the LangChain MCP adapters remain available through the optional
 - `tts/jobs.py`: asynchronous job lifecycle, bounded concurrency, and TTL.
 - `tts/fish_client.py`: external Fish Speech multipart HTTP protocol.
 - `tts/mcp_server.py`: project-local TTS MCP tools.
-- `server/dialogue_server.py`: FastAPI middleware, lifecycle, routes, SSE, and
-  HTTP error translation.
+- `server/dialogue_server.py`: stable Uvicorn/Hugging Face entry point only.
+- `server/app.py`: `create_app`, router assembly, CORS and application lifecycle.
+- `server/services.py`: `build_services` / `ServerServices`, assembling one
+  dependency graph per app. Dialogue, Director and Stage reuse the same
+  `CharacterRuntime`, while their session registries remain separate.
+- `server/middleware.py`: API-key protection and per-app rate-limit buckets.
+- `server/schemas.py`: single-character HTTP request models.
+- `server/sessions.py`: single-character session registration and expiry.
+- `server/dialogue_routes.py`: single-character, character-list, session and
+  history endpoints; HTTP adaptation rather than model execution logic.
+- `server/streaming.py`: the legacy two-line token-stream protocol.
+- `server/tts_routes.py`: audio/job endpoints and single-dialogue TTS adaptation.
+- `server/http_utils.py`: browser UUID validation and upstream HTTP errors.
+- `director/recovery.py`: `SceneRecovery`, validating browser snapshots and
+  replaying server JSONL into scene state and prompt threads. It depends on
+  character loading and context builders, not on the online turn service.
+
+Application and runtime tests inject fake clients through `build_services` or
+`CharacterRuntime`, then call `create_app(services=...)`. They no longer patch
+module-level clients or use protocol/history forwarding functions in the entry
+point. Importing the factory does not instantiate clients or create sessions;
+the deployment entry point still creates the default app.
 
 ## Compatibility invariants
 
@@ -102,5 +122,10 @@ Run the runtime-focused suite with:
   tests.test_dialogue_json_protocol \
   tests.test_dialogue_context \
   tests.test_dialogue_history \
-  tests.test_dialogue_routes
+  tests.test_dialogue_routes \
+  tests.test_server_app \
+  tests.test_director_recovery \
+  tests.test_director_service \
+  tests.test_director_routes \
+  tests.test_stage_integration
 ```
