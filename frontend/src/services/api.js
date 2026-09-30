@@ -121,7 +121,7 @@ export const chatOnce = async (sessionId, message, generateVoice = false, dialog
       message,
       generate_voice: generateVoice,
       ...buildDialogueEventFields(dialogueEvent),
-    });
+    }, { timeout: 0 }); // Long compaction has server-side per-attempt deadlines.
     return response.data || {};
   } catch (error) {
     throw parseError(error);
@@ -176,7 +176,7 @@ export const chatStream = async (
       }
       const data = dataLines.join('\n');
       const type = eventName || 'token';
-      if (type === 'voice_pending' || type === 'structured_reply') {
+      if (type === 'voice_pending' || type === 'structured_reply' || type === 'context_status') {
         try {
           emitEvent(onEvent, type, JSON.parse(data));
         } catch (err) {
@@ -185,7 +185,7 @@ export const chatStream = async (
       } else {
         emitEvent(onEvent, type, data);
       }
-      if (type === 'done') {
+      if (type === 'done' || type === 'error') {
         doneSeen = true;
       }
       eventName = null;
@@ -226,7 +226,7 @@ export const chatStream = async (
     }
 
     if (!doneSeen) {
-      emitEvent(onEvent, 'done', '');
+      emitEvent(onEvent, 'error', '连接在完成前中断，请检查历史后重试。');
     }
   } catch (error) {
     emitEvent(onEvent, 'error', error.message || 'Stream error occurred');
@@ -249,13 +249,22 @@ export const fetchHistory = async (userUuid, characterName = '', limit = 200) =>
   }
 };
 
-export const importHistory = async (sessionId, messages, replaceCurrent = true, source = 'manual') => {
+export const fetchDialogueContext = async (sessionId, userUuid) => {
+  const response = await apiClient.get(`/session/${encodeURIComponent(sessionId)}/context`, {
+    params: { user_uuid: userUuid },
+  });
+  return response.data || {};
+};
+
+export const importHistory = async (sessionId, messages, replaceCurrent = true, source = 'manual', checkpoint = null, checkpoints = null) => {
   try {
     const response = await apiClient.post('/history/import', {
       session_id: sessionId,
       messages,
       replace_current: replaceCurrent,
       source,
+      context_checkpoint: checkpoint,
+      context_checkpoints: checkpoints,
     });
     return response.data || {};
   } catch (error) {

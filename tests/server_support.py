@@ -16,6 +16,7 @@ def test_settings(root: Path | None = None, **overrides):
         ENABLE_TTS=False,
         LLM_JSON_ENABLED=True,
         LLM_JSON_OUTPUT_MODE="auto",
+        DIALOGUE_COMPACTION_ENABLED=False,
         LLM_REQUEST_DIAGNOSTICS_ENABLED=True,
     )
     if root is not None:

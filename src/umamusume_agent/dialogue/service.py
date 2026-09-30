@@ -11,6 +11,7 @@ from .context import LegacyDialogueContextBuilder
 from .models import (
     EVENT_SCHEMA_VERSION,
     ActorRef,
+    CharacterReplyContext,
     DialogueEventType,
     DialogueInputEvent,
     DialogueTurnResult,
@@ -87,11 +88,7 @@ class DialogueService:
             }
         session.add_message("user", message, **input_metadata)
 
-        context = self.context_builder.build(
-            character=session.character,
-            history=session.history,
-            text_only=text_only,
-        )
+        context = CharacterReplyContext(messages=session.get_messages(text_only=text_only))
         with llm_request_scope(
             purpose="dialogue_reply",
             session_id=session.session_id,

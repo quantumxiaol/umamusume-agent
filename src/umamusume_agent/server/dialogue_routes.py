@@ -2,6 +2,7 @@
 import json
 import logging
 import shutil
+from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Optional
@@ -15,13 +16,15 @@ from ..dialogue.history import (
     name_tokens, normalize_import_messages, parse_history_file, resolve_character_query_names,
 )
 from ..dialogue.protocol import is_json_reply_enabled
+from ..dialogue.history_order import history_timestamp_key
+from ..dialogue.memory import checkpoint_payload, checkpoint_history_payload
 from ..dialogue.service import DialogueService
 from ..llm_usage import DeepSeekUsageTracker
 from ..tts import VoiceService
 from .http_utils import require_valid_user_uuid, translate_llm_exception
 from .schemas import DialogueRequest, HistoryImportRequest, LoadCharacterRequest
 from .sessions import DialogueSessionStore
-from .streaming import stream_legacy_reply
+from .dialogue_turns import execute_dialogue_turn, progress_events, stream_legacy_with_memory
 from .tts_routes import should_generate_voice, submit_single_voice
 
 logger = logging.getLogger(__name__)
@@ -30,7 +33,7 @@ logger = logging.getLogger(__name__)
 def create_dialogue_router(
     *, service: DialogueService, session_store: DialogueSessionStore,
     character_manager: CharacterManager, voice_service: VoiceService,
-    usage_tracker: DeepSeekUsageTracker, settings,
+    usage_tracker: DeepSeekUsageTracker, settings, compactor,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -63,6 +66,8 @@ def create_dialogue_router(
                 "personality": character.personality.model_dump(),
                 "created_at": session.created_at.isoformat(),
                 "restored_history_messages": len(session.history),
+                "context_checkpoint": checkpoint_payload(session),
+                "context_checkpoints": checkpoint_history_payload(session),
                 "output_dir": str(session.output_dir),
                 "history_file": str(session.history_file),
                 "voice_preview_url": (
@@ -92,20 +97,10 @@ def create_dialogue_router(
             raise HTTPException(status_code=404, detail="会话不存在")
 
         try:
-            with usage_tracker.operation(
-                user_uuid=session.user_uuid,
-                feature="dialogue_turn",
-            ):
-                turn_result = await service.execute_turn(
-                    session=session,
-                    message=request.message,
-                    text_only=request.text_only,
-                    speaker=request.speaker,
-                    event_type=request.event_type,
-                    target_actor_ids=request.target_actor_ids,
-                    context_events=request.context_events,
-                )
-            result = turn_result.to_api_dict()
+            turn_result, result = await execute_dialogue_turn(
+                request=request, session=session, service=service,
+                compactor=compactor, usage_tracker=usage_tracker,
+            )
 
             # TTS submission is quick; translation and Fish Speech run inside the
             # project-local MCP server after this API response returns.
@@ -140,24 +135,17 @@ def create_dialogue_router(
         async def event_generator() -> AsyncGenerator[str, None]:
             try:
                 if is_json_reply_enabled(settings):
-                    with usage_tracker.operation(
-                        user_uuid=session.user_uuid,
-                        feature="dialogue_turn",
-                    ):
-                        turn_result = await service.execute_turn(
-                            session=session,
-                            message=request.message,
-                            text_only=request.text_only,
-                            speaker=request.speaker,
-                            event_type=request.event_type,
-                            target_actor_ids=request.target_actor_ids,
-                            context_events=request.context_events,
-                        )
-
-                    payload = json.dumps(
-                        turn_result.to_api_dict(),
-                        ensure_ascii=False,
-                    )
+                    async for kind, data in progress_events(lambda notify: execute_dialogue_turn(
+                        request=request, session=session, service=service,
+                        compactor=compactor, usage_tracker=usage_tracker, on_progress=notify,
+                    )):
+                        if kind == "heartbeat":
+                            yield ": keepalive\n\n"
+                        elif kind == "context_status":
+                            yield f"event: context_status\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                        else:
+                            turn_result, result = data
+                    payload = json.dumps(result, ensure_ascii=False)
                     yield f"event: structured_reply\ndata: {payload}\n\n"
 
                     if should_generate_voice(
@@ -185,10 +173,11 @@ def create_dialogue_router(
                     yield f"event: done\ndata: {{}}\n\n"
                     return
 
-                async for event in stream_legacy_reply(
+                async for event in stream_legacy_with_memory(
                     request=request, session=session, runtime=service.runtime,
                     settings=settings, voice_service=voice_service,
                     enable_tts=settings.ENABLE_TTS, llm_usage_tracker=usage_tracker,
+                    compactor=compactor,
                 ):
                     yield event
             except Exception as e:
@@ -223,12 +212,23 @@ def create_dialogue_router(
     @router.delete("/session/{session_id}")
     async def delete_session(session_id: str):
         """删除会话"""
-        session = session_store.sessions.pop(session_id, None)
+        session = session_store.sessions.get(session_id)
         if session:
-            session.mark_closed("deleted_by_api")
+            async with session.lock:
+                session_store.sessions.pop(session_id, None)
+                session.mark_closed("deleted_by_api")
             return {"status": "deleted", "session_id": session_id}
         else:
             raise HTTPException(status_code=404, detail="会话不存在")
+
+    @router.get("/session/{session_id}/context")
+    async def get_context(session_id: str, user_uuid: str):
+        session = session_store.get(session_id)
+        if not session or session.user_uuid != require_valid_user_uuid(user_uuid):
+            raise HTTPException(status_code=404, detail="会话不存在")
+        return {"context_checkpoint": checkpoint_payload(session),
+                "context_checkpoints": checkpoint_history_payload(session),
+                "history_size": len(session.history), "busy": session.lock.locked()}
 
     @router.get("/history")
     async def get_history(
@@ -264,12 +264,12 @@ def create_dialogue_router(
             )
             summary["message_count"] += 1
             timestamp = str(item.get("timestamp") or "")
-            if timestamp and timestamp > summary["last_message_at"]:
+            if timestamp and history_timestamp_key(timestamp) > history_timestamp_key(summary["last_message_at"]):
                 summary["last_message_at"] = timestamp
 
         characters = sorted(
             summary_by_character.values(),
-            key=lambda item: item["last_message_at"],
+            key=lambda item: history_timestamp_key(item["last_message_at"]),
             reverse=True,
         )
 
@@ -300,7 +300,9 @@ def create_dialogue_router(
         else:
             raise HTTPException(status_code=400, detail="No valid messages to import")
         source = (request.source or "manual").strip()[:80] or "manual"
-        session.import_messages(messages, replace_current=request.replace_current, source=source)
+        async with session.lock:
+            session.import_messages(messages, replace_current=request.replace_current, source=source,
+                                    checkpoint=request.context_checkpoint, checkpoints=request.context_checkpoints)
 
         return {
             "status": "imported",
@@ -311,6 +313,8 @@ def create_dialogue_router(
             "history_size": len(session.history),
             "replace_current": request.replace_current,
             "history_file": str(session.history_file),
+            "context_checkpoint": checkpoint_payload(session),
+            "context_checkpoints": checkpoint_history_payload(session),
         }
 
     @router.delete("/history")
@@ -322,52 +326,62 @@ def create_dialogue_router(
         if not query_tokens:
             raise HTTPException(status_code=400, detail="character_name is required")
 
-        deleted_files = 0
-        deleted_messages = 0
-        for history_file in iter_user_history_files(session_store.history_dir, normalized_user_uuid):
-            try:
-                file_messages, file_character_names = parse_history_file(history_file)
-            except Exception:
-                logger.exception("Failed to parse history file: %s", history_file)
-                continue
+        # Serialize clear with in-flight compaction, import and generation.
+        matching = [s for s in session_store.sessions.values()
+                    if s.user_uuid == normalized_user_uuid and name_tokens([
+                        s.character.name_en, s.character.name_zh, s.character.name_jp,
+                    ]) & query_tokens]
+        async with AsyncExitStack() as locks:
+            for session in sorted(matching, key=lambda item: item.session_id):
+                await locks.enter_async_context(session.lock)
+            deleted_files = 0
+            deleted_messages = 0
+            for history_file in iter_user_history_files(session_store.history_dir, normalized_user_uuid):
+                try:
+                    file_messages, file_character_names = parse_history_file(history_file)
+                except Exception:
+                    logger.exception("Failed to parse history file: %s", history_file)
+                    continue
 
-            file_tokens = name_tokens(list(file_character_names))
-            if not (file_tokens & query_tokens):
-                continue
+                file_tokens = name_tokens(list(file_character_names))
+                if not (file_tokens & query_tokens):
+                    continue
 
-            deleted_messages += len(file_messages)
-            session_dir = history_file.parent
-            try:
-                shutil.rmtree(session_dir)
-                deleted_files += 1
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.exception("Failed to remove history directory: %s", session_dir)
+                deleted_messages += len(file_messages)
+                session_dir = history_file.parent
+                try:
+                    shutil.rmtree(session_dir)
+                    deleted_files += 1
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    logger.exception("Failed to remove history directory: %s", session_dir)
 
-        cleared_active_sessions = 0
-        for session in session_store.sessions.values():
-            if session.user_uuid != normalized_user_uuid:
-                continue
-            session_tokens = name_tokens(
-                [
-                    session.character.name_en,
-                    session.character.name_zh,
-                    session.character.name_jp,
-                ]
-            )
-            if not (session_tokens & query_tokens):
-                continue
-            session.history.clear()
-            session.message_count = 0
-            session._append_history_event(
-                {
-                    "event": "history_cleared",
-                    "character_query": character_name,
-                    "cleared_at": datetime.now().isoformat(),
-                }
-            )
-            cleared_active_sessions += 1
+            cleared_active_sessions = 0
+            for session in session_store.sessions.values():
+                if session.user_uuid != normalized_user_uuid:
+                    continue
+                session_tokens = name_tokens(
+                    [
+                        session.character.name_en,
+                        session.character.name_zh,
+                        session.character.name_jp,
+                    ]
+                )
+                if not (session_tokens & query_tokens):
+                    continue
+                session.checkpoint = None
+                session.checkpoints = []
+                session.history.clear()
+                session.message_count = 0
+                session._append_history_event(
+                    {
+                        "event": "history_cleared",
+                        "character_query": character_name,
+                        "cleared_at": datetime.now().isoformat(),
+                    }
+                )
+                cleared_active_sessions += 1
 
         return {
             "status": "deleted",

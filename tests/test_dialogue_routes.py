@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -94,6 +95,9 @@ class _FakeCharacter:
 
 class _FakeSession:
     def __init__(self, session_id: str, context_builder):
+        self.lock = asyncio.Lock()
+        self.checkpoint = None
+        self.token_ratio = 0.5
         self.context_builder = context_builder
         self.session_id = session_id
         self.user_uuid = "00000000-0000-4000-8000-000000000001"

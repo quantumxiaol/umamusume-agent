@@ -1,5 +1,6 @@
 """Legacy two-line token streaming, isolated from the structured reply route."""
 import json
+from contextlib import nullcontext
 from time import monotonic
 from typing import Any, AsyncGenerator, Dict, Optional
 from uuid import uuid4
@@ -104,6 +105,7 @@ async def stream_legacy_reply(
     *, request: DialogueRequest, session: DialogueSession,
     runtime: CharacterRuntime, settings, voice_service: VoiceService,
     enable_tts: bool, llm_usage_tracker: DeepSeekUsageTracker,
+    usage_scoped: bool = False,
 ) -> AsyncGenerator[str, None]:
     # 旧两行协议仍保持 token 流式行为。
     _append_context_events(session, request.context_events)
@@ -125,10 +127,11 @@ async def stream_legacy_reply(
         stream_kwargs["stream_options"] = {"include_usage": True}
 
     full_reply_raw = ""
-    with llm_usage_tracker.operation(
+    scope = nullcontext() if usage_scoped else llm_usage_tracker.operation(
         user_uuid=session.user_uuid,
         feature="dialogue_turn",
-    ):
+    )
+    with scope:
         request_started = monotonic()
         stream = await runtime.llm_client.chat.completions.create(
             **stream_kwargs

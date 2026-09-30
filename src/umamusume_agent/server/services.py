@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 from ..character import CharacterManager
 from ..config import config
 from ..dialogue.context import LegacyDialogueContextBuilder
+from ..dialogue.compaction import HistoryCompactor
 from ..dialogue.runtime import CharacterRuntime
 from ..dialogue.service import DialogueService
 from ..director.context import CharacterSceneContextBuilder, DirectorContextBuilder
@@ -27,6 +28,7 @@ class ServerServices:
     character_manager: CharacterManager
     character_runtime: CharacterRuntime
     dialogue_service: DialogueService
+    compactor: HistoryCompactor
     session_store: DialogueSessionStore
     voice_service: VoiceService
     usage_tracker: DeepSeekUsageTracker
@@ -82,7 +84,7 @@ def build_services(
         history_dir=history_dir, context_builder=context_builder,
         voice_service=voice_service,
         ttl_seconds=settings.DIALOGUE_SESSION_TTL_SECONDS,
-        history_max_messages=settings.DIALOGUE_SESSION_HISTORY_MAX_MESSAGES,
+        history_max_messages=(0 if settings.DIALOGUE_COMPACTION_ENABLED else settings.DIALOGUE_SESSION_HISTORY_MAX_MESSAGES),
     )
 
     templates = SceneTemplateRepository(settings.SCENE_TEMPLATES_DIRECTORY)
@@ -119,6 +121,7 @@ def build_services(
     return ServerServices(
         settings=settings, character_manager=character_manager,
         character_runtime=character_runtime, dialogue_service=dialogue_service,
+        compactor=HistoryCompactor(runtime=character_runtime, settings=settings),
         session_store=session_store, voice_service=voice_service,
         usage_tracker=usage_tracker, director_service=director_service,
         stage_director_service=stage_director_service,

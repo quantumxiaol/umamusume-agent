@@ -1,5 +1,6 @@
 // frontend/src/stores/chatStore.js
 import { defineStore } from 'pinia';
+import { dialogueHistoryCache } from '@/services/historyCache';
 import {
   API_BASE_URL,
   fetchCharacters,
@@ -8,14 +9,13 @@ import {
   chatOnce,
   chatStream,
   fetchHistory,
+  fetchDialogueContext,
   importHistory,
   clearHistory,
   fetchTtsJob,
 } from '@/services/api';
 
 const USER_UUID_STORAGE_KEY = 'umamusume_user_uuid';
-const HISTORY_CACHE_PREFIX_V1 = 'umamusume_history_cache_v1';
-const HISTORY_CACHE_PREFIX_V2 = 'umamusume_history_cache_v2';
 const HISTORY_SCHEMA_VERSION = 2;
 const EVENT_SCHEMA_VERSION = 1;
 const TTS_ENABLED = import.meta.env.VITE_ENABLE_TTS === 'true';
@@ -166,6 +166,7 @@ const createMessage = (role, content, extra = {}) => ({
   action: extra.action || '',
   dialogue: extra.dialogue || (role === 'assistant' ? content : ''),
   legacyReply: extra.legacyReply || '',
+  modelContent: extra.modelContent || extra.model_content || '',
   voice: normalizeVoiceReference(extra.voice || extra.tts),
   status: extra.status || 'ready',
   renderMode: extra.renderMode || 'structured',
@@ -270,10 +271,6 @@ const downloadTextFile = (filename, text, mimeType = 'text/plain;charset=utf-8')
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
 };
-
-const historyCacheKey = (prefix, userUuid, characterName) => (
-  `${prefix}:${encodeURIComponent(userUuid || '')}:${encodeURIComponent(characterName || '')}`
-);
 
 const normalizeRole = (value) => {
   const rawRole = String(value || '').trim().toLowerCase();
@@ -456,6 +453,7 @@ const normalizeConversationRecord = (record) => {
     action: parsed.action || '无',
     dialogue: parsed.dialogue,
     legacyReply: toLegacyReply(parsed),
+    modelContent: record.modelContent || record.model_content || '',
     timestamp,
     schemaVersion: record?.schemaVersion || record?.schema_version || HISTORY_SCHEMA_VERSION,
     sourceFormat: parsed.sourceFormat || 'legacy_text',
@@ -478,6 +476,7 @@ const messageToRecord = (message) => ({
   content: message.content || '',
   ...(message.role === 'assistant' ? {
     action: message.action || '无',
+    model_content: message.modelContent || '',
     dialogue: message.dialogue || message.content || '',
     legacyReply: message.legacyReply || toLegacyReply({
       action: message.action || '无',
@@ -503,61 +502,14 @@ const messageToRecord = (message) => ({
   } : {}),
 });
 
-const readHistoryCache = (userUuid, characterName) => {
-  if (!userUuid || !characterName) {
-    return { savedAt: '', messages: [] };
-  }
-
+const readHistoryCache = async (userUuid, characterName) => {
+  if (!userUuid || !characterName) return { savedAt: '', messages: [] };
   try {
-    const rawV2 = localStorage.getItem(historyCacheKey(HISTORY_CACHE_PREFIX_V2, userUuid, characterName));
-    if (rawV2) {
-      const payload = JSON.parse(rawV2);
-      return {
-        savedAt: payload?.savedAt || '',
-        messages: normalizeConversationRecords(payload?.messages || []),
-      };
-    }
-
-    const rawV1 = localStorage.getItem(historyCacheKey(HISTORY_CACHE_PREFIX_V1, userUuid, characterName));
-    if (rawV1) {
-      const payload = JSON.parse(rawV1);
-      const messages = normalizeConversationRecords(payload?.messages || []);
-      if (messages.length) {
-        writeHistoryCache(userUuid, characterName, messages);
-      }
-      return {
-        savedAt: payload?.savedAt || '',
-        messages,
-      };
-    }
-    return { savedAt: '', messages: [] };
+    const payload = await dialogueHistoryCache.read(userUuid, characterName);
+    return { ...payload, messages: normalizeConversationRecords(payload.messages || []) };
   } catch (_err) {
-    return { savedAt: '', messages: [] };
+    return { savedAt: '', messages: [], warning: '无法读取浏览器缓存，请导出历史备份。' };
   }
-};
-
-const writeHistoryCache = (userUuid, characterName, messages) => {
-  if (!userUuid || !characterName) {
-    return;
-  }
-  const records = normalizeConversationRecords(messages);
-  const payload = {
-    version: HISTORY_SCHEMA_VERSION,
-    schema_version: HISTORY_SCHEMA_VERSION,
-    userUuid,
-    characterName,
-    savedAt: new Date().toISOString(),
-    messages: records,
-  };
-  localStorage.setItem(historyCacheKey(HISTORY_CACHE_PREFIX_V2, userUuid, characterName), JSON.stringify(payload));
-};
-
-const removeHistoryCache = (userUuid, characterName) => {
-  if (!userUuid || !characterName) {
-    return;
-  }
-  localStorage.removeItem(historyCacheKey(HISTORY_CACHE_PREFIX_V1, userUuid, characterName));
-  localStorage.removeItem(historyCacheKey(HISTORY_CACHE_PREFIX_V2, userUuid, characterName));
 };
 
 const parseMarkdownConversation = (text) => {
@@ -602,12 +554,15 @@ const parseJsonConversationPayload = (payload) => {
   if (!payload) {
     return [];
   }
-  return normalizeConversationRecords(Array.isArray(payload) ? payload : payload.messages);
+  const records = normalizeConversationRecords(Array.isArray(payload) ? payload : payload.messages);
+  records.contextCheckpoint = payload.context_checkpoint || null;
+  records.contextCheckpoints = payload.context_checkpoints || null;
+  return records;
 };
 
 const parseMarkdownEmbeddedJson = (text) => {
   const rawText = String(text || '');
-  const matches = [...rawText.matchAll(/```json\s*([\s\S]*?)```/gi)];
+  const matches = [...rawText.matchAll(/(?:^|\n)```json\s*\n([\s\S]*?)\n```[ \t]*(?=\n|$)/gi)];
   for (let index = matches.length - 1; index >= 0; index -= 1) {
     try {
       const payload = JSON.parse(matches[index][1]);
@@ -667,6 +622,11 @@ export const useChatStore = defineStore('chat', {
     isLoading: false,
     error: null,
     exportNotice: '',
+    contextCheckpoint: null,
+    contextCheckpoints: [],
+    compactionStatus: '',
+    cacheWarning: '',
+    failedDraft: '',
     cachedMessageCount: 0,
     cachedSavedAt: '',
     streamMode: true,
@@ -721,12 +681,16 @@ export const useChatStore = defineStore('chat', {
         this.characterId = data.character_id || '';
         this.sessionId = data.session_id || '';
         this.systemPrompt = data.system_prompt || '';
+        this._applyMemorySnapshot(data);
+        this.compactionStatus = '';
+        this.cacheWarning = '';
+        this.messages = [];
         this.voicePreviewUrl = TTS_ENABLED ? resolveAudioUrl(data.voice_preview_url || '') : '';
         this.outputDir = data.output_dir || '';
         this.restoredHistoryMessages = Number(data.restored_history_messages || 0);
         this.exportNotice = '';
         this.queuedEvents = [];
-        this._refreshCacheInfo(name);
+        await this._refreshCacheInfo(name);
         this._clearVoicePollers();
         await this.refreshHistory(name);
       } catch (err) {
@@ -779,33 +743,86 @@ export const useChatStore = defineStore('chat', {
       this.queuedEvents = [];
     },
 
-    _refreshCacheInfo(characterName = this.selectedCharacter) {
-      const cache = readHistoryCache(this.userUuid, characterName);
-      this.cachedMessageCount = cache.messages.length;
-      this.cachedSavedAt = cache.savedAt;
-    },
-
-    _cacheCurrentConversation() {
-      if (!this.userUuid || !this.selectedCharacter || !this.messages.length) {
-        this._refreshCacheInfo();
-        return;
-      }
-
+    async _refreshCacheInfo(characterName = this.selectedCharacter) {
       try {
-        writeHistoryCache(
-          this.userUuid,
-          this.selectedCharacter,
-          this.messages.map(messageToRecord)
-        );
+        const cache = await readHistoryCache(this.userUuid, characterName);
+        if (characterName !== this.selectedCharacter) return;
+        this.cachedMessageCount = cache.messages.length;
+        this.cachedSavedAt = cache.savedAt;
+        if (cache.warning) this.cacheWarning = cache.warning;
       } catch (_err) {
-        // Local storage can be full or disabled; backend history remains the source of truth.
+        this.cacheWarning = '无法读取浏览器缓存，请导出历史备份。';
       }
-      this._refreshCacheInfo();
     },
 
-    _removeCurrentConversationCache() {
-      removeHistoryCache(this.userUuid, this.selectedCharacter);
-      this._refreshCacheInfo();
+    _rememberCheckpoint(checkpoint) {
+      this.contextCheckpoint = checkpoint || null;
+      if (!checkpoint) return;
+      const key = (item) => item.checkpoint_id || `${item.revision}:${item.created_at || ''}`;
+      const index = this.contextCheckpoints.findIndex((item) => key(item) === key(checkpoint));
+      if (index < 0) this.contextCheckpoints.push(checkpoint);
+      else this.contextCheckpoints[index] = checkpoint;
+    },
+
+    _applyMemorySnapshot(data) {
+      this.contextCheckpoints = Array.isArray(data.context_checkpoints) ? [...data.context_checkpoints] : [];
+      this._rememberCheckpoint(data.context_checkpoint);
+    },
+
+    async _cacheCurrentConversation() {
+      const user = this.userUuid;
+      const character = this.selectedCharacter;
+      if (!user || !character || !this.messages.length) return;
+      try {
+        await dialogueHistoryCache.write(user, character, {
+          version: HISTORY_SCHEMA_VERSION,
+          userUuid: user, characterName: character, savedAt: new Date().toISOString(),
+          messages: normalizeConversationRecords(this.messages.map(messageToRecord)),
+          context_checkpoint: this.contextCheckpoint,
+          context_checkpoints: this.contextCheckpoints,
+        });
+        if (character === this.selectedCharacter) {
+          this.cacheWarning = '';
+          await this._refreshCacheInfo(character);
+        }
+      } catch (_err) {
+        this.cacheWarning = '浏览器缓存未保存（可能空间不足或被禁用）。HF 重启可能丢失历史，请立即导出备份。';
+      }
+    },
+
+    async _removeCurrentConversationCache() {
+      try {
+        await dialogueHistoryCache.remove(this.userUuid, this.selectedCharacter);
+        await this._refreshCacheInfo();
+      } catch (_err) {
+        this.cacheWarning = '浏览器缓存清除失败，请检查浏览器存储权限。';
+      }
+    },
+
+    async _syncContextCheckpoint() {
+      if (!this.capabilities.dialogue_memory || !this.sessionId) return;
+      const id = this.sessionId;
+      try {
+        const data = await fetchDialogueContext(id, this.userUuid);
+        if (id === this.sessionId) {
+          this._applyMemorySnapshot(data);
+          return data;
+        }
+      } catch (_err) {
+        // Keep the last acknowledged checkpoint when offline; validate on import.
+      }
+    },
+
+    async _recoverUnacceptedInput(before, queued, text) {
+      const state = await this._syncContextCheckpoint();
+      // Compaction runs before appending input. Don't turn an unaccepted draft
+      // into acknowledged history just because the user refreshes the browser.
+      if (state && !state.busy
+        && state.history_size === normalizeConversationRecords(before.map(messageToRecord)).length) {
+        this.messages = before;
+        this.queuedEvents = queued;
+        this.failedDraft = text;
+      }
     },
 
     _clearVoicePollers() {
@@ -944,6 +961,7 @@ export const useChatStore = defineStore('chat', {
           action: normalized.action,
           dialogue: normalized.dialogue,
           legacyReply: normalized.legacyReply,
+          modelContent: normalized.modelContent,
           schemaVersion: normalized.schemaVersion,
           sourceFormat: normalized.sourceFormat,
           actor: normalized.actor,
@@ -961,12 +979,13 @@ export const useChatStore = defineStore('chat', {
       }).filter(Boolean);
     },
 
-    async refreshHistory(characterName = this.selectedCharacter) {
+    async refreshHistory(characterName = this.selectedCharacter, { recoverCache = true } = {}) {
       if (!this.userUuid || !characterName) {
         return;
       }
       try {
-        const cached = readHistoryCache(this.userUuid, characterName);
+        const cached = await readHistoryCache(this.userUuid, characterName);
+        if (cached.warning) this.cacheWarning = cached.warning;
         const cachedVoiceByUtterance = new Map(
           cached.messages
             .filter((message) => message.utteranceId && message.voice?.job_id)
@@ -974,6 +993,11 @@ export const useChatStore = defineStore('chat', {
         );
         const data = await fetchHistory(this.userUuid, characterName, 0);
         this.historyCharacters = Array.isArray(data.characters) ? data.characters : [];
+        if (recoverCache && !(data.messages || []).length && cached.messages.length) {
+          await this.importConversationMessages(cached.messages, 'browser_recovery', cached.context_checkpoint, cached.context_checkpoints);
+          return;
+        }
+        await this._syncContextCheckpoint();
         this.messages = this._toHistoryMessages(
           data.messages || [],
           cachedVoiceByUtterance,
@@ -1016,9 +1040,11 @@ export const useChatStore = defineStore('chat', {
         this.messages = [];
         this.queuedEvents = [];
         this.restoredHistoryMessages = 0;
+        this.contextCheckpoint = null;
+        this.contextCheckpoints = [];
         this.exportNotice = '';
-        this._removeCurrentConversationCache();
-        await this.refreshHistory(this.selectedCharacter);
+        await this._removeCurrentConversationCache();
+        await this.refreshHistory(this.selectedCharacter, { recoverCache: false });
       } catch (err) {
         this.error = err.message || '清理历史失败。';
       } finally {
@@ -1045,13 +1071,14 @@ export const useChatStore = defineStore('chat', {
         throw new Error('请先加载角色。');
       }
       const records = normalizeConversationRecords(messages.map(messageToRecord));
-      await importHistory(this.sessionId, records, true, source);
+      const imported = await importHistory(this.sessionId, records, true, source, this.contextCheckpoint, this.contextCheckpoints);
+      this._applyMemorySnapshot(imported);
       this.messages = messages;
       this.restoredHistoryMessages = this.messages.length;
       if (this.messages.length) {
         this._cacheCurrentConversation();
       } else {
-        this._removeCurrentConversationCache();
+        await this._removeCurrentConversationCache();
       }
     },
 
@@ -1104,6 +1131,8 @@ export const useChatStore = defineStore('chat', {
 
       let finalText = content;
       let dialogueEvent = null;
+      const messagesBefore = [...this.messages];
+      this.failedDraft = '';
       if (this.dialogueEventsEnabled) {
         const outgoingEvents = [...pendingEvents];
         if (content) {
@@ -1144,67 +1173,87 @@ export const useChatStore = defineStore('chat', {
         this.currentAssistantId = assistantMessage.id;
         this.isLoading = true;
 
-        await chatStream(
-          this.sessionId,
-          finalText,
-          TTS_ENABLED && this.voiceEnabled,
-          (event) => {
-            const { type, data } = event;
-            if (!this.currentAssistantId) {
-              return;
-            }
-            const target = this.messages.find((msg) => msg.id === this.currentAssistantId);
-            if (!target) {
-              return;
-            }
-
-            if (type === 'token') {
-              target.content += data || '';
-            } else if (type === 'structured_reply') {
-              const structured = normalizeConversationRecord(data?.message || {
-                role: 'assistant',
-                content: data?.dialogue || data?.reply || '',
-                action: data?.action,
-                dialogue: data?.dialogue,
-                sourceFormat: data?.message?.source_format || 'json_v2',
-              });
-              target.content = structured?.content || data?.dialogue || data?.reply || '';
-              target.action = structured?.action || data?.action || '无';
-              target.dialogue = structured?.dialogue || data?.dialogue || target.content;
-              target.legacyReply = data?.reply || structured?.legacyReply || '';
-              target.schemaVersion = structured?.schemaVersion || HISTORY_SCHEMA_VERSION;
-              target.sourceFormat = structured?.sourceFormat || 'json_v2';
-              target.actor = structured?.actor || null;
-              target.eventType = structured?.event_type || '';
-              target.targetActorIds = structured?.target_actor_ids || [];
-              target.eventSchemaVersion = structured?.event_schema_version || undefined;
-              target.inputMode = inputModeFromEvent(target.actor, target.eventType);
-              target.utteranceId = data?.utterance_id || structured?.utteranceId || '';
-              target.renderMode = 'structured';
-            } else if (type === 'voice_pending' && TTS_ENABLED) {
-              target.voice = normalizeVoiceReference(data);
-              target.utteranceId = (
-                target.utteranceId
-                || data?.utterance_id
-                || ''
-              );
-              if (target.voice) {
-                this._startVoicePolling(target);
-                this._cacheCurrentConversation();
+        try {
+          await chatStream(
+            this.sessionId,
+            finalText,
+            TTS_ENABLED && this.voiceEnabled,
+            (event) => {
+              const { type, data } = event;
+              if (type === 'context_status') {
+                this.compactionStatus = data.phase === 'compacting'
+                  ? `正在整理较早历史${data.chunks ? `（${data.chunk}/${data.chunks}）` : ''}，请稍候…` : '';
+                if (data.phase === 'compacted') {
+                  this._rememberCheckpoint(data.checkpoint);
+                  this._cacheCurrentConversation();
+                }
+                return;
               }
-            } else if (type === 'done') {
-              target.renderMode = 'structured';
-              target.status = 'ready';
-              this.isLoading = false;
-              this._cacheCurrentConversation();
-            } else if (type === 'error') {
-              this.error = data || '流式对话发生错误。';
-              target.status = 'ready';
-              this.isLoading = false;
-            }
-          },
-          dialogueEvent,
-        );
+              if (!this.currentAssistantId) {
+                return;
+              }
+              const target = this.messages.find((msg) => msg.id === this.currentAssistantId);
+              if (!target) {
+                return;
+              }
+
+              if (type === 'token') {
+                target.content += data || '';
+              } else if (type === 'structured_reply') {
+                if ('context_checkpoint' in data) this._rememberCheckpoint(data.context_checkpoint);
+                const structured = normalizeConversationRecord(data?.message || {
+                  role: 'assistant',
+                  content: data?.dialogue || data?.reply || '',
+                  action: data?.action,
+                  dialogue: data?.dialogue,
+                  sourceFormat: data?.message?.source_format || 'json_v2',
+                });
+                target.content = structured?.content || data?.dialogue || data?.reply || '';
+                target.action = structured?.action || data?.action || '无';
+                target.dialogue = structured?.dialogue || data?.dialogue || target.content;
+                target.legacyReply = data?.reply || structured?.legacyReply || '';
+                target.schemaVersion = structured?.schemaVersion || HISTORY_SCHEMA_VERSION;
+                target.sourceFormat = structured?.sourceFormat || 'json_v2';
+                target.modelContent = structured?.modelContent || '';
+                target.actor = structured?.actor || null;
+                target.eventType = structured?.event_type || '';
+                target.targetActorIds = structured?.target_actor_ids || [];
+                target.eventSchemaVersion = structured?.event_schema_version || undefined;
+                target.inputMode = inputModeFromEvent(target.actor, target.eventType);
+                target.utteranceId = data?.utterance_id || structured?.utteranceId || '';
+                target.renderMode = 'structured';
+              } else if (type === 'voice_pending' && TTS_ENABLED) {
+                target.voice = normalizeVoiceReference(data);
+                target.utteranceId = (
+                  target.utteranceId
+                  || data?.utterance_id
+                  || ''
+                );
+                if (target.voice) {
+                  this._startVoicePolling(target);
+                  this._cacheCurrentConversation();
+                }
+              } else if (type === 'done') {
+                this.compactionStatus = '';
+                target.renderMode = 'structured';
+                target.status = 'ready';
+                this._cacheCurrentConversation();
+              } else if (type === 'error') {
+                this.compactionStatus = '';
+                this.error = data || '流式对话发生错误。';
+                target.status = 'ready';
+              }
+            },
+            dialogueEvent,
+          );
+        } catch (err) {
+          this.error = err.message || '对话失败。';
+        } finally {
+          this.compactionStatus = '';
+          if (this.error) await this._recoverUnacceptedInput(messagesBefore, pendingEvents, content);
+          await this._cacheCurrentConversation();
+          this.isLoading = false;
+        }
       } else {
         this.isLoading = true;
         try {
@@ -1217,6 +1266,7 @@ export const useChatStore = defineStore('chat', {
           if (data.error) {
             this.error = data.error;
           } else {
+            if ('context_checkpoint' in data) this._rememberCheckpoint(data.context_checkpoint);
             const structured = normalizeConversationRecord(data.message || {
               role: 'assistant',
               content: data.dialogue || data.reply || '',
@@ -1230,6 +1280,7 @@ export const useChatStore = defineStore('chat', {
               legacyReply: data.reply || structured?.legacyReply || '',
               schemaVersion: structured?.schemaVersion || HISTORY_SCHEMA_VERSION,
               sourceFormat: structured?.sourceFormat || 'json_v2',
+              modelContent: structured?.modelContent || '',
               actor: structured?.actor,
               eventType: structured?.event_type,
               targetActorIds: structured?.target_actor_ids,
@@ -1254,6 +1305,8 @@ export const useChatStore = defineStore('chat', {
           }
         } catch (err) {
           this.error = err.message || '对话失败。';
+          await this._recoverUnacceptedInput(messagesBefore, pendingEvents, content);
+          await this._cacheCurrentConversation();
         } finally {
           this.isLoading = false;
         }
@@ -1266,7 +1319,7 @@ export const useChatStore = defineStore('chat', {
       this._clearVoicePollers();
     },
 
-    async importConversationMessages(records, source = 'manual') {
+    async importConversationMessages(records, source = 'manual', checkpoint = null, checkpoints = null) {
       this.error = null;
       this.exportNotice = '';
       if (!this.selectedCharacter || !this.sessionId) {
@@ -1281,9 +1334,11 @@ export const useChatStore = defineStore('chat', {
       }
       this.queuedEvents = [];
 
+      this._applyMemorySnapshot({ context_checkpoint: checkpoint, context_checkpoints: checkpoints });
       let backendSynced = false;
       try {
-        await importHistory(this.sessionId, normalizedRecords, true, source);
+        const result = await importHistory(this.sessionId, normalizedRecords, true, source, checkpoint, checkpoints);
+        this._applyMemorySnapshot(result);
         backendSynced = true;
       } catch (err) {
         this.error = `已导入到浏览器缓存，但同步后端失败，后续 LLM 不会使用这份历史：${err.message || err}`;
@@ -1295,6 +1350,7 @@ export const useChatStore = defineStore('chat', {
         action: record.action,
         dialogue: record.dialogue,
         legacyReply: record.legacyReply,
+        modelContent: record.modelContent,
         schemaVersion: record.schemaVersion,
         sourceFormat: record.sourceFormat,
         actor: record.actor,
@@ -1317,13 +1373,13 @@ export const useChatStore = defineStore('chat', {
     async importFromBrowserCache() {
       this.error = null;
       this.exportNotice = '';
-      const cache = readHistoryCache(this.userUuid, this.selectedCharacter);
+      const cache = await readHistoryCache(this.userUuid, this.selectedCharacter);
       if (!cache.messages.length) {
         this.exportNotice = '当前角色没有可导入的浏览器缓存。';
         this._refreshCacheInfo();
         return false;
       }
-      return this.importConversationMessages(cache.messages, 'browser_cache');
+      return this.importConversationMessages(cache.messages, 'browser_cache', cache.context_checkpoint, cache.context_checkpoints);
     },
 
     async importConversationFile(file) {
@@ -1336,7 +1392,7 @@ export const useChatStore = defineStore('chat', {
       try {
         const text = await file.text();
         const records = parseImportedConversationText(text);
-        return await this.importConversationMessages(records, `file:${file.name || 'history'}`);
+        return await this.importConversationMessages(records, `file:${file.name || 'history'}`, records.contextCheckpoint, records.contextCheckpoints);
       } catch (err) {
         this.error = err.message || '导入历史文件失败。';
         return false;
@@ -1354,6 +1410,8 @@ export const useChatStore = defineStore('chat', {
         character: characterName,
         user_uuid: this.userUuid,
         exported_at: new Date().toISOString(),
+        context_checkpoint: this.contextCheckpoint,
+        context_checkpoints: this.contextCheckpoints,
         messages: normalizeConversationRecords(this.messages.map(messageToRecord)),
       };
     },

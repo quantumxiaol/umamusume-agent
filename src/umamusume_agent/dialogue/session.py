@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..character import CharacterConfig
 from .context import LegacyDialogueContextBuilder
+from .memory import HistoryCheckpoint, checkpoint_matches, memory_messages, validated_checkpoints
 from .protocol import (
     STRUCTURED_REPLY_SCHEMA_VERSION,
     normalize_assistant_record,
@@ -42,6 +45,10 @@ class DialogueSession:
         self.created_at = created_at or datetime.now()
         self.last_active_at = self.created_at
         self.history = list(initial_history or [])
+        self.lock = asyncio.Lock()
+        self.checkpoint: HistoryCheckpoint | None = None
+        self.checkpoints: list[HistoryCheckpoint] = []
+        self.token_ratio = 0.5
         self.message_count = len(self.history)
         self.voice_index = 0
         self.output_dir = output_dir
@@ -60,26 +67,41 @@ class DialogueSession:
             }
         )
 
-    def _append_history_event(self, payload: Dict[str, Any]):
+    def _append_history_event(self, payload: Dict[str, Any], *, strict=False):
         record: Dict[str, Any] = {
             "session_id": self.session_id,
             "user_uuid": self.user_uuid,
             "character_name_en": (
                 self.character.name_en or self.character.name_zh
             ),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         record.update(payload)
 
         try:
             self.history_file.parent.mkdir(parents=True, exist_ok=True)
             with self.history_file.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                offset = file.tell()
+                try:
+                    file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    file.flush()
+                    if strict:
+                        os.fsync(file.fileno())
+                except Exception:
+                    # Roll back only this append. A partial checkpoint line must
+                    # not swallow the next message when writing resumes.
+                    try:
+                        file.truncate(offset)
+                    except Exception:
+                        logger.exception("Could not roll back partial history append")
+                    raise
         except Exception:
             logger.exception(
                 "Failed to persist dialogue history: session_id=%s",
                 self.session_id,
             )
+            if strict:
+                raise
 
     def _rewrite_history_file(self):
         try:
@@ -213,10 +235,21 @@ class DialogueSession:
         messages: list[Dict[str, Any]],
         replace_current: bool = True,
         source: str = "manual",
+        checkpoint: HistoryCheckpoint | None = None,
+        checkpoints: list[HistoryCheckpoint] | None = None,
     ):
         """Import messages into the current model context and JSONL file."""
 
+        candidate = checkpoint or self.checkpoint
+        imported_context = [to_compact_context_message(message) for message in messages]
+        next_history = imported_context if replace_current else [*self.history, *imported_context]
+        valid_checkpoint = candidate if candidate and checkpoint_matches(self, candidate, next_history) else None
+        audit_candidates = list(self.checkpoints if checkpoints is None else checkpoints)
+        if valid_checkpoint:
+            audit_candidates.append(valid_checkpoint)
+        valid_checkpoints = validated_checkpoints(self, audit_candidates, next_history)
         if replace_current:
+            self.checkpoint = None
             self.history.clear()
             self.message_count = 0
             self.touch()
@@ -254,13 +287,17 @@ class DialogueSession:
                 utterance_id=message.get("utterance_id"),
                 model_content=message.get("model_content") or "",
             )
+        self.checkpoint = valid_checkpoint
+        self.checkpoints = valid_checkpoints
+        if valid_checkpoint:
+            self.token_ratio = valid_checkpoint.token_ratio
+        self._append_history_event({
+            "event": "context_checkpoint",
+            "checkpoint": valid_checkpoint.model_dump(mode="json") if valid_checkpoint else None,
+            "checkpoints": [item.model_dump(mode="json") for item in valid_checkpoints],
+        })
 
     def get_messages(self, text_only: bool = False) -> list:
         """Return the complete model message list, including system prompt."""
 
-        context = self.context_builder.build(
-            character=self.character,
-            history=self.history,
-            text_only=text_only,
-        )
-        return list(context.messages)
+        return memory_messages(self, text_only=text_only)

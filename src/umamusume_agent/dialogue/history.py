@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..character import CharacterConfig, CharacterManager
+from .history_order import history_record_sort_key, parse_history_timestamp
 from .protocol import (
     normalize_actor_payload,
     normalize_assistant_record,
@@ -228,6 +229,7 @@ def parse_history_file(
                     "timestamp": record.get("timestamp"),
                     "message_index": record.get("message_index"),
                     "utterance_id": record.get("utterance_id"),
+                    **({"model_content": record["model_content"]} if record.get("model_content") else {}),
                     "character_name_en": message_character_name,
                     **event_metadata,
                 }
@@ -264,20 +266,8 @@ def collect_history_messages(
 
         messages.extend(file_messages)
 
-    def message_sort_key(item: Dict[str, Any]) -> tuple[str, str, int]:
-        raw_index = item.get("message_index")
-        try:
-            message_index = int(raw_index or 0)
-        except (TypeError, ValueError):
-            message_index = 0
-        return (
-            str(item.get("timestamp") or ""),
-            str(item.get("session_id") or ""),
-            message_index,
-        )
-
-    messages.sort(key=message_sort_key)
-    return messages
+    messages.sort(key=history_record_sort_key)
+    return _apply_history_resets(history_dir, user_uuid, messages)
 
 
 def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
@@ -334,6 +324,7 @@ def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
         raw_record = {
             "role": "assistant",
             "content": content,
+            "model_content": getattr(item, "model_content", "") or getattr(item, "modelContent", ""),
             "action": item.action,
             "dialogue": item.dialogue,
             "timestamp": item.timestamp,
@@ -363,100 +354,90 @@ def normalize_import_messages(raw_messages: list[Any]) -> list[Dict[str, Any]]:
     return messages
 
 
+def _apply_history_resets(history_dir, user_uuid, messages):
+    # A replacement import is an authoritative conversation revision, not an
+    # additional copy to concatenate with older HTTP sessions.
+    resets = {}
+    for path in iter_user_history_files(history_dir, user_uuid):
+        for record in _read_events(path):
+            if ((record.get("event") == "history_import" and record.get("replace_current"))
+                    or record.get("event") == "history_cleared"):
+                timestamp = parse_history_timestamp(record.get("timestamp"))
+                if timestamp is None:
+                    logger.warning("Ignoring history reset with invalid timestamp: %s", path)
+                    continue
+                name = record.get("character_name_en")
+                resets[name] = max(resets.get(name, timestamp), timestamp)
+    kept = []
+    for message in messages:
+        cutoff = resets.get(message.get("character_name_en"))
+        timestamp = parse_history_timestamp(message.get("timestamp"))
+        # Unknown dates cannot prove a message predates the reset. Keep the
+        # original rather than silently losing it on display or restoration.
+        if cutoff is None or timestamp is None or timestamp >= cutoff:
+            kept.append(message)
+    return kept
+
+
+def _read_events(path):
+    try:
+        with path.open(encoding="utf-8") as file:
+            for line in file:
+                try:
+                    record = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(record, dict):
+                    yield record
+    except OSError:
+        logger.exception("Failed to read history: %s", path)
+
+
 def load_persistent_history(
-    history_dir: Path,
-    user_uuid: str,
-    character: CharacterConfig,
-    *,
-    history_max_messages: int,
+    history_dir: Path, user_uuid: str, character: CharacterConfig,
+    *, history_max_messages: int,
 ) -> list[Dict[str, str]]:
-    """Restore history aggregated by user UUID and character."""
-
-    user_dir = history_dir / user_uuid
-    if not user_dir.exists():
-        return []
-
-    safe_name = slugify(character.name_en or character.name_zh)
-    history_files = sorted(
-        [
-            path
-            for path in user_dir.glob(f"{safe_name}_*/history.jsonl")
-            if path.is_file()
-        ],
-        key=lambda path: path.parent.name,
-    )
-
-    expected_character_name = character.name_en or character.name_zh
-    messages: list[Dict[str, str]] = []
-    for history_file in history_files:
+    expected = character.name_en or character.name_zh
+    records = []
+    for path in iter_user_history_files(history_dir, user_uuid):
         try:
-            with history_file.open("r", encoding="utf-8") as file:
-                for line in file:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Skip invalid history line: %s",
-                            history_file,
-                        )
-                        continue
-
-                    if record.get("event") != "message":
-                        continue
-                    recorded_character_name = record.get(
-                        "character_name_en"
-                    )
-                    if (
-                        isinstance(recorded_character_name, str)
-                        and recorded_character_name.strip()
-                        and recorded_character_name != expected_character_name
-                    ):
-                        continue
-                    role = record.get("role")
-                    if role not in {"user", "assistant"}:
-                        continue
-
-                    if role == "assistant":
-                        semantic_record = normalize_assistant_record(record)
-                    else:
-                        content = record.get("content")
-                        if (
-                            not isinstance(content, str)
-                            or not content.strip()
-                        ):
-                            continue
-                        semantic_record = {
-                            "role": "user",
-                            "content": content.strip(),
-                            "actor": normalize_actor_payload(
-                                record.get("actor")
-                                or record.get("speaker")
-                            ),
-                            "event_type": record.get("event_type"),
-                            "target_actor_ids": record.get(
-                                "target_actor_ids"
-                            ),
-                            "event_schema_version": record.get(
-                                "event_schema_version"
-                            ),
-                        }
-
-                    if not str(
-                        semantic_record.get("content") or ""
-                    ).strip():
-                        continue
-                    messages.append(
-                        to_compact_context_message(semantic_record)
-                    )
+            messages, names = parse_history_file(path)
         except Exception:
-            logger.exception(
-                "Failed to load history file: %s",
-                history_file,
-            )
+            logger.exception("Failed to parse history file: %s", path)
+            continue
+        if name_tokens([expected]) & name_tokens(list(names)):
+            records.extend(messages)
+    records.sort(key=history_record_sort_key)
+    records = _apply_history_resets(history_dir, user_uuid, records)
+    messages = [to_compact_context_message(record) for record in records]
+    return messages[-history_max_messages:] if history_max_messages > 0 else messages
 
-    if history_max_messages > 0 and len(messages) > history_max_messages:
-        messages = messages[-history_max_messages:]
-    return messages
+
+def load_history_memory(history_dir, session):
+    from .memory import HistoryCheckpoint, checkpoint_matches, validated_checkpoints
+
+    expected = session.character.name_en or session.character.name_zh
+    candidates = []
+    for path in iter_user_history_files(history_dir, session.user_uuid):
+        candidates.extend(record for record in _read_events(path)
+                          if record.get("event") == "context_checkpoint"
+                          and record.get("character_name_en") == expected)
+    if not candidates:
+        return None, []
+    candidates.sort(key=history_record_sort_key)
+    snapshots = []
+    for record in candidates:
+        if isinstance(record.get("checkpoints"), list):
+            # A replacement import carries its own authoritative audit history.
+            snapshots = list(record["checkpoints"])
+        if record.get("checkpoint"):
+            snapshots.append(record["checkpoint"])
+    active = None
+    if candidates[-1].get("checkpoint"):
+        try:
+            checkpoint = HistoryCheckpoint.model_validate(candidates[-1]["checkpoint"])
+            if checkpoint_matches(session, checkpoint):
+                active = checkpoint
+        except (ValueError, TypeError):
+            logger.warning("Ignoring invalid history checkpoint for %s", session.session_id)
+    return active, validated_checkpoints(session, snapshots)

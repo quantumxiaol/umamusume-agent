@@ -5,6 +5,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from ..dialogue.models import ActorRef, DialogueEventType, DialogueInputEvent
+from ..dialogue.memory import HistoryCheckpoint
 
 
 class LoadCharacterRequest(BaseModel):
@@ -30,6 +31,8 @@ class HistoryImportMessage(BaseModel):
     """导入历史消息"""
     role: str
     content: str = ""
+    model_content: str = ""
+    modelContent: str = ""
     action: Optional[str] = None
     dialogue: Optional[str] = None
     timestamp: Optional[str] = None
@@ -52,6 +55,8 @@ class HistoryImportRequest(BaseModel):
     messages: list[HistoryImportMessage]
     replace_current: bool = True
     source: str = "manual"
+    context_checkpoint: HistoryCheckpoint | None = None
+    context_checkpoints: list[HistoryCheckpoint] | None = None
 
 
 class SessionInfo(BaseModel):

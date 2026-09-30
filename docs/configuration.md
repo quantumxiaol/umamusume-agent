@@ -113,8 +113,10 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `DIALOGUE_HIDDEN_FORMAT_REINJECTION_ENABLED` | `true` | 后端隐藏格式约束再注入 |
 | `DIALOGUE_HIDDEN_FORMAT_REINJECTION_INTERVAL_MESSAGES` | `100` | 每多少条 user/assistant 消息再注入 |
 
-`DIALOGUE_SESSION_HISTORY_MAX_MESSAGES=0` 有利于保留稳定前缀，但长期会话会增加上下文
-成本，应根据供应商上下文上限调整。
+启用 `DIALOGUE_COMPACTION_ENABLED=true` 时忽略旧的消息数量裁剪，改用低频水位压缩。
+默认面向 1M 上下文：约 600K 触发，目标 200K，记忆预算 100K，优先保留最近 8 轮。
+全部参数、独立输出预算和浏览器恢复说明见[单角色长历史记忆](dialogue_memory.md)。
+换较小模型时必须调整容量、水位和摘要输出预算。
 格式提醒附在达到间隔后的第一条 user 消息上，之后始终保留在同一条历史消息中。
 不会增加中途 system 消息，也不会将提醒移到每轮最新消息上。
 

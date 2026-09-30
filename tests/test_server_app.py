@@ -161,6 +161,25 @@ class ServerApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await client.get("/history", params={"user_uuid": "bad"})).status_code, 400)
         self.assertEqual((await client.get("/history", params={"user_uuid": USER_A, "limit": -1})).status_code, 400)
 
+    async def test_history_character_recency_uses_normalized_timestamps(self):
+        _, services, client = self.make_app()
+        loaded = await self.load_session(client)
+        first = services.session_store.sessions[loaded["session_id"]]
+        for index, timestamp in enumerate(["2026-09-30T09:00:00+08:00", "2026-09-30T02:00:00Z"], 1):
+            first._append_history_event({"event": "message", "role": "user", "content": str(index),
+                                         "message_index": index, "timestamp": timestamp})
+        other = self.character.model_copy(update={"id": "other", "name_en": "Other Character"})
+        second = services.session_store.create(other, user_uuid=USER_A)
+        second._append_history_event({"event": "message", "role": "user", "content": "latest",
+                                      "message_index": 1, "timestamp": "2026-09-30T03:00:00Z"})
+        response = await client.get("/history", params={"user_uuid": USER_A, "limit": 0})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual([item["content"] for item in payload["messages"]], ["1", "2", "latest"])
+        self.assertEqual([item["character_name_en"] for item in payload["characters"]],
+                         ["Other Character", self.character.name_en])
+        self.assertEqual(payload["characters"][1]["last_message_at"], "2026-09-30T02:00:00Z")
+
     async def test_expiry_and_shutdown_lifecycle(self):
         app, services, client = self.make_app(DIALOGUE_SESSION_TTL_SECONDS=1)
         async with app.router.lifespan_context(app):

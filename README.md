@@ -40,6 +40,7 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 ## 功能
 
 - **单角色对话**：非流式或 SSE，支持编辑上一句、重生成上一轮、导入导出历史。
+- **长期记忆**：单角色长历史按水位分段压缩，保留近期原文，支持浏览器缓存恢复。
 - **剧情事件**：训练员对白、训练员动作和环境事件可先加入队列，整组只触发一次回复。
 - **多角色导演模式**：选择或自定义场景、剧情大纲和 1～3 位角色，由导演 LLM
   维护时间、环境和发言调度。
@@ -267,6 +268,7 @@ Fish Speech 请求、MCP 工具、翻译重试、取消和临时音频见
 - [完整配置](docs/configuration.md)
 - [对话与历史协议](docs/dialogue_protocol.md)
 - [单角色 Runtime 架构](docs/dialogue_architecture.md)
+- [单角色长历史压缩与恢复](docs/dialogue_memory.md)
 - [多角色导演模式](docs/director_mode_v1.md)
 - [TTS、MCP 与 Fish Speech](docs/tts_pipeline.md)
 - [GitHub Pages + HF Space 部署](docs/deployment.md)

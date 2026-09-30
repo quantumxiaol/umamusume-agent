@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .token_budget import observe_prompt_tokens
+
 import json
 import logging
 from dataclasses import dataclass
@@ -113,6 +115,7 @@ class CharacterRuntime:
             return getattr(source, key, None)
 
         prompt_tokens = read(usage, "prompt_tokens")
+        observe_prompt_tokens(prompt_tokens)
         completion_tokens = read(usage, "completion_tokens")
         details = (
             read(usage, "prompt_tokens_details")

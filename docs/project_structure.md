@@ -38,7 +38,12 @@ characters/
 │   ├── character/                 # CharacterConfig 与角色卡加载
 │   ├── dialogue/                  # 单角色对话核心
 │   │   ├── context.py             # Prompt、前缀缓存与约束再注入
+│   │   ├── compaction.py          # 高低水位、完整轮次保留与分段记忆编排
+│   │   ├── compaction_runtime.py  # 摘要独立输出预算、流式调用与截断重试
+│   │   ├── memory.py              # Checkpoint 校验与模型历史视图
+│   │   ├── token_budget.py        # token 估算与实际用量校准
 │   │   ├── history.py             # JSONL 读取、恢复与导入
+│   │   ├── history_order.py       # 历史、重置与摘要的时间归一化和稳定排序
 │   │   ├── models.py              # Actor、事件与 Runtime 数据模型
 │   │   ├── protocol.py            # action/dialogue 协议与兼容
 │   │   ├── runtime.py             # LLM 调用、修复与重生成
@@ -63,6 +68,7 @@ characters/
 │   │   ├── sessions.py            # 单角色会话注册、恢复与过期清理
 │   │   ├── http_utils.py          # HTTP 错误和浏览器 UUID 转换
 │   │   ├── dialogue_routes.py     # 单聊、会话、角色与历史 API
+│   │   ├── dialogue_turns.py      # 会话锁、压缩进度与可取消 SSE 任务
 │   │   ├── streaming.py           # 旧两行协议的 token 流式响应
 │   │   ├── tts_routes.py          # 音频、TTS Job API 与单聊配音适配
 │   │   ├── director_routes.py     # /director API 与 SSE
@@ -83,9 +89,12 @@ characters/
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── DirectorMode.vue  # 场景选择、共享时间线与重生成 UI
+│   │   │   ├── MemoryCheckpoint.vue # 单角色时间线中的折叠摘要与触发位置
 │   │   │   └── LanguageSelector.vue
 │   │   ├── i18n/                 # 简中、繁中、日文和英文文本
 │   │   ├── services/api.js       # 单聊、导演、历史与 TTS Job API
+│   │   ├── services/historyCache.js # 单角色全文及记忆的 IndexedDB 原子缓存
+│   │   ├── services/memoryTimeline.js # 展示行映射，不修改原始对话
 │   │   ├── stores/chatStore.js   # 单角色状态、历史、事件队列与语音轮询
 │   │   ├── stores/directorStore.js # 导演场景、恢复、revision 与语音轮询
 │   │   ├── App.vue               # 单角色/导演模式入口
@@ -98,6 +107,7 @@ characters/
 │   ├── configuration.md           # 完整环境变量
 │   ├── deployment.md              # GitHub Pages + HF 自部署
 │   ├── dialogue_architecture.md   # 单角色 Runtime 依赖边界
+│   ├── dialogue_memory.md         # 长历史压缩预算、缓存、恢复与兼容性
 │   ├── dialogue_protocol.md       # 事件、JSON、SSE 与历史协议
 │   ├── director_mode_v1.md        # 多角色调度和前缀缓存
 │   ├── project_structure.md       # 本文档

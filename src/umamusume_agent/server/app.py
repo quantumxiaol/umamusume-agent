@@ -104,6 +104,7 @@ def create_app(*, services: ServerServices | None = None) -> FastAPI:
         return {
             "dialogue_api_version": 2,
             "dialogue_events": EVENT_SCHEMA_VERSION,
+            "dialogue_memory": 1 if settings.DIALOGUE_COMPACTION_ENABLED else 0,
             "context_event_batch": 1,
             "director_mode": 1,
             "director_schema_version": 1,
@@ -139,6 +140,7 @@ def create_app(*, services: ServerServices | None = None) -> FastAPI:
 
     app.include_router(create_dialogue_router(
         service=services.dialogue_service, session_store=store,
+        compactor=services.compactor,
         character_manager=services.character_manager,
         voice_service=services.voice_service, usage_tracker=services.usage_tracker,
         settings=settings,

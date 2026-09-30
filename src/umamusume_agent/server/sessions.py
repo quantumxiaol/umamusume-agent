@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from ..character import CharacterConfig
 from ..dialogue.context import LegacyDialogueContextBuilder
-from ..dialogue.history import create_history_file_path, load_persistent_history
+from ..dialogue.history import create_history_file_path, load_persistent_history, load_history_memory
 from ..dialogue.session import DialogueSession
 from ..tts import VoiceService
 from .http_utils import normalize_user_uuid
@@ -54,6 +54,9 @@ class DialogueSessionStore:
             initial_history=restored_history,
         )
         self.sessions[session_id] = session
+        session.checkpoint, session.checkpoints = load_history_memory(self.history_dir, session)
+        if session.checkpoint:
+            session.token_ratio = session.checkpoint.token_ratio
         logger.info(
             "Created session %s for character %s (user_uuid=%s, restored=%s)",
             session_id,
@@ -77,7 +80,7 @@ class DialogueSessionStore:
         return session
 
     def is_expired(self, session: DialogueSession, now: Optional[datetime] = None) -> bool:
-        if self.ttl_seconds <= 0:
+        if self.ttl_seconds <= 0 or session.lock.locked():
             return False
         current_time = now or datetime.now()
         idle_seconds = (current_time - session.last_active_at).total_seconds()

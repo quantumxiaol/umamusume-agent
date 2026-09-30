@@ -8,6 +8,8 @@ import {
   watch,
 } from 'vue';
 import DirectorMode from '@/components/DirectorMode.vue';
+import MemoryCheckpoint from '@/components/MemoryCheckpoint.vue';
+import { buildMemoryTimeline } from '@/services/memoryTimeline';
 import { fetchRecentLlmUsage } from '@/services/api';
 import { DIALOGUE_INPUT_MODES, useChatStore } from '@/stores/chatStore';
 
@@ -39,6 +41,7 @@ const voicePreviewUrl = computed(() => chatStore.voicePreviewUrl);
 const outputDir = computed(() => chatStore.outputDir);
 const restoredHistoryMessages = computed(() => chatStore.restoredHistoryMessages);
 const messages = computed(() => chatStore.messages);
+const conversationRows = computed(() => buildMemoryTimeline(messages.value, chatStore.contextCheckpoints));
 const queuedEvents = computed(() => chatStore.queuedEvents);
 const isLoading = computed(() => chatStore.isLoading);
 const error = computed(() => chatStore.error);
@@ -116,6 +119,13 @@ const handleSelectCharacter = async (name) => {
   await chatStore.selectCharacter(name);
 };
 
+const restoreFailedDraft = () => {
+  if (chatStore.failedDraft && !messageInput.value) {
+    messageInput.value = chatStore.failedDraft;
+    chatStore.failedDraft = '';
+  }
+};
+
 const handleSend = async () => {
   if (!messageInput.value.trim() && !queuedEvents.value.length) {
     return;
@@ -128,10 +138,12 @@ const handleSend = async () => {
     }
     isEditingLastUser.value = false;
     await chatStore.regenerateFromLastUser(text, inputMode.value);
+    restoreFailedDraft();
     await refreshLlmUsage();
     return;
   }
   await chatStore.sendMessage(text, inputMode.value);
+  restoreFailedDraft();
   await refreshLlmUsage();
 };
 
@@ -210,6 +222,7 @@ const handleRegenerateLast = async () => {
   isEditingLastUser.value = false;
   messageInput.value = '';
   await chatStore.regenerateFromLastUser(lastUserMessage.value.content);
+  restoreFailedDraft();
   await refreshLlmUsage();
 };
 
@@ -705,67 +718,74 @@ onMounted(async () => {
             <p>输入一句话，角色会用指定人格与你对话。</p>
           </div>
 
-          <div
-            v-for="message in messages"
-            :key="message.id"
-            :class="['message', message.role, message.inputMode]"
-          >
-            <div class="message-meta">
-              <span>
-                {{ messageActorName(message) }}
-                <span v-if="messageEventLabel(message)" class="event-label">
-                  · {{ messageEventLabel(message) }}
+          <template v-for="message in conversationRows" :key="message.key">
+            <MemoryCheckpoint
+              v-if="message.kind === 'memory'"
+              :checkpoint="message.checkpoint"
+              :location-known="message.locationKnown"
+              :active="Boolean(chatStore.contextCheckpoint && message.checkpoint.checkpoint_id === chatStore.contextCheckpoint.checkpoint_id)"
+            />
+            <div
+              v-else
+              :class="['message', message.role, message.inputMode]"
+            >
+              <div class="message-meta">
+                <span>
+                  {{ messageActorName(message) }}
+                  <span v-if="messageEventLabel(message)" class="event-label">
+                    · {{ messageEventLabel(message) }}
+                  </span>
                 </span>
-              </span>
-              <span class="status" v-if="message.status === 'streaming'">生成中…</span>
-            </div>
-            <div class="message-body">
-              <template v-if="message.role === 'assistant'">
-                <template v-if="message.renderMode === 'raw'">
-                  <pre class="stream-raw">{{ message.content }}</pre>
+                <span class="status" v-if="message.status === 'streaming'">{{ chatStore.compactionStatus || '生成中…' }}</span>
+              </div>
+              <div class="message-body">
+                <template v-if="message.role === 'assistant'">
+                  <template v-if="message.renderMode === 'raw'">
+                    <pre class="stream-raw">{{ message.content }}</pre>
+                  </template>
+                  <template v-else>
+                    <div v-if="messageParts[message.id]?.action" class="line action-line">
+                      <span class="line-tag action-tag">动作</span>
+                      <span class="line-text">{{ messageParts[message.id].action }}</span>
+                    </div>
+                    <div v-if="messageParts[message.id]?.dialogue" class="line dialogue-line">
+                      <span class="line-tag dialogue-tag">对白</span>
+                      <p class="line-text">{{ messageParts[message.id].dialogue }}</p>
+                    </div>
+                  </template>
                 </template>
                 <template v-else>
-                  <div v-if="messageParts[message.id]?.action" class="line action-line">
-                    <span class="line-tag action-tag">动作</span>
-                    <span class="line-text">{{ messageParts[message.id].action }}</span>
-                  </div>
-                  <div v-if="messageParts[message.id]?.dialogue" class="line dialogue-line">
-                    <span class="line-tag dialogue-tag">对白</span>
-                    <p class="line-text">{{ messageParts[message.id].dialogue }}</p>
-                  </div>
+                  <p>{{ message.content }}</p>
                 </template>
-              </template>
-              <template v-else>
-                <p>{{ message.content }}</p>
-              </template>
-            </div>
+              </div>
 
-            <div
-              v-if="ttsEnabled && message.role === 'assistant' && message.voice?.job_id"
-              class="message-audio"
-            >
-              <button
-                v-if="message.voice.status === 'ready'"
-                class="audio-button"
-                :disabled="!message.voice.audio_url"
-                @click="playAudio(message.id)"
+              <div
+                v-if="ttsEnabled && message.role === 'assistant' && message.voice?.job_id"
+                class="message-audio"
               >
-                ▶ 播放日语配音
-              </button>
-              <span
-                class="audio-status"
-                v-if="message.voice.status !== 'ready'"
-              >
-                {{ voiceStatusText(message) }}
-              </span>
-              <audio
-                v-if="message.voice.status === 'ready' && message.voice.audio_url"
-                :ref="(el) => (audioRefs[message.id] = el)"
-                :src="message.voice.audio_url"
-                preload="none"
-              ></audio>
+                <button
+                  v-if="message.voice.status === 'ready'"
+                  class="audio-button"
+                  :disabled="!message.voice.audio_url"
+                  @click="playAudio(message.id)"
+                >
+                  ▶ 播放日语配音
+                </button>
+                <span
+                  class="audio-status"
+                  v-if="message.voice.status !== 'ready'"
+                >
+                  {{ voiceStatusText(message) }}
+                </span>
+                <audio
+                  v-if="message.voice.status === 'ready' && message.voice.audio_url"
+                  :ref="(el) => (audioRefs[message.id] = el)"
+                  :src="message.voice.audio_url"
+                  preload="none"
+                ></audio>
+              </div>
             </div>
-          </div>
+          </template>
         </section>
 
         <section class="chat-input">
@@ -833,6 +853,11 @@ onMounted(async () => {
             </div>
           </div>
           <div class="meta-row">
+            <span v-if="chatStore.cacheWarning" class="error">{{ chatStore.cacheWarning }}</span>
+            <span v-if="chatStore.compactionStatus" class="hint" role="status">{{ chatStore.compactionStatus }}</span>
+            <span v-else-if="chatStore.contextCheckpoint" class="hint">
+              历史记忆第 {{ chatStore.contextCheckpoint.revision }} 版 · 已整理 {{ chatStore.contextCheckpoint.covered_messages }} 条较早消息（原文仍保留）
+            </span>
             <span v-if="error" class="error">{{ error }}</span>
             <span v-else-if="exportNotice" class="success">{{ exportNotice }}</span>
             <span v-else-if="isEditingLastUser" class="hint">
@@ -1594,6 +1619,11 @@ textarea {
 .meta-row {
   margin-top: 8px;
   font-size: 12px;
+}
+
+.meta-row > span {
+  display: block;
+  margin-top: 4px;
 }
 
 .error {

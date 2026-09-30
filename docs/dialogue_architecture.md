@@ -43,11 +43,17 @@ the LangChain MCP adapters remain available through the optional
   JSON repair, regeneration, and the final safe reply.
 - `dialogue/context.py`: character system prompt, output constraints, prefix
   cache metadata, and hidden format reinjection.
+- `dialogue/compaction.py` / `compaction_runtime.py`: low-frequency history
+  compaction with independent long-output budgets; no director/Stage changes.
+- `dialogue/memory.py` / `token_budget.py`: validated checkpoints, stable prompt
+  views and usage-calibrated token estimates. See [long-history memory](dialogue_memory.md).
 - `dialogue/service.py`: one complete user-to-character turn.
 - `dialogue/session.py`: mutable in-memory state for a legacy single-character
   session.
 - `dialogue/history.py`: JSONL paths, parsing, restoration, filtering, and
   import normalization.
+- `dialogue/history_order.py`: shared timezone normalization and deterministic
+  ordering for history display, restoration, reset cutoffs and checkpoints.
 - `tts/service.py`: Dialogue/Director to TTS MCP request adaptation.
 - `tts/agent.py`: context-aware Chinese-to-Japanese dialogue preparation.
 - `tts/jobs.py`: asynchronous job lifecycle, bounded concurrency, and TTL.
@@ -64,6 +70,8 @@ the LangChain MCP adapters remain available through the optional
 - `server/dialogue_routes.py`: single-character, character-list, session and
   history endpoints; HTTP adaptation rather than model execution logic.
 - `server/streaming.py`: the legacy two-line token-stream protocol.
+- `server/dialogue_turns.py`: serialized single-session operations, compaction
+  progress, heartbeat delivery and cancellation propagation.
 - `server/tts_routes.py`: audio/job endpoints and single-dialogue TTS adaptation.
 - `server/http_utils.py`: browser UUID validation and upstream HTTP errors.
 - `director/recovery.py`: `SceneRecovery`, validating browser snapshots and
@@ -80,11 +88,12 @@ the deployment entry point still creates the default app.
 
 - `POST /chat` accepts the original payload and returns
   `action`, `dialogue`, and `message`.
-- Story event fields are additive. Requests without `speaker`, `event_type`,
-  and `target_actor_ids` keep the exact legacy response shape.
+- Story events and history memory are additive. Existing request and response
+  fields retain their meanings; optional checkpoints and `model_content` are new.
 - `GET /capabilities` lets a separately deployed frontend enable story events
   only after the Hugging Face backend advertises `dialogue_events=1`.
 - JSON-mode `POST /chat_stream` emits `structured_reply` before `done`.
+- Compaction may emit `context_status` before the reply, plus keepalive comments.
 - Disabled JSON mode preserves the legacy token stream.
 - Assistant history remains schema version 2 and restores legacy records.
 - TTS receives only newly generated character `dialogue`; action,
