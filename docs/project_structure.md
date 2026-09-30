@@ -25,6 +25,9 @@ characters/
 | `reference_jp.txt` | 参考音频的日文文本 |
 | `reference_zh.txt` | 检索和对照用中文文本 |
 
+角色选择列表由后端按 `config.json` 的 `name_en` 忽略大小写进行 A–Z 排序，前端仍显示中文名。
+缺少英文名时使用角色目录名排序；英文名相同时用目录名确定顺序。本地、HF 和 GitHub Pages 共用此规则。
+
 角色人格来源可参考
 [umamusume-agent-prompt](https://github.com/quantumxiaol/umamusume-agent-prompt)，
 音色数据工具可参考

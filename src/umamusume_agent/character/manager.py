@@ -225,10 +225,10 @@ class CharacterManager:
 
     def list_characters(self) -> list[str]:
         """
-        列出所有已缓存的角色
+        按英文名 A–Z 列出所有已缓存的角色（忽略大小写）。
         
         Returns:
-            角色名称列表
+            中文角色名称列表；缺少英文名时以目录名作为排序依据。
         """
         characters = []
         for item in self.characters_dir.iterdir():
@@ -236,10 +236,16 @@ class CharacterManager:
                 try:
                     with open(item / "config.json", 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                    characters.append(data.get('name_zh', item.name))
+                    english_name = data.get('name_en')
+                    if not isinstance(english_name, str) or not english_name.strip():
+                        english_name = item.name
+                    # Directory traversal order differs between local filesystems
+                    # and fresh HF checkouts. Use a deterministic tie-breaker too.
+                    sort_key = (english_name.strip().casefold(), item.name.casefold(), item.name)
+                    characters.append((sort_key, data.get('name_zh', item.name)))
                 except Exception:
                     continue
-        return characters
+        return [name for _, name in sorted(characters, key=lambda item: item[0])]
     
     def clear_cache(self, character_name: Optional[str] = None) -> None:
         """
