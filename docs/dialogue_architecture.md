@@ -42,7 +42,9 @@ the LangChain MCP adapters remain available through the optional
 - `dialogue/runtime.py`: provider calls, `response_format` capability fallback,
   JSON repair, regeneration, and the final safe reply.
 - `dialogue/context.py`: character system prompt, output constraints, prefix
-  cache metadata, and hidden format reinjection.
+  cache metadata, and hidden format reinjection. Projects legacy assistant
+  history to JSON for JSON-mode requests without modifying archived records or
+  checkpoint fingerprints.
 - `dialogue/compaction.py` / `compaction_runtime.py`: low-frequency history
   compaction with independent long-output budgets; no director/Stage changes.
 - `dialogue/memory.py` / `token_budget.py`: validated checkpoints, stable prompt

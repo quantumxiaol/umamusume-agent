@@ -265,6 +265,38 @@ class CompactionTests(unittest.IsolatedAsyncioTestCase):
         restored = self.make_services().session_store.create(self.character, user_uuid=USER)
         self.assertIsNone(restored.checkpoint)
 
+    async def test_checkpoint_from_legacy_model_view_survives_json_projection(self):
+        self.fill()
+        # Generate the checkpoint with precisely the pre-upgrade context view:
+        # internal two-line assistant history passed to the model unchanged.
+        with patch('umamusume_agent.dialogue.context._json_history_message', side_effect=lambda message: message):
+            await self.compact()
+            old_messages = self.session.get_messages()
+        checkpoint = self.session.checkpoint
+        original = copy.deepcopy(self.session.history)
+        self.assertTrue(old_messages[-1]['content'].startswith('角色动作：'))
+        self.llm.calls.clear()
+        restored = self.make_services().session_store.create(self.character, user_uuid=USER)
+        self.assertEqual(restored.checkpoint, checkpoint)
+        self.assertEqual(restored.history, original)
+        self.assertEqual(restored.get_messages()[:2], old_messages[:2])  # Same system and memory.
+        self.assertEqual(json.loads(restored.get_messages()[-1]['content'])['dialogue'], '回复29：明天见。')
+        # Browser restore/regeneration keeps the covered prefix and old digest.
+        records = self.records()
+        response = await self.client.post('/history/import', json={
+            'session_id': self.session.session_id, 'messages': records[:-2],
+            'source': 'regenerate_last_user', 'context_checkpoint': checkpoint.model_dump(mode='json'),
+            'context_checkpoints': [checkpoint.model_dump(mode='json')],
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.session.checkpoint, checkpoint)
+        self.assertEqual(self.session.checkpoints, [checkpoint])
+        self.assertEqual(self.llm.calls, [])
+        await self.client.post('/chat', json={'session_id': self.session.session_id, 'message': '继续'})
+        self.assertEqual(len(self.llm.calls), 1)  # One reply; no repeat compaction.
+        self.assertEqual(self.session.checkpoint, checkpoint)
+        self.assertIn(checkpoint.summary, self.llm.calls[0]['messages'][1]['content'])
+
     async def test_regeneration_preserves_memory_only_when_covered_prefix_unchanged(self):
         self.fill()
         await self.compact()

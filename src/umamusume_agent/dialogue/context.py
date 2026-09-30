@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Sequence
 
 from ..character import CharacterConfig
@@ -17,8 +18,38 @@ from .protocol import (
 )
 
 
+def _json_history_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Project compact legacy replies to JSON without migrating the archive.
+
+    Session history and checkpoint digests retain their existing representation.
+    Only the two internal labels emitted by to_compact_context_message need
+    conversion; validated raw model JSON must remain byte-for-byte unchanged.
+    """
+    if message.get("role") != "assistant":
+        return message
+    content = message.get("content")
+    if not isinstance(content, str):
+        return message
+    if content.startswith("角色动作："):
+        action, separator, dialogue = content[len("角色动作："):].partition("\n角色对白：")
+        if not separator:
+            return message
+    elif content.startswith("角色对白："):
+        action, dialogue = "无", content[len("角色对白："):]
+    else:
+        return message
+    return {
+        **message,
+        "content": json.dumps(
+            {"action": action, "dialogue": dialogue},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    }
+
+
 class LegacyDialogueContextBuilder:
-    """Reproduce the original single-character model context exactly."""
+    """Build single-character context while preserving legacy history storage."""
 
     def __init__(
         self,
@@ -111,9 +142,10 @@ class LegacyDialogueContextBuilder:
         history: Sequence[dict[str, Any]],
         text_only: bool = False,
     ) -> CharacterReplyContext:
+        json_enabled = is_json_reply_enabled(self.settings)
         response_instruction = (
             JSON_RESPONSE_FORMAT_INSTRUCTION
-            if is_json_reply_enabled(self.settings)
+            if json_enabled
             else LEGACY_RESPONSE_FORMAT_INSTRUCTION
         )
         if text_only:
@@ -132,5 +164,9 @@ class LegacyDialogueContextBuilder:
             system_message["cache_control"] = {"type": "ephemeral"}
 
         messages = [system_message]
-        self._append_history(messages, history)
+        model_history = (
+            [_json_history_message(message) for message in history]
+            if json_enabled else history
+        )
+        self._append_history(messages, model_history)
         return CharacterReplyContext(messages=messages)

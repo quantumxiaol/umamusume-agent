@@ -17,11 +17,11 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 [Agent 对话体验](https://quantumxiaol.github.io/umamusume-agent/)
 供体验，无TTS，不作为长期服务承诺，随着成本的攀升可能停止提供服务。
 
-注意，当前后端采用 DeepSeek V4 Flash，1M 上下文，设计上向尽可能缓存命中靠拢，暂时没有历史压缩和窗口功能，所有历史都发送便于前缀命中复用缓存。如果要体验，尽量在波谷时间（非工作日工作时间），我可以节省一些开支。
+注意，当前后端采用 DeepSeek V4 Flash，通过稳定前缀和增量追加上下文，尽可能复用供应商缓存。如果要体验，尽量在波谷时间（非工作日工作时间），我可以节省一些开支。
 
 对于长期使用体验，建议自己在 github 和 hugging face 分别fork本项目，接入自己的[DeepSeek API](https://api-docs.deepseek.com/zh-cn/)，搭建属于自己的服务，确保服务稳定和数据安全，参见[搭建流程](./docs/deployment.md)。
 
-当历史超出上下文限制会有问题，但要达到1M上下文，大概需要近千轮对话。
+单角色对话已支持按 token 水位自动压缩早期历史，保留近期原文和完整聊天归档，摘要可随浏览器缓存恢复。导演及 Stage 模式尚未接入历史摘要压缩，长场景仍需关注上下文上限。实际可对话轮数取决于角色提示词、每轮内容和输入大小，不能简单按“近千轮”估算。详见[单角色长历史记忆](docs/dialogue_memory.md)。
 
 由于大陆地区规定禁止提供AI虚拟角色陪同类服务，我不能提供收费方式来回收部分成本，否则就构成提供付费服务了。因此随着成本的攀升可能停止提供服务。代码仓库本身为MIT LICENSE，可以自行部署服务。
 

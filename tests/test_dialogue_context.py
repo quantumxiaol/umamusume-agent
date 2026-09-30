@@ -1,3 +1,5 @@
+import copy
+import json
 import unittest
 
 from umamusume_agent.dialogue.context import LegacyDialogueContextBuilder
@@ -41,7 +43,12 @@ class LegacyDialogueContextBuilderTests(unittest.TestCase):
             context.messages[0]["cache_control"],
             {"type": "ephemeral"},
         )
-        self.assertEqual(context.messages[1:3], history)
+        self.assertEqual(context.messages[1], history[0])
+        self.assertEqual(
+            json.loads(context.messages[2]["content"]),
+            {"action": "无", "dialogue": "第二句"},
+        )
+        self.assertEqual(history[1]["content"], "角色对白：第二句")
         self.assertEqual(len(context.messages), 3)
 
         next_history = [*history, {"role": "user", "content": "第三句"}]
@@ -61,7 +68,60 @@ class LegacyDialogueContextBuilderTests(unittest.TestCase):
             self.assertEqual(messages[:len(previous)], previous)
             self.assertEqual(sum(m["role"] == "system" for m in messages), 1)
             previous = list(messages)
-            history.append({"role": "assistant", "content": f"回答{turn}"})
+            reply = {"action": "点头", "dialogue": f"回答{turn}"}
+            history.append(to_compact_context_message({
+                "role": "assistant", **reply,
+                "model_content": json.dumps(reply, ensure_ascii=False) if turn % 2 else "",
+            }))
+
+    def test_old_assistant_history_is_json_only_in_model_view(self):
+        # Old exports have semantic fields but no model_content. Restoring them
+        # still produces this internal representation (also used by digests).
+        action = '低头看着纸条："约定"\n轻轻点头。'
+        dialogue = '哥、哥哥大人……\n米浴记得\\不会忘记。'
+        raw_json = '{ "dialogue": "明天见。", "action": "微笑" }'
+        history = [
+            {"role": "user", "content": "【训练员动作】摸摸头。"},
+            to_compact_context_message({"role": "assistant", "action": action, "dialogue": dialogue}),
+            {"role": "user", "content": "记得吗？"},
+            to_compact_context_message({"role": "assistant", "action": "无", "dialogue": "记得。"}),
+            {"role": "user", "content": "明天见。"},
+            {"role": "assistant", "content": raw_json},
+        ]
+        before = copy.deepcopy(history)
+        for reinjection in (False, True):
+            for text_only in (False, True):
+                with self.subTest(reinjection=reinjection, text_only=text_only):
+                    builder = LegacyDialogueContextBuilder(settings=_Settings, hidden_reinjection_enabled=reinjection)
+                    messages = builder.build(character=_Character(), history=history, text_only=text_only).messages
+                    self.assertEqual(len(messages), len(history) + 1)
+                    self.assertEqual(messages[1], history[0])
+                    self.assertEqual(json.loads(messages[2]["content"]), {"action": action, "dialogue": dialogue})
+                    self.assertEqual(json.loads(messages[4]["content"]), {"action": "无", "dialogue": "记得。"})
+                    # Preserve raw JSON bytes for prefix reuse, not just fields.
+                    self.assertEqual(messages[6]["content"], raw_json)
+                    self.assertEqual(history, before)
+
+    def test_legacy_output_mode_does_not_reformat_history(self):
+        history = [{"role": "assistant", "content": "角色动作：点头\n角色对白：记得。"}]
+        for enabled, mode in ((False, "auto"), (True, "disabled")):
+            with self.subTest(enabled=enabled, mode=mode):
+                settings = _Settings()
+                settings.LLM_JSON_ENABLED = enabled
+                settings.LLM_JSON_OUTPUT_MODE = mode
+                messages = LegacyDialogueContextBuilder(settings=settings).build(character=_Character(), history=history).messages
+                self.assertEqual(messages[1:], history)
+
+    def test_projection_does_not_guess_at_unknown_history_content(self):
+        history = [
+            {"role": "user", "content": "角色对白：这是用户输入。"},
+            {"role": "assistant", "content": "无法识别的旧文本"},
+            {"role": "assistant", "content": "角色动作：缺少对白分隔符"},
+        ]
+        messages = LegacyDialogueContextBuilder(settings=_Settings, hidden_reinjection_enabled=False).build(
+            character=_Character(), history=history,
+        ).messages
+        self.assertEqual(messages[1:], history)
 
     def test_story_event_types_render_without_changing_legacy_messages(self):
         legacy = to_compact_context_message(
