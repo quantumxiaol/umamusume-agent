@@ -107,6 +107,7 @@ def create_app(*, services: ServerServices | None = None) -> FastAPI:
             "dialogue_memory": 1 if settings.DIALOGUE_COMPACTION_ENABLED else 0,
             "context_event_batch": 1,
             "director_mode": 1,
+            "director_memory": 1 if settings.DIRECTOR_COMPACTION_ENABLED else 0,
             "director_schema_version": 1,
             "director_custom_scenes": 1,
             "director_story_outline": 1,

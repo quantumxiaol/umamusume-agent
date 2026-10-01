@@ -136,6 +136,30 @@ ROLEPLAY_LLM_MODEL_API_KEY=sk-xxxxxxxx
 | `SCENE_TEMPLATES_DIRECTORY` | `./scenes` | 场景预设目录 |
 | `DIRECTOR_HISTORY_DIRECTORY` | `./outputs/director` | 导演 JSONL 副本目录 |
 
+导演与 Stage 的共享记忆使用独立配置（不读取 `DIALOGUE_COMPACTION_*` 水位）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `DIRECTOR_COMPACTION_ENABLED` | `true` | 新轮次前检查并低频压缩公开历史 |
+| `DIRECTOR_CONTEXT_MAX_TOKENS` | `1000000` | 模型上下文容量，需要匹配实际模型 |
+| `DIRECTOR_CONTEXT_RESERVE_TOKENS` | `65536` | 为输出及本轮后续角色预留容量 |
+| `DIRECTOR_COMPACTION_TRIGGER_TOKENS` | `600000` | 任一导演/角色线程达到该估算水位触发 |
+| `DIRECTOR_COMPACTION_TARGET_TOKENS` | `200000` | 压缩后的软目标 |
+| `DIRECTOR_COMPACTION_MEMORY_TOKENS` | `100000` | 共享摘要总预算，并非要求填满 |
+| `DIRECTOR_COMPACTION_KEEP_TURNS` | `8` | 优先保留最近完整场景轮次；至少保留最新一轮 |
+| `DIRECTOR_COMPACTION_RECENT_TOKENS` | `40000` | 近期原文预算，超出时减少保留轮次 |
+| `DIRECTOR_COMPACTION_CHUNK_TOKENS` | `100000` | 每段摘要源材料的预算 |
+| `DIRECTOR_COMPACTION_MAX_CHUNKS` | `8` | 一次压缩最多分段数 |
+| `DIRECTOR_COMPACTION_MAX_TOKENS` | `32768` | 每段摘要独立初始输出预算 |
+| `DIRECTOR_COMPACTION_MAX_DYNAMIC_TOKENS` | `65536` | 截断重试时的输出上限 |
+| `DIRECTOR_COMPACTION_LENGTH_RETRIES` | `1` | 截断后按原请求扩大预算重试次数 |
+| `DIRECTOR_COMPACTION_TIMEOUT_SECONDS` | `1800` | 每段摘要请求超时 |
+
+必须满足记忆预算 < 目标水位 < 触发水位 < 容量，且为输出预留空间。
+配置优先级为运行时环境变量（如 HF Variables）> 本地 `.env` > `.env.template` > 代码兜底值。
+HF 镜像会复制并读取 `.env.template`，无需配齐这些 Variables；已有同名 Variables 会优先覆盖。
+部署无需改变启动命令。
+
 详细上下文和缓存边界见 [`director_mode_v1.md`](director_mode_v1.md)。
 普通导演及场景角色的周期提醒写入当轮 user 消息的 `backend_reminder` 字段，
 初始 system 保持固定。完整后端历史恢复会重建同样的消息分组；浏览器快照仍允许用

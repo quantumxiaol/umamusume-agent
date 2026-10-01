@@ -18,7 +18,9 @@ from ..dialogue.models import DialogueInputEvent
 from ..director.models import CustomSceneDefinition, SceneRecoverySnapshot
 from ..director.service import DirectorService
 from ..director.session import SceneSession
+from ..director.memory import memory_payload
 from ..llm_usage import DeepSeekUsageTracker
+from .dialogue_turns import progress_events
 
 
 class CreateDirectorSessionRequest(BaseModel):
@@ -340,6 +342,7 @@ def create_director_router(
             "turn_index": session.turn_index,
             "events": event_payloads,
             "scene_state": session.timeline.state.model_dump(mode="json"),
+            **memory_payload(session),
         }
 
     @router.post(
@@ -397,8 +400,18 @@ def create_director_router(
                     if usage_tracker is not None
                     else nullcontext()
                 )
-                with operation:
-                    async for event in service.stream_turn(session, request.events):
+                async def run(notify):
+                    with operation:
+                        async for event in service.stream_turn(session, request.events, on_progress=notify):
+                            await notify({"scene_event": event})
+
+                async for kind, data in progress_events(run):
+                    if kind == "heartbeat":
+                        yield ": keepalive\n\n"
+                    elif kind == "context_status" and "scene_event" not in data:
+                        yield f"event: context_status\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                    elif kind == "context_status":
+                        event = data["scene_event"]
                         event_name = (
                             "character_reply"
                             if event.event_type == "character_reply"

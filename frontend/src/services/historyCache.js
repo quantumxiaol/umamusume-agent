@@ -32,12 +32,13 @@ export const indexedHistoryStorage = {
   },
 };
 
-export const createHistoryCache = ({ storage = indexedHistoryStorage, legacyStorage = () => localStorage } = {}) => {
+export const createHistoryCache = ({ storage = indexedHistoryStorage, legacyStorage = () => localStorage,
+  namespace = '', legacyKeys = null } = {}) => {
   const pending = new Map();
-  const keyFor = (user, character) => JSON.stringify([user, character]);
-  const oldKeys = (user, character) => [2, 1].map((version) => (
+  const keyFor = (user, character) => JSON.stringify(namespace ? [namespace, user, character] : [user, character]);
+  const oldKeys = legacyKeys || ((user, character) => [2, 1].map((version) => (
     `umamusume_history_cache_v${version}:${encodeURIComponent(user)}:${encodeURIComponent(character)}`
-  ));
+  )));
   const serial = (key, operation) => {
     const next = (pending.get(key) || Promise.resolve()).catch(() => {}).then(operation);
     pending.set(key, next);
@@ -92,3 +93,7 @@ export const createHistoryCache = ({ storage = indexedHistoryStorage, legacyStor
 };
 
 export const dialogueHistoryCache = createHistoryCache();
+export const sceneHistoryCache = createHistoryCache({
+  namespace: 'director',
+  legacyKeys: (user, scene) => [`umamusume_director_scene_v1:${encodeURIComponent(user)}:${encodeURIComponent(scene)}`],
+});

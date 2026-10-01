@@ -17,6 +17,7 @@ from .history import InvalidSceneHistory, create_scene_history_path, find_scene_
 from .models import ActorInstance, DirectorPlan, SceneEvent, SceneRecoverySnapshot
 from .session import SceneSession
 from .timeline import SceneTimeline
+from .memory import apply_memory_threads, checkpoint_boundary, restore_memory
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +95,19 @@ class SceneRecovery:
             write_scene_start=False,
         )
 
+        restore_memory(session, history.events, history.active_checkpoint, history.checkpoints,
+                       self.director_context_builder.settings)
+        memory_boundary = checkpoint_boundary(history.events, session.checkpoint) if session.checkpoint else 0
+        memory_applied = session.checkpoint is None
         prepared_actors: set[str] = set()
         for index, event in enumerate(history.events):
+            if session.checkpoint and event.sequence <= memory_boundary:
+                self._replay_checked(session, event)
+                continue
+            if not memory_applied:
+                apply_memory_threads(session, session.checkpoint, history.events)
+                actor_threads = session.actor_threads
+                memory_applied = True
             if event.event_type == "director_plan":
                 self.director_context_builder.append_turn(
                     session.director_thread,
@@ -167,6 +179,8 @@ class SceneRecovery:
 
             self._replay_checked(session, event)
 
+        if not memory_applied:
+            apply_memory_threads(session, session.checkpoint, history.events)
         session.turn_index = max(
             (event.turn_index for event in history.events),
             default=0,
@@ -387,6 +401,18 @@ class SceneRecovery:
             session.append_event(event)
         session.turn_index = snapshot.turn_index
         session.touch()
+        restore_memory(session, session.timeline.events, snapshot.context_checkpoint,
+                       snapshot.context_checkpoints, self.director_context_builder.settings)
+        if session.checkpoints:
+            for checkpoint in session.checkpoints:
+                session.history.append({"event": "scene_checkpoint", "checkpoint": checkpoint.model_dump(mode="json")})
+            session.history.append({"event": "scene_checkpoint", "checkpoint": (
+                session.checkpoint.model_dump(mode="json") if session.checkpoint else None
+            )}, strict=True)
+        if session.checkpoint:
+            # Replay the suffix after the checkpoint's trigger as well, so new
+            # responses since compaction and manual regeneration remain usable.
+            session = await self.restore_session(user_uuid=user_uuid, session_id=session.session_id)
         logger.info(
             "Scene context rebuilt source=browser_snapshot session_id=%s turn_index=%s public_events=%s",
             session.session_id, session.turn_index, len(snapshot.events),

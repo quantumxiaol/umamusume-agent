@@ -167,6 +167,27 @@ class DirectorPlan(BaseModel):
     model_content: str = Field(default="", exclude=True)
 
 
+class SceneMemoryCheckpoint(BaseModel):
+    """One shared public memory, bound to an immutable archived prefix."""
+
+    schema_version: Literal[1] = 1
+    checkpoint_id: str = Field(default_factory=lambda: uuid4().hex, max_length=64)
+    revision: int = Field(default=1, ge=1)
+    session_id: str
+    user_uuid: str
+    covered_events: int = Field(ge=1)
+    covered_event_id: str
+    trigger_event_count: int = Field(ge=1)
+    trigger_event_id: str
+    trigger_turn_index: int = Field(ge=0)
+    source_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    prompt_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    summary: str = Field(min_length=1, max_length=2_000_000)
+    reply_counts: dict[str, int] = Field(default_factory=dict)
+    token_ratios: dict[str, float] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class SceneRecoverySnapshot(BaseModel):
     """Public browser-owned snapshot used after an ephemeral backend reset."""
 
@@ -182,3 +203,6 @@ class SceneRecoverySnapshot(BaseModel):
     events: list[SceneEvent] = Field(default_factory=list)
     created_at: datetime
     last_active_at: datetime
+    # Optional for old clients. Invalid/stale memory never invalidates the archive.
+    context_checkpoint: dict[str, Any] | None = None
+    context_checkpoints: list[dict[str, Any]] = Field(default_factory=list)

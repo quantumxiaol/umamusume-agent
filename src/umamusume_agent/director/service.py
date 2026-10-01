@@ -17,6 +17,7 @@ from ..dialogue.models import (
     default_player_actor,
 )
 from ..dialogue.runtime import CharacterRuntime
+from ..dialogue.token_budget import capture_prompt_usage, calibrate
 from ..llm_diagnostics import llm_request_scope
 from .context import CharacterSceneContextBuilder, DirectorContextBuilder
 from .history import (
@@ -42,6 +43,8 @@ from .runtime import DirectorRuntime
 from .session import SceneSession
 from .templates import SceneTemplateRepository
 from .recovery import SceneRecovery
+from .compaction import SceneCompactor
+from .memory import apply_memory_threads, regeneration_messages
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +71,10 @@ class DirectorService:
         self.character_context_builder = character_context_builder
         self.history_dir = history_dir
         self.max_participants = max(1, max_participants)
+        self.compactor = SceneCompactor(
+            runtime=character_runtime, settings=director_context_builder.settings,
+            director_builder=director_context_builder, character_builder=character_context_builder,
+        )
         self.recovery = SceneRecovery(
             character_manager=character_manager,
             director_context_builder=director_context_builder,
@@ -327,6 +334,14 @@ class DirectorService:
             parts.append(f"{labels.get(key, key)}变为{rendered}")
         return "；".join(parts)
 
+    @staticmethod
+    def _validate_inputs(session, input_events):
+        for item in input_events:
+            if not item.content.strip():
+                raise ValueError("场景事件内容不能为空")
+            if item.speaker and item.speaker.actor_id not in {session.player.actor_id, "narrator"}:
+                raise ValueError("导演模式 V1 只允许训练员或环境提交输入事件")
+
     async def stream_turn(
         self,
         session: SceneSession,
@@ -336,11 +351,14 @@ class DirectorService:
         allowed_stage_actor_ids: set[str] | None = None,
         allowed_dialogue_actor_ids: set[str] | None = None,
         stage_actions_output: list[DirectorStageAction] | None = None,
+        on_progress=None,
     ) -> AsyncIterator[SceneEvent]:
         if not input_events:
             raise ValueError("至少需要一个输入事件")
 
         async with session.lock:
+            self._validate_inputs(session, input_events)
+            await self.compactor.prepare(session, input_events, stage_context=stage_context, on_progress=on_progress)
             session.turn_index += 1
             fallback_actor_ids: list[str] = []
             for item in input_events:
@@ -369,14 +387,16 @@ class DirectorService:
             dialogue_actor_ids = set(session.character_actor_ids)
             if allowed_dialogue_actor_ids is not None:
                 dialogue_actor_ids.intersection_update(allowed_dialogue_actor_ids)
+            plan_messages = session.director_thread.snapshot()
+            self.compactor.ensure_capacity(session.director_thread, plan_messages)
             with llm_request_scope(
                 purpose="director_plan" if stage_context is None else "stage_plan",
                 session_id=session.session_id,
                 turn_index=session.turn_index,
                 actor_id="director",
-            ):
+            ), capture_prompt_usage() as usage:
                 plan = await self.director_runtime.generate_plan(
-                    session.director_thread.snapshot(),
+                    plan_messages,
                     allowed_actor_ids=dialogue_actor_ids,
                     allowed_target_ids={
                         session.player.actor_id,
@@ -387,6 +407,7 @@ class DirectorService:
                     allowed_stage_actor_ids=allowed_stage_actor_ids,
                     allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
                 )
+            calibrate(session.director_thread, plan_messages, usage)
             self.director_context_builder.record_plan(
                 session.director_thread,
                 plan,
@@ -455,14 +476,16 @@ class DirectorService:
                     intent=speaker_plan.intent,
                     target_actor_ids=speaker_plan.target_actor_ids,
                 )
+                self.compactor.ensure_capacity(thread, context.messages)
                 with llm_request_scope(
                     purpose="scene_reply" if stage_context is None else "stage_reply",
                     session_id=session.session_id,
                     turn_index=session.turn_index,
                     actor_id=actor.actor_id,
                     actor_reply_index=thread.reply_count + 1,
-                ):
+                ), capture_prompt_usage() as usage:
                     reply = await self.character_runtime.generate_reply(context)
+                calibrate(thread, context.messages, usage)
                 self.character_context_builder.record_reply(thread, reply)
                 reply_event = session.append_event(
                     SceneEvent(
@@ -511,8 +534,11 @@ class DirectorService:
                 not base_messages
                 or base_messages[-1].get("role") != "assistant"
             ):
-                raise ValueError("角色回复上下文无法安全回退")
-            base_messages.pop()
+                # A compaction can commit just before cancellation / a failed
+                # new turn. The latest archived reply is still regenerable.
+                base_messages = regeneration_messages(session, actor_id, original)
+            else:
+                base_messages.pop()
             retry_messages = [
                 *base_messages,
                 {
@@ -524,6 +550,7 @@ class DirectorService:
                     ),
                 },
             ]
+            self.compactor.ensure_capacity(thread, retry_messages)
             with llm_request_scope(
                 purpose="scene_reply",
                 operation="user_regenerate",
@@ -531,10 +558,11 @@ class DirectorService:
                 turn_index=session.turn_index,
                 actor_id=actor_id,
                 actor_reply_index=thread.reply_count,
-            ):
+            ), capture_prompt_usage() as usage:
                 reply = await self.character_runtime.generate_reply(
                     CharacterReplyContext(messages=retry_messages)
                 )
+            calibrate(thread, retry_messages, usage)
 
             # Commit the prompt-thread replacement only after generation
             # succeeds. The retry-only instruction is intentionally transient:
@@ -558,6 +586,12 @@ class DirectorService:
                 ),
             )
             thread.last_seen_sequence = replacement.sequence
+            if session.checkpoint and session.checkpoint.trigger_event_id == replacement.event_id:
+                # This reply is still verbatim in the shared checkpoint tail.
+                # Rebuild *all* seeds so neither Director nor a silent actor
+                # continues to see the revoked version after a checkpoint-only
+                # commit followed by user regeneration.
+                apply_memory_threads(session, session.checkpoint)
             return replacement
 
     async def execute_turn(
@@ -586,6 +620,8 @@ class DirectorService:
             raise ValueError("单角色舞台链路要求会话中恰好有一个角色")
 
         async with session.lock:
+            self._validate_inputs(session, input_events)
+            await self.compactor.prepare(session, input_events, stage_context=stage_context)
             session.turn_index += 1
             events = [
                 self._append_input_event(session, item)
@@ -621,14 +657,16 @@ class DirectorService:
                 intent=intent,
                 target_actor_ids=[session.player.actor_id],
             )
+            self.compactor.ensure_capacity(thread, context.messages)
             with llm_request_scope(
                 purpose="stage_reply",
                 session_id=session.session_id,
                 turn_index=session.turn_index,
                 actor_id=actor_id,
                 actor_reply_index=thread.reply_count + 1,
-            ):
+            ), capture_prompt_usage() as usage:
                 reply = await self.character_runtime.generate_reply(context)
+            calibrate(thread, context.messages, usage)
             self.character_context_builder.record_reply(thread, reply)
             reply_event = session.append_event(
                 SceneEvent(
@@ -659,14 +697,16 @@ class DirectorService:
                 stage_context=stage_context,
                 action_only=True,
             )
+            plan_messages = session.director_thread.snapshot()
+            self.compactor.ensure_capacity(session.director_thread, plan_messages)
             with llm_request_scope(
                 purpose="stage_plan",
                 session_id=session.session_id,
                 turn_index=session.turn_index,
                 actor_id="director",
-            ):
+            ), capture_prompt_usage() as usage:
                 plan = await self.director_runtime.generate_plan(
-                    session.director_thread.snapshot(),
+                    plan_messages,
                     allowed_actor_ids=set(session.character_actor_ids),
                     allowed_target_ids={
                         session.player.actor_id,
@@ -678,6 +718,7 @@ class DirectorService:
                     allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
                     require_speaker=False,
                 )
+            calibrate(session.director_thread, plan_messages, usage)
             self.director_context_builder.record_plan(
                 session.director_thread,
                 plan,

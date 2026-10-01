@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,8 @@ class LoadedSceneHistory:
     events: list[SceneEvent]
     created_at: datetime
     updated_at: datetime
+    checkpoints: list[dict[str, Any]]
+    active_checkpoint: dict[str, Any] | None
 
 
 def _parse_datetime(value: Any, *, fallback: datetime | None = None) -> datetime:
@@ -149,6 +152,10 @@ def load_scene_history(path: Path) -> LoadedSceneHistory:
         events=events,
         created_at=created_at,
         updated_at=updated_at,
+        checkpoints=[record["checkpoint"] for record in records
+                     if record.get("event") == "scene_checkpoint" and isinstance(record.get("checkpoint"), dict)],
+        active_checkpoint=next((record.get("checkpoint") for record in reversed(records)
+                                if record.get("event") == "scene_checkpoint"), None),
     )
 
 
@@ -222,7 +229,7 @@ class SceneHistoryWriter:
         self.user_uuid = user_uuid
         self.template_id = template_id
 
-    def append(self, payload: dict[str, Any]) -> None:
+    def append(self, payload: dict[str, Any], *, strict=False) -> None:
         record = {
             "timestamp": datetime.now().isoformat(),
             "session_id": self.session_id,
@@ -232,4 +239,12 @@ class SceneHistoryWriter:
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            offset = file.tell()
+            try:
+                file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                file.flush()
+                if strict:
+                    os.fsync(file.fileno())
+            except Exception:
+                file.truncate(offset)
+                raise

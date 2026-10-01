@@ -12,6 +12,7 @@ from .context import PromptThread
 from .history import SceneHistoryWriter
 from .models import ActorInstance, SceneEvent, SceneTemplate
 from .timeline import SceneTimeline
+from .memory import memory_payload
 
 
 class SceneSession:
@@ -43,6 +44,8 @@ class SceneSession:
         self.story_outline = story_outline.strip()
         self.timeline = SceneTimeline(initial_state=template.initial_state)
         self.turn_index = 0
+        self.checkpoint = None
+        self.checkpoints = []
         self.created_at = created_at or datetime.now()
         self.last_active_at = last_active_at or self.created_at
         self.lock = asyncio.Lock()
@@ -142,4 +145,5 @@ class SceneSession:
             ],
             "created_at": self.created_at.isoformat(),
             "last_active_at": self.last_active_at.isoformat(),
+            **memory_payload(self),
         }

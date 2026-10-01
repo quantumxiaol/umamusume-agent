@@ -46,7 +46,10 @@ the LangChain MCP adapters remain available through the optional
   history to JSON for JSON-mode requests without modifying archived records or
   checkpoint fingerprints.
 - `dialogue/compaction.py` / `compaction_runtime.py`: low-frequency history
-  compaction with independent long-output budgets; no director/Stage changes.
+  compaction with independent long-output budgets; the summary transport also
+  supports a separate Director configuration namespace.
+- `director/compaction.py` / `memory.py`: one public summary shared by Director,
+  Stage and actors, with per-thread watermarks and versioned scene checkpoints.
 - `dialogue/memory.py` / `token_budget.py`: validated checkpoints, stable prompt
   views and usage-calibrated token estimates. See [long-history memory](dialogue_memory.md).
 - `dialogue/service.py`: one complete user-to-character turn.

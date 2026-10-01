@@ -26,21 +26,26 @@ class CompactionError(ValueError):
 
 
 class CompactionRuntime:
-    def __init__(self, *, runtime, settings):
+    def __init__(self, *, runtime, settings, config_prefix="DIALOGUE", purpose="dialogue_compaction"):
         self.runtime = runtime
         self.settings = settings
+        self.config_prefix = config_prefix
+        self.purpose = purpose
+
+    def setting(self, name):
+        return getattr(self.settings, f"{self.config_prefix}_COMPACTION_{name}")
 
     async def summarize(self, *, messages, target_tokens: int, session_id: str) -> str:
         settings = self.settings
-        budget = settings.DIALOGUE_COMPACTION_MAX_TOKENS
-        limit = settings.DIALOGUE_COMPACTION_MAX_DYNAMIC_TOKENS
+        budget = self.setting("MAX_TOKENS")
+        limit = self.setting("MAX_DYNAMIC_TOKENS")
         if budget <= 0 or limit < budget:
             raise CompactionError("历史压缩输出预算配置无效。")
         # Override only this operation; normal RP calls retain their timeout/retries.
         client = self.runtime.llm_client.with_options(
-            timeout=settings.DIALOGUE_COMPACTION_TIMEOUT_SECONDS, max_retries=0,
+            timeout=self.setting("TIMEOUT_SECONDS"), max_retries=0,
         )
-        for attempt in range(settings.DIALOGUE_COMPACTION_LENGTH_RETRIES + 1):
+        for attempt in range(self.setting("LENGTH_RETRIES") + 1):
             kwargs = dict(
                 model=settings.ROLEPLAY_LLM_MODEL_NAME, messages=messages,
                 max_tokens=budget, stream=True, stream_options={"include_usage": True},
@@ -48,11 +53,11 @@ class CompactionRuntime:
             started = monotonic()
             parts = []
             reason = ""
-            with llm_request_scope(purpose="dialogue_compaction", session_id=session_id):
+            with llm_request_scope(purpose=self.purpose, session_id=session_id):
                 call_id = self.runtime.diagnostics.start(kwargs, attempt=attempt + 1,
                     retry_reason="length" if attempt else "initial", length_retries=attempt)
                 try:
-                    async with asyncio.timeout(settings.DIALOGUE_COMPACTION_TIMEOUT_SECONDS):
+                    async with asyncio.timeout(self.setting("TIMEOUT_SECONDS")):
                         stream = await client.chat.completions.create(**kwargs)
                         try:
                             async for chunk in stream:
@@ -74,7 +79,7 @@ class CompactionRuntime:
                     raise CompactionError("历史压缩未完成，原始历史和旧记忆已保留，请重试。") from exc
                 summary = "".join(parts).strip()
                 self.runtime.diagnostics.finish(call_id, None, content=summary, finish_reason=reason)
-            if reason == "length" and attempt < settings.DIALOGUE_COMPACTION_LENGTH_RETRIES and budget < limit:
+            if reason == "length" and attempt < self.setting("LENGTH_RETRIES") and budget < limit:
                 budget = min(budget * 2, limit)
                 continue  # Original messages only, never a repair prompt.
             if reason != "stop" or not summary:

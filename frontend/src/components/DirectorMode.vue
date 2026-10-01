@@ -3,6 +3,8 @@ import { computed, nextTick, onMounted, ref } from 'vue';
 
 import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
 import { useDirectorStore } from '@/stores/directorStore';
+import MemoryCheckpoint from '@/components/MemoryCheckpoint.vue';
+import { buildSceneMemoryTimeline } from '@/services/memoryTimeline';
 
 
 const props = defineProps({
@@ -34,6 +36,7 @@ const props = defineProps({
 const emit = defineEmits(['usage-changed']);
 
 const store = useDirectorStore();
+const timelineRows = computed(() => buildSceneMemoryTimeline(store.events, store.contextCheckpoints));
 const input = ref('');
 const inputRef = ref(null);
 const isComposing = ref(false);
@@ -358,6 +361,7 @@ onMounted(() => store.init(props.userUuid));
           </button>
         </div>
         <p v-if="store.historyError" class="director-error">{{ store.historyError }}</p>
+        <p v-if="store.cacheWarning" class="director-error">{{ store.cacheWarning }}</p>
         <div v-if="store.historyScenes.length" class="history-grid">
           <article v-for="scene in store.historyScenes" :key="scene.session_id" class="history-item">
             <div class="history-item-main">
@@ -408,9 +412,16 @@ onMounted(() => store.init(props.userUuid));
 
       <section class="scene-timeline">
         <div v-if="!store.events.length" class="director-empty">场景尚未开始。</div>
+        <template v-for="event in timelineRows" :key="event.key">
+        <MemoryCheckpoint
+          v-if="event.kind === 'memory'"
+          :checkpoint="event.checkpoint"
+          :location-known="event.locationKnown"
+          :active="event.checkpoint.checkpoint_id === store.contextCheckpoint?.checkpoint_id"
+          scene
+        />
         <article
-          v-for="event in store.events"
-          :key="event.event_id"
+          v-else
           :class="['scene-message', event.event_type]"
         >
           <header>
@@ -460,11 +471,12 @@ onMounted(() => store.init(props.userUuid));
             ></audio>
           </div>
         </article>
+        </template>
         <div v-if="store.isLoading" class="director-working">
           {{
             store.regeneratingEventId
               ? '正在重新生成角色回复…'
-              : '导演正在整理场景并安排角色回应…'
+              : store.compactionStatus || '导演正在整理场景并安排角色回应…'
           }}
         </div>
       </section>
@@ -515,6 +527,8 @@ onMounted(() => store.init(props.userUuid));
         </div>
         <p v-if="store.error" class="director-error">{{ store.error }}</p>
         <p v-else class="director-hint">导演通常安排 1 位角色回应，确有互动需要时最多调度 {{ maxSpeakers }} 位；后发言者能听到前一位的公开发言。</p>
+        <p v-if="store.historyError" class="director-error">{{ store.historyError }}</p>
+        <p v-if="store.cacheWarning" class="director-error">{{ store.cacheWarning }}</p>
       </section>
     </template>
   </div>

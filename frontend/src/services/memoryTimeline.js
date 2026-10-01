@@ -29,3 +29,25 @@ export const buildMemoryTimeline = (messages, checkpoints = []) => {
   }
   return rows;
 };
+
+// Scene sequences may change after HF/browser recovery; stable event IDs do not.
+export const buildSceneMemoryTimeline = (events, checkpoints = []) => {
+  const positions = new Map(events.map((event, index) => [event.event_id, index]));
+  const markers = new Map();
+  const seen = new Set();
+  for (const checkpoint of checkpoints) {
+    const covered = positions.get(checkpoint.covered_event_id);
+    const trigger = positions.get(checkpoint.trigger_event_id);
+    const key = checkpoint.checkpoint_id;
+    if (covered === undefined || !key || seen.has(key) || !checkpoint.summary) continue;
+    seen.add(key);
+    const locationKnown = trigger !== undefined && trigger >= covered;
+    const position = locationKnown ? trigger : covered;
+    const at = markers.get(position) || [];
+    at.push({ kind: 'memory', key: `memory-${key}`, checkpoint, locationKnown });
+    markers.set(position, at);
+  }
+  return events.flatMap((event, index) => [
+    { ...event, kind: 'event', key: event.event_id }, ...(markers.get(index) || []),
+  ]);
+};

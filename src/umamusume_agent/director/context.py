@@ -59,6 +59,7 @@ class PromptThread:
     last_seen_sequence: int = 0
     reply_count: int = 0
     last_scene_state: dict[str, Any] | None = None
+    token_ratio: float = 0.5
 
     def append(self, role: str, content: str) -> None:
         self.messages.append({"role": role, "content": content})

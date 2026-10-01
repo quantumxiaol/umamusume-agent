@@ -437,6 +437,8 @@ export const directorTurnStream = async (
     let buffer = '';
     let eventName = null;
     let dataLines = [];
+    let receivedDone = false;
+    let receivedError = false;
 
     const flushEvent = () => {
       if (!dataLines.length) {
@@ -446,8 +448,12 @@ export const directorTurnStream = async (
       const type = eventName || 'scene_event';
       const rawData = dataLines.join('\n');
       try {
-        emitEvent(onEvent, type, JSON.parse(rawData));
+        const data = JSON.parse(rawData);
+        if (type === 'done') receivedDone = true;
+        if (type === 'error') receivedError = true;
+        emitEvent(onEvent, type, data);
       } catch (_err) {
+        receivedError = true;
         emitEvent(onEvent, 'error', { detail: `${type} decode failed` });
       }
       eventName = null;
@@ -477,6 +483,9 @@ export const directorTurnStream = async (
       dataLines.push(buffer.trim());
     }
     flushEvent();
+    if (!receivedDone && !receivedError) {
+      throw new Error('场景连接在完成前中断，请检查历史后重试。');
+    }
   } catch (error) {
     emitEvent(onEvent, 'error', { detail: error.message || 'Director stream error' });
     throw error;

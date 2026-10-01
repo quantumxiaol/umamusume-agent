@@ -16,10 +16,10 @@ import {
   fetchTtsJob,
 } from '@/services/api';
 import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
+import { sceneHistoryCache } from '@/services/historyCache';
 
 
 const DIRECTOR_ACTIVE_SESSION_PREFIX = 'umamusume_director_active_v1';
-const DIRECTOR_SCENE_CACHE_PREFIX = 'umamusume_director_scene_v1';
 const DIRECTOR_HISTORY_INDEX_PREFIX = 'umamusume_director_history_index_v1';
 const DIRECTOR_DELETED_INDEX_PREFIX = 'umamusume_director_deleted_v1';
 const DIRECTOR_LOCAL_HISTORY_LIMIT = 30;
@@ -69,11 +69,6 @@ const activeSessionKey = (userUuid) => (
 );
 
 
-const sceneCacheKey = (userUuid, sessionId) => (
-  `${DIRECTOR_SCENE_CACHE_PREFIX}:${encodeURIComponent(userUuid || '')}:${encodeURIComponent(sessionId || '')}`
-);
-
-
 const historyIndexKey = (userUuid) => (
   `${DIRECTOR_HISTORY_INDEX_PREFIX}:${encodeURIComponent(userUuid || '')}`
 );
@@ -112,14 +107,12 @@ const writeStringArray = (key, values) => {
 };
 
 
-const readSceneSnapshot = (userUuid, sessionId) => {
-  if (!userUuid || !sessionId || typeof localStorage === 'undefined') {
+const readSceneSnapshot = async (userUuid, sessionId) => {
+  if (!userUuid || !sessionId) {
     return null;
   }
   try {
-    const snapshot = JSON.parse(
-      localStorage.getItem(sceneCacheKey(userUuid, sessionId)) || 'null',
-    );
+    const snapshot = await sceneHistoryCache.read(userUuid, sessionId);
     if (
       !snapshot
       || snapshot.schema_version !== 1
@@ -135,54 +128,33 @@ const readSceneSnapshot = (userUuid, sessionId) => {
 };
 
 
-const writeSceneSnapshot = (userUuid, snapshot) => {
+const writeSceneSnapshot = async (userUuid, snapshot) => {
   const sessionId = String(snapshot?.session_id || '');
   if (!userUuid || !sessionId || typeof localStorage === 'undefined') {
     return false;
   }
-  const indexKey = historyIndexKey(userUuid);
-  let sessionIds = [
-    sessionId,
-    ...readStringArray(indexKey).filter((item) => item !== sessionId),
-  ];
-  const evicted = sessionIds.slice(DIRECTOR_LOCAL_HISTORY_LIMIT);
-  sessionIds = sessionIds.slice(0, DIRECTOR_LOCAL_HISTORY_LIMIT);
   try {
-    localStorage.setItem(
-      sceneCacheKey(userUuid, sessionId),
-      JSON.stringify(snapshot),
-    );
-    localStorage.setItem(indexKey, JSON.stringify(sessionIds));
-    evicted.forEach((item) => {
-      localStorage.removeItem(sceneCacheKey(userUuid, item));
-    });
+    // The transcript and all memory revisions commit atomically. localStorage
+    // only holds the small scene index / active ID, not megabytes of history.
+    await sceneHistoryCache.write(userUuid, sessionId, snapshot);
+    const indexKey = historyIndexKey(userUuid);
+    const sessionIds = [sessionId, ...readStringArray(indexKey).filter((item) => item !== sessionId)];
+    localStorage.setItem(indexKey, JSON.stringify(sessionIds.slice(0, DIRECTOR_LOCAL_HISTORY_LIMIT)));
+    for (const evicted of sessionIds.slice(DIRECTOR_LOCAL_HISTORY_LIMIT)) {
+      await sceneHistoryCache.remove(userUuid, evicted);
+    }
     return true;
   } catch (_err) {
-    const oldest = sessionIds[sessionIds.length - 1];
-    if (oldest && oldest !== sessionId) {
-      localStorage.removeItem(sceneCacheKey(userUuid, oldest));
-      try {
-        const reduced = sessionIds.filter((item) => item !== oldest);
-        localStorage.setItem(
-          sceneCacheKey(userUuid, sessionId),
-          JSON.stringify(snapshot),
-        );
-        localStorage.setItem(indexKey, JSON.stringify(reduced));
-        return true;
-      } catch (_retryError) {
-        return false;
-      }
-    }
     return false;
   }
 };
 
 
-const removeSceneSnapshot = (userUuid, sessionId) => {
+const removeSceneSnapshot = async (userUuid, sessionId) => {
   if (!userUuid || !sessionId || typeof localStorage === 'undefined') {
     return;
   }
-  localStorage.removeItem(sceneCacheKey(userUuid, sessionId));
+  await sceneHistoryCache.remove(userUuid, sessionId);
   writeStringArray(
     historyIndexKey(userUuid),
     readStringArray(historyIndexKey(userUuid)).filter((item) => item !== sessionId),
@@ -202,9 +174,9 @@ const markSceneDeleted = (userUuid, sessionId) => {
 };
 
 
-const localSceneSnapshots = (userUuid) => (
-  readStringArray(historyIndexKey(userUuid))
-    .map((sessionId) => readSceneSnapshot(userUuid, sessionId))
+const localSceneSnapshots = async (userUuid) => (
+  (await Promise.all(readStringArray(historyIndexKey(userUuid))
+    .map((sessionId) => readSceneSnapshot(userUuid, sessionId))))
     .filter(Boolean)
 );
 
@@ -307,6 +279,9 @@ export const useDirectorStore = defineStore('director', {
     participants: [],
     sceneState: {},
     events: [],
+    contextCheckpoint: null,
+    contextCheckpoints: [],
+    compactionStatus: '',
     turnIndex: 0,
     createdAt: '',
     lastActiveAt: '',
@@ -320,6 +295,7 @@ export const useDirectorStore = defineStore('director', {
     regeneratingEventId: '',
     error: null,
     historyError: null,
+    cacheWarning: '',
     voicePollers: {},
   }),
 
@@ -351,10 +327,10 @@ export const useDirectorStore = defineStore('director', {
       await this.refreshHistory(normalizedUserUuid);
     },
 
-    _applySnapshot(data, userUuid = '') {
+    async _applySnapshot(data, userUuid = '') {
       this._clearVoicePollers();
       const resolvedUserUuid = data.user_uuid || userUuid || this.currentUserUuid;
-      const localSnapshot = readSceneSnapshot(
+      const localSnapshot = await readSceneSnapshot(
         resolvedUserUuid,
         data.session_id || '',
       );
@@ -367,6 +343,10 @@ export const useDirectorStore = defineStore('director', {
       this.activeTemplate = data.template || null;
       this.participants = data.participants || [];
       this.sceneState = data.scene_state || {};
+      this.contextCheckpoint = data.context_checkpoint || null;
+      this.contextCheckpoints = data.context_checkpoints || (data.context_checkpoint ? [data.context_checkpoint] : []);
+      this.compactionStatus = '';
+      this.cacheWarning = localSnapshot?.warning || '';
       this.events = (data.events || []).map((event) => ({
         ...event,
         voice: normalizeVoice(
@@ -386,7 +366,7 @@ export const useDirectorStore = defineStore('director', {
       }
       if (this.sessionId && this.currentUserUuid) {
         writeActiveSession(this.currentUserUuid, this.sessionId);
-        this._persistCurrentScene();
+        await this._persistCurrentScene();
         this.events.forEach((event) => {
           if (
             event.voice?.job_id
@@ -423,19 +403,21 @@ export const useDirectorStore = defineStore('director', {
         scene_state: this.sceneState,
         turn_index: this.turnIndex,
         events: this.events.map(eventForBrowserCache),
+        context_checkpoint: this.contextCheckpoint,
+        context_checkpoints: this.contextCheckpoints,
         created_at: this.createdAt || new Date().toISOString(),
         last_active_at: this.lastActiveAt || new Date().toISOString(),
       };
     },
 
-    _persistCurrentScene() {
+    async _persistCurrentScene() {
       const snapshot = this._currentSnapshot();
       if (!snapshot) {
         return false;
       }
-      const saved = writeSceneSnapshot(this.currentUserUuid, snapshot);
-      if (!saved) {
-        this.historyError = '浏览器存储空间不足，当前场景可能无法在服务重启后恢复。';
+      const saved = await writeSceneSnapshot(this.currentUserUuid, snapshot);
+      if (this.sessionId === snapshot.session_id && this.currentUserUuid === snapshot.user_uuid) {
+        this.cacheWarning = saved ? '' : '浏览器历史保存失败（空间不足或存储不可用），当前场景可能无法在服务重启后恢复。';
       }
       return saved;
     },
@@ -447,7 +429,11 @@ export const useDirectorStore = defineStore('director', {
       this.participants = [];
       this.sceneState = {};
       this.events = [];
+      this.contextCheckpoint = null;
+      this.contextCheckpoints = [];
+      this.compactionStatus = '';
       this.turnIndex = 0;
+      this.cacheWarning = '';
       this.createdAt = '';
       this.lastActiveAt = '';
       this.queuedEvents = [];
@@ -569,7 +555,7 @@ export const useDirectorStore = defineStore('director', {
     },
 
     async _loadSessionWithFallback(sessionId, userUuid) {
-      const localSnapshot = readSceneSnapshot(userUuid, sessionId);
+      const localSnapshot = await readSceneSnapshot(userUuid, sessionId);
       try {
         return await fetchDirectorSession(sessionId, userUuid);
       } catch (_liveError) {
@@ -589,7 +575,7 @@ export const useDirectorStore = defineStore('director', {
       this.historyError = null;
       try {
         const data = await this._loadSessionWithFallback(sessionId, userUuid);
-        this._applySnapshot(data, userUuid);
+        await this._applySnapshot(data, userUuid);
         return true;
       } catch (err) {
         clearActiveSession(userUuid);
@@ -611,7 +597,7 @@ export const useDirectorStore = defineStore('director', {
       const deletedIds = new Set(
         readStringArray(deletedIndexKey(resolvedUserUuid)),
       );
-      const localScenes = localSceneSnapshots(resolvedUserUuid)
+      const localScenes = (await localSceneSnapshots(resolvedUserUuid))
         .filter((snapshot) => !deletedIds.has(snapshot.session_id))
         .map(snapshotSummary);
       this.historyScenes = localScenes;
@@ -650,7 +636,7 @@ export const useDirectorStore = defineStore('director', {
           sessionId,
           resolvedUserUuid,
         );
-        this._applySnapshot(data, resolvedUserUuid);
+        await this._applySnapshot(data, resolvedUserUuid);
         return true;
       } catch (err) {
         this.historyError = err.message || '恢复场景失败。';
@@ -667,7 +653,13 @@ export const useDirectorStore = defineStore('director', {
       }
       this.isHistoryLoading = true;
       this.historyError = null;
-      removeSceneSnapshot(resolvedUserUuid, sessionId);
+      try {
+        await removeSceneSnapshot(resolvedUserUuid, sessionId);
+      } catch (_err) {
+        this.historyError = '浏览器场景缓存未能删除，请重试。';
+        this.isHistoryLoading = false;
+        return false;
+      }
       markSceneDeleted(resolvedUserUuid, sessionId);
       this.historyScenes = this.historyScenes.filter(
         (item) => item.session_id !== sessionId,
@@ -788,7 +780,7 @@ export const useDirectorStore = defineStore('director', {
           customScene,
           this.storyOutline.trim(),
         );
-        this._applySnapshot(data, userUuid);
+        await this._applySnapshot(data, userUuid);
         await this.refreshHistory(userUuid);
         return Boolean(this.sessionId);
       } catch (err) {
@@ -931,6 +923,8 @@ export const useDirectorStore = defineStore('director', {
       this.queuedEvents = [];
       this.isLoading = true;
       this.error = null;
+      this.compactionStatus = '';
+      let inputAccepted = false;
       try {
         await directorTurnStream(
           this.sessionId,
@@ -943,7 +937,22 @@ export const useDirectorStore = defineStore('director', {
           generateVoice,
           ({ type, data }) => {
             if (type === 'scene_event' || type === 'character_reply') {
+              inputAccepted = true;
               this._appendEvent(data);
+            } else if (type === 'context_status') {
+              if (data?.phase === 'compacting') {
+                this.compactionStatus = data.chunks
+                  ? `正在整理共享剧情记忆（${data.chunk}/${data.chunks}）…`
+                  : '正在整理共享剧情记忆…';
+              } else if (data?.phase === 'compacted' && data.checkpoint) {
+                this.contextCheckpoint = data.checkpoint;
+                this.contextCheckpoints = [
+                  ...this.contextCheckpoints.filter((item) => item.checkpoint_id !== data.checkpoint.checkpoint_id),
+                  data.checkpoint,
+                ];
+                this.compactionStatus = '剧情记忆已整理，正在生成回应…';
+                this._persistCurrentScene();
+              }
             } else if (type === 'scene_state') {
               this.sceneState = data || {};
               this.lastActiveAt = new Date().toISOString();
@@ -954,12 +963,14 @@ export const useDirectorStore = defineStore('director', {
           },
         );
         this.lastActiveAt = new Date().toISOString();
-        this._persistCurrentScene();
+        await this._persistCurrentScene();
         return !this.error;
       } catch (err) {
         this.error = this.error || err.message || '导演模式执行失败。';
         return false;
       } finally {
+        if (this.error && !inputAccepted) this.queuedEvents = outgoing;
+        this.compactionStatus = '';
         this.isLoading = false;
       }
     },

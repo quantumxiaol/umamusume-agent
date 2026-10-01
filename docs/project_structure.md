@@ -54,6 +54,8 @@ characters/
 │   │   └── session.py             # DialogueSession
 │   ├── director/                  # 多角色导演场景
 │   │   ├── context.py             # 导演/角色独立 PromptThread
+│   │   ├── compaction.py          # 场景公共摘要、全线程水位与分段压缩
+│   │   ├── memory.py              # 摘要校验、共享前缀和恢复边界
 │   │   ├── history.py             # 导演 JSONL 和 revision 恢复
 │   │   ├── models.py              # 场景、计划、事件和快照
 │   │   ├── recovery.py            # JSONL 回放与浏览器快照校验恢复
@@ -135,5 +137,6 @@ characters/
 - `outputs/tts_jobs/`：有 TTL 的临时音频。
 - `resources/`：项目文档和预览资源。
 
-浏览器中的对话和导演场景使用 `localStorage` 作为 HF 临时容器之外的恢复副本；
+浏览器中的对话和导演场景将原文及摘要存入 IndexedDB，作为 HF 临时容器之外的恢复副本；
+localStorage 保留浏览器身份、场景索引和偏好，旧历史缓存成功迁移后才移除。
 音频 Blob/Base64 不写入浏览器历史。
