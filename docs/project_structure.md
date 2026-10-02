@@ -38,6 +38,7 @@ characters/
 ```text
 .
 ├── src/umamusume_agent/
+│   ├── input_limits.py            # 新输入与历史上传的独立容量校验
 │   ├── character/                 # CharacterConfig 与角色卡加载
 │   ├── dialogue/                  # 单角色对话核心
 │   │   ├── context.py             # Prompt、前缀缓存与约束再注入
@@ -69,6 +70,7 @@ characters/
 │   │   ├── app.py                 # 应用工厂、路由挂载与启动/退出生命周期
 │   │   ├── services.py            # 每个应用独立的依赖装配与测试注入点
 │   │   ├── middleware.py          # API Key 与应用独立的限流状态
+│   │   ├── body_limit.py          # JSON 解析前的请求字节限制（含分块上传）
 │   │   ├── schemas.py             # 单角色 HTTP 请求模型
 │   │   ├── sessions.py            # 单角色会话注册、恢复与过期清理
 │   │   ├── http_utils.py          # HTTP 错误和浏览器 UUID 转换
@@ -98,6 +100,7 @@ characters/
 │   │   │   └── LanguageSelector.vue
 │   │   ├── i18n/                 # 简中、繁中、日文和英文文本
 │   │   ├── services/api.js       # 单聊、导演、历史与 TTS Job API
+│   │   ├── services/inputLimits.js # 输入计数、事件批量及历史上传校验
 │   │   ├── services/historyCache.js # 单角色全文及记忆的 IndexedDB 原子缓存
 │   │   ├── services/memoryTimeline.js # 展示行映射，不修改原始对话
 │   │   ├── stores/chatStore.js   # 单角色状态、历史、事件队列与语音轮询

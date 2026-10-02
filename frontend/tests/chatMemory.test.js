@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import * as inputLimits from '../src/services/inputLimits.js';
 
 const records = [
   { role: 'user', content: '明天一起训练' },
@@ -36,6 +37,7 @@ async function setup(apiOverrides = {}, cacheOverrides = {}) {
   });
   await module.link((specifier) => {
     const exports = specifier === 'pinia' ? { defineStore: (_name, options) => options }
+      : specifier.endsWith('inputLimits') ? inputLimits
       : specifier.endsWith('historyCache') ? { dialogueHistoryCache: cache } : api;
     return new vm.SyntheticModule(Object.keys(exports), function () {
       for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
@@ -177,4 +179,63 @@ test('SSE checkpoint redelivery is idempotent and keeps earlier summaries', asyn
   assert.equal(store.contextCheckpoint.checkpoint_id, 'two');
   store._applyMemorySnapshot({ context_checkpoint: null, context_checkpoints: [] });
   assert.equal(store.contextCheckpoints.length, 0);
+});
+
+test('oversized send, queue and edit never remove prior messages or make an API call', async () => {
+  let sends = 0;
+  const { store, imports } = await setup({ chatStream: async () => { sends += 1; } });
+  await store.importConversationMessages(records, 'test', checkpoint);
+  const before = JSON.stringify(store.messages);
+  const calls = imports.length;
+  store.dialogueEventsEnabled = true;
+  store.contextEventBatchEnabled = true;
+  assert.equal(store.queueMessage('x'.repeat(10001)), false);
+  await store.sendMessage('x'.repeat(10001));
+  assert.equal(await store.regenerateFromLastUser('x'.repeat(10001)), false);
+  assert.equal(sends, 0);
+  assert.equal(imports.length, calls);
+  assert.equal(JSON.stringify(store.messages), before);
+  assert.equal(store.contextCheckpoint.summary, checkpoint.summary);
+  assert.equal(store.queueMessage('x'.repeat(6000)), true);
+  await store.sendMessage('x'.repeat(4001));
+  assert.equal(store.queuedEvents.length, 1);
+  assert.equal(store.failedDraft.length, 4001);
+  assert.equal(sends, 0);
+});
+
+test('oversized files are rejected before reading; rejected history does not overwrite cache', async () => {
+  const { store, saved, imports } = await setup();
+  await store.importConversationMessages(records, 'test', checkpoint);
+  await store._cacheCurrentConversation();
+  const before = JSON.stringify(store.messages);
+  const beforeSaved = JSON.stringify(saved.at(-1));
+  let read = false;
+  assert.equal(await store.importConversationFile({ size: inputLimits.MAX_HISTORY_BYTES + 1,
+    text: async () => { read = true; return '{}'; } }), false);
+  assert.equal(read, false);
+  const calls = imports.length;
+  assert.equal(await store.importConversationMessages([{ role: 'user', content: 'x'.repeat(200001) }]), false);
+  assert.equal(JSON.stringify(store.messages), before);
+  assert.equal(JSON.stringify(saved.at(-1)), beforeSaved);
+  assert.equal(imports.length, calls);
+  assert.equal(store.contextCheckpoint.summary, checkpoint.summary);
+});
+
+test('backend validation rejection preserves the displayed history and active summary', async () => {
+  for (const status of [400, 413, 422]) {
+    let fail = false;
+    const { store, saved } = await setup({ importHistory: async () => {
+      if (fail) throw Object.assign(new Error('历史超限'), { status });
+      return { context_checkpoint: checkpoint };
+    } });
+    await store.importConversationMessages(records, 'test', checkpoint);
+    await store._cacheCurrentConversation();
+    const before = JSON.stringify(store.messages);
+    const beforeSaved = JSON.stringify(saved.at(-1));
+    fail = true;
+    assert.equal(await store.importConversationMessages([{ role: 'user', content: '替换记录' }]), false);
+    assert.equal(JSON.stringify(store.messages), before);
+    assert.equal(JSON.stringify(saved.at(-1)), beforeSaved);
+    assert.equal(store.contextCheckpoint.summary, checkpoint.summary);
+  }
 });

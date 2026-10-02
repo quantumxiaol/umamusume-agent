@@ -1,6 +1,7 @@
 // frontend/src/stores/chatStore.js
 import { defineStore } from 'pinia';
 import { dialogueHistoryCache } from '@/services/historyCache';
+import { inputBatchError, assertHistorySize, assertHistoryFileSize } from '@/services/inputLimits';
 import {
   API_BASE_URL,
   fetchCharacters,
@@ -716,6 +717,8 @@ export const useChatStore = defineStore('chat', {
     },
 
     queueMessage(text, requestedInputMode = this.inputMode) {
+      const limitError = inputBatchError([...this.queuedEvents.map((event) => event.content), text]);
+      if (limitError) { this.error = limitError; return false; }
       const content = String(text || '').trim();
       if (!content) {
         this.error = '请输入要加入的内容。';
@@ -1093,8 +1096,9 @@ export const useChatStore = defineStore('chat', {
       }
 
       const original = this.messages[userIndex];
-      this.queuedEvents = [];
       const text = String(editedText || original.content || '').trim();
+      const limitError = inputBatchError([text]);
+      if (limitError) { this.error = limitError; return false; }
       if (!text) {
         this.error = '重生成内容不能为空。';
         return false;
@@ -1102,6 +1106,7 @@ export const useChatStore = defineStore('chat', {
 
       this.error = null;
       this.exportNotice = '';
+      this.queuedEvents = [];
       const keptMessages = this.messages.slice(0, userIndex);
 
       try {
@@ -1120,6 +1125,8 @@ export const useChatStore = defineStore('chat', {
       const pendingEvents = this.dialogueEventsEnabled
         ? [...this.queuedEvents]
         : [];
+      const limitError = inputBatchError([...pendingEvents.map((event) => event.content), ...(text ? [text] : [])]);
+      if (limitError) { this.error = limitError; this.failedDraft = String(text || ''); return false; }
       if (!content && !pendingEvents.length) {
         this.error = '请输入内容。';
         return;
@@ -1327,22 +1334,35 @@ export const useChatStore = defineStore('chat', {
         return false;
       }
 
-      const normalizedRecords = normalizeConversationRecords(records);
+      let normalizedRecords;
+      try {
+        assertHistorySize(records, checkpoint, checkpoints);
+        normalizedRecords = normalizeConversationRecords(records);
+        assertHistorySize(normalizedRecords, checkpoint, checkpoints);
+      } catch (err) {
+        this.error = err.message;
+        return false;
+      }
       if (!normalizedRecords.length) {
         this.exportNotice = '未找到可导入的对话消息。';
         return false;
       }
-      this.queuedEvents = [];
-
-      this._applyMemorySnapshot({ context_checkpoint: checkpoint, context_checkpoints: checkpoints });
       let backendSynced = false;
+      let memory = { context_checkpoint: checkpoint, context_checkpoints: checkpoints };
       try {
         const result = await importHistory(this.sessionId, normalizedRecords, true, source, checkpoint, checkpoints);
-        this._applyMemorySnapshot(result);
+        memory = result;
         backendSynced = true;
       } catch (err) {
+        if (err.code === 'INPUT_LIMIT' || [400, 413, 422].includes(err.status)) {
+          this.error = `历史未导入，当前历史和缓存已保留：${err.message}`;
+          return false;
+        }
         this.error = `已导入到浏览器缓存，但同步后端失败，后续 LLM 不会使用这份历史：${err.message || err}`;
       }
+
+      this.queuedEvents = [];
+      this._applyMemorySnapshot(memory);
 
       this.messages = normalizedRecords.map((record, index) => createMessage(record.role, record.content, {
         id: `import-${Date.now()}-${index}`,
@@ -1390,6 +1410,7 @@ export const useChatStore = defineStore('chat', {
       }
 
       try {
+        assertHistoryFileSize(file);
         const text = await file.text();
         const records = parseImportedConversationText(text);
         return await this.importConversationMessages(records, `file:${file.name || 'history'}`, records.contextCheckpoint, records.contextCheckpoints);

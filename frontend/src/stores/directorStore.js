@@ -17,6 +17,7 @@ import {
 } from '@/services/api';
 import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
 import { sceneHistoryCache } from '@/services/historyCache';
+import { inputBatchError } from '@/services/inputLimits';
 
 
 const DIRECTOR_ACTIVE_SESSION_PREFIX = 'umamusume_director_active_v1';
@@ -718,6 +719,8 @@ export const useDirectorStore = defineStore('director', {
     },
 
     queueEvent(content) {
+      const limitError = inputBatchError([...this.queuedEvents.map((event) => event.content), content]);
+      if (limitError) { this.error = limitError; return false; }
       const text = String(content || '').trim();
       if (!text) {
         this.error = '请输入要加入的事件。';
@@ -910,6 +913,8 @@ export const useDirectorStore = defineStore('director', {
       if (!this.sessionId || this.isLoading) {
         return false;
       }
+      const limitError = inputBatchError([...this.queuedEvents.map((event) => event.content), ...(content ? [content] : [])]);
+      if (limitError) { this.error = limitError; return false; }
       const text = String(content || '').trim();
       const outgoing = [...this.queuedEvents];
       if (text) {

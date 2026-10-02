@@ -2,10 +2,11 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from ..dialogue.models import ActorRef, DialogueEventType, DialogueInputEvent
 from ..dialogue.memory import HistoryCheckpoint
+from ..input_limits import validate_input_batch, validate_history_size
 
 
 class LoadCharacterRequest(BaseModel):
@@ -25,6 +26,11 @@ class DialogueRequest(BaseModel):
     target_actor_ids: Optional[list[str]] = None
     event_type: Optional[DialogueEventType] = None
     context_events: Optional[list[DialogueInputEvent]] = None
+
+    @model_validator(mode="after")
+    def check_input_size(self):
+        validate_input_batch([self.message, *[event.content for event in self.context_events or []]])
+        return self
 
 
 class HistoryImportMessage(BaseModel):
@@ -57,6 +63,11 @@ class HistoryImportRequest(BaseModel):
     source: str = "manual"
     context_checkpoint: HistoryCheckpoint | None = None
     context_checkpoints: list[HistoryCheckpoint] | None = None
+
+    @model_validator(mode="after")
+    def check_history_size(self):
+        validate_history_size(self.messages, self.context_checkpoint, self.context_checkpoints)
+        return self
 
 
 class SessionInfo(BaseModel):

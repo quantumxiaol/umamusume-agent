@@ -354,7 +354,7 @@ class CompactionTests(unittest.IsolatedAsyncioTestCase):
         self.fill()
         before = copy.deepcopy(self.session.history)
         response = await self.client.post('/chat', json={'session_id': self.session.session_id, 'message': '超大输入' * 20000})
-        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.status_code, 422)  # New input limit runs before compaction/model calls.
         self.assertEqual(self.session.history, before)
         self.assertEqual(self.llm.calls, [])
 

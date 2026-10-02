@@ -70,6 +70,8 @@ the LangChain MCP adapters remain available through the optional
   dependency graph per app. Dialogue, Director and Stage reuse the same
   `CharacterRuntime`, while their session registries remain separate.
 - `server/middleware.py`: API-key protection and per-app rate-limit buckets.
+- `server/body_limit.py`: bounded request buffering before JSON parsing;
+  `input_limits.py` separately validates new input and uploaded archives.
 - `server/schemas.py`: single-character HTTP request models.
 - `server/sessions.py`: single-character session registration and expiry.
 - `server/dialogue_routes.py`: single-character, character-list, session and

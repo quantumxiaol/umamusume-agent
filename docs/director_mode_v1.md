@@ -164,6 +164,11 @@ Changed covered events or prompts invalidate the active summary, not the origina
 history. Loading/restoring old scenes does not call an LLM; checks happen on the
 next send. New fields are optional, so pre-memory snapshots still work.
 
+New input batches (including queued events) are limited to 10,000 Unicode code
+points and 20 events. Browser recovery uses separate archive, summary and 32 MiB
+request-body limits; it never applies the new-input limit to old events or silently
+truncates history. See [upload limits](configuration.md#输入与历史上传限制).
+
 The director UI shows a collapsible marker at the actual triggering event and
 progress during compaction. Failed, unaccepted inputs return to the pending queue.
 SSE sends keepalive comments every 15 seconds during long work; an incomplete

@@ -20,6 +20,7 @@ from ..dialogue.history_order import history_timestamp_key
 from ..dialogue.memory import checkpoint_payload, checkpoint_history_payload
 from ..dialogue.service import DialogueService
 from ..llm_usage import DeepSeekUsageTracker
+from ..input_limits import validate_history_size
 from ..tts import VoiceService
 from .http_utils import require_valid_user_uuid, translate_llm_exception
 from .schemas import DialogueRequest, HistoryImportRequest, LoadCharacterRequest
@@ -301,6 +302,14 @@ def create_dialogue_router(
             raise HTTPException(status_code=400, detail="No valid messages to import")
         source = (request.source or "manual").strip()[:80] or "manual"
         async with session.lock:
+            try:
+                # Normalization can expand legacy representations; check the
+                # effective import (and existing history for append) before any
+                # clear/write in import_messages.
+                prospective = messages if request.replace_current else [*session.history, *messages]
+                validate_history_size(prospective, request.context_checkpoint, request.context_checkpoints)
+            except ValueError as exc:
+                raise HTTPException(status_code=413, detail=str(exc)) from exc
             session.import_messages(messages, replace_current=request.replace_current, source=source,
                                     checkpoint=request.context_checkpoint, checkpoints=request.context_checkpoints)
 

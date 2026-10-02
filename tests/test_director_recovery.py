@@ -67,6 +67,12 @@ class SceneRecoveryTests(unittest.IsolatedAsyncioTestCase):
         snapshot = copy.deepcopy(original)
         snapshot["events"][1]["sequence"] = snapshot["events"][0]["sequence"]
         invalid_snapshots.append(snapshot)
+        snapshot = copy.deepcopy(original)
+        snapshot['context_checkpoints'] = [{'summary': 'x'}] * 101
+        invalid_snapshots.append(snapshot)
+        snapshot = copy.deepcopy(original)
+        snapshot['context_checkpoint'] = {'summary': 'x' * 2_000_001}
+        invalid_snapshots.append(snapshot)
         for snapshot in invalid_snapshots:
             with self.subTest(snapshot=snapshot), self.assertRaises(InvalidSceneHistory):
                 await recovery.recover_browser_snapshot(

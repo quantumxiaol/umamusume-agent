@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..dialogue.models import DialogueInputEvent
 from ..director.models import CustomSceneDefinition
+from ..input_limits import validate_input_batch
 
 
 class StageActorBinding(BaseModel):
@@ -59,6 +60,11 @@ class StageTurnRequest(BaseModel):
     actor_bindings: list[StageActorBinding]
     live_stage: LiveStageContext
     generate_voice: bool = False
+
+    @model_validator(mode="after")
+    def check_input_size(self):
+        validate_input_batch([event.content for event in self.events])
+        return self
 
 
 class StageMoveAction(BaseModel):

@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import APIConnectionError, APITimeoutError, APIStatusError
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from ..dialogue.models import DialogueInputEvent
 from ..director.models import CustomSceneDefinition, SceneRecoverySnapshot
@@ -20,6 +20,7 @@ from ..director.service import DirectorService
 from ..director.session import SceneSession
 from ..director.memory import memory_payload
 from ..llm_usage import DeepSeekUsageTracker
+from ..input_limits import validate_input_batch
 from .dialogue_turns import progress_events
 
 
@@ -36,6 +37,11 @@ class DirectorTurnRequest(BaseModel):
     user_uuid: str
     events: list[DialogueInputEvent]
     generate_voice: bool = False
+
+    @model_validator(mode="after")
+    def check_input_size(self):
+        validate_input_batch([event.content for event in self.events])
+        return self
 
 
 class DirectorHistoryRequest(BaseModel):

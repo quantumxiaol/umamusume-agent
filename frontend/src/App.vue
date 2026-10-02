@@ -12,6 +12,7 @@ import MemoryCheckpoint from '@/components/MemoryCheckpoint.vue';
 import { buildMemoryTimeline } from '@/services/memoryTimeline';
 import { fetchRecentLlmUsage } from '@/services/api';
 import { DIALOGUE_INPUT_MODES, useChatStore } from '@/stores/chatStore';
+import { MAX_INPUT_CHARS, characterCount, inputBatchError } from '@/services/inputLimits';
 
 const chatStore = useChatStore();
 const ttsEnabled = import.meta.env.VITE_ENABLE_TTS === 'true';
@@ -43,6 +44,12 @@ const restoredHistoryMessages = computed(() => chatStore.restoredHistoryMessages
 const messages = computed(() => chatStore.messages);
 const conversationRows = computed(() => buildMemoryTimeline(messages.value, chatStore.contextCheckpoints));
 const queuedEvents = computed(() => chatStore.queuedEvents);
+const inputContents = computed(() => [
+  ...(isEditingLastUser.value ? [] : queuedEvents.value.map((event) => event.content)),
+  ...(messageInput.value ? [messageInput.value] : []),
+]);
+const inputChars = computed(() => inputContents.value.reduce((sum, text) => sum + characterCount(text), 0));
+const inputSizeError = computed(() => inputBatchError(inputContents.value));
 const isLoading = computed(() => chatStore.isLoading);
 const error = computed(() => chatStore.error);
 const exportNotice = computed(() => chatStore.exportNotice);
@@ -127,6 +134,7 @@ const restoreFailedDraft = () => {
 };
 
 const handleSend = async () => {
+  if (inputSizeError.value) { chatStore.error = inputSizeError.value; return; }
   if (!messageInput.value.trim() && !queuedEvents.value.length) {
     return;
   }
@@ -827,6 +835,7 @@ onMounted(async () => {
             <textarea
               ref="messageInputRef"
               v-model="messageInput"
+              :aria-invalid="Boolean(inputSizeError)"
               rows="3"
               :placeholder="dialogueEventsEnabled ? activeInputPreset.placeholder : '输入对话内容，Enter 发送，Shift+Enter 换行'"
               @keydown="handleKeydown"
@@ -838,14 +847,14 @@ onMounted(async () => {
               <button
                 v-if="contextEventBatchEnabled"
                 class="queue-button"
-                :disabled="!selectedCharacter || isLoading || isEditingLastUser || !messageInput.trim()"
+                :disabled="!selectedCharacter || isLoading || isEditingLastUser || !messageInput.trim() || Boolean(inputSizeError)"
                 @click="handleQueueMessage"
               >
                 加入
               </button>
               <button
                 class="send-button"
-                :disabled="!selectedCharacter || isLoading || (!messageInput.trim() && !queuedEvents.length)"
+                :disabled="!selectedCharacter || isLoading || (!messageInput.trim() && !queuedEvents.length) || Boolean(inputSizeError)"
                 @click="handleSend"
               >
                 发送
@@ -853,6 +862,8 @@ onMounted(async () => {
             </div>
           </div>
           <div class="meta-row">
+            <span :class="inputSizeError ? 'error' : 'hint'">{{ inputChars.toLocaleString() }} / {{ MAX_INPUT_CHARS.toLocaleString() }} 字符（含待发送事件）</span>
+            <span v-if="inputSizeError" class="error" role="alert">{{ inputSizeError }}</span>
             <span v-if="chatStore.cacheWarning" class="error">{{ chatStore.cacheWarning }}</span>
             <span v-if="chatStore.compactionStatus" class="hint" role="status">{{ chatStore.compactionStatus }}</span>
             <span v-else-if="chatStore.contextCheckpoint" class="hint">

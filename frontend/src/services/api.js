@@ -1,5 +1,6 @@
 // frontend/src/services/api.js
 import axios from 'axios';
+import { assertHistorySize, assertHistoryPayloadSize } from './inputLimits';
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:1111';
 export const API_ACCESS_KEY = import.meta.env.VITE_API_ACCESS_KEY || '';
@@ -22,9 +23,13 @@ const apiClient = axios.create({
   }),
 });
 
+const errorDetail = (detail) => (Array.isArray(detail)
+  ? detail.map((item) => item.msg || String(item)).join('；') : String(detail || 'Unknown error'));
+
 const parseError = (error) => {
+  if (error.code === 'INPUT_LIMIT') return error;
   if (error.response) {
-    const parsed = new Error(`Server Error: ${error.response.status} - ${error.response.data?.detail || 'Unknown error'}`);
+    const parsed = new Error(`Server Error: ${error.response.status} - ${errorDetail(error.response.data?.detail)}`);
     parsed.status = error.response.status;
     return parsed;
   }
@@ -258,14 +263,17 @@ export const fetchDialogueContext = async (sessionId, userUuid) => {
 
 export const importHistory = async (sessionId, messages, replaceCurrent = true, source = 'manual', checkpoint = null, checkpoints = null) => {
   try {
-    const response = await apiClient.post('/history/import', {
+    assertHistorySize(messages, checkpoint, checkpoints);
+    const payload = {
       session_id: sessionId,
       messages,
       replace_current: replaceCurrent,
       source,
       context_checkpoint: checkpoint,
       context_checkpoints: checkpoints,
-    });
+    };
+    assertHistoryPayloadSize(payload);
+    const response = await apiClient.post('/history/import', payload);
     return response.data || {};
   } catch (error) {
     throw parseError(error);
@@ -362,10 +370,13 @@ export const fetchDirectorSession = async (sessionId, userUuid) => {
 
 export const recoverDirectorSession = async (snapshot, userUuid) => {
   try {
-    const response = await apiClient.post('/director/sessions/recover', {
+    assertHistorySize(snapshot.events || [], snapshot.context_checkpoint, snapshot.context_checkpoints, { scene: true });
+    const payload = {
       user_uuid: userUuid,
       snapshot,
-    });
+    };
+    assertHistoryPayloadSize(payload);
+    const response = await apiClient.post('/director/sessions/recover', payload);
     return response.data || {};
   } catch (error) {
     throw parseError(error);

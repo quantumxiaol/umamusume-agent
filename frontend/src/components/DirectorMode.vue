@@ -5,6 +5,7 @@ import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
 import { useDirectorStore } from '@/stores/directorStore';
 import MemoryCheckpoint from '@/components/MemoryCheckpoint.vue';
 import { buildSceneMemoryTimeline } from '@/services/memoryTimeline';
+import { MAX_INPUT_CHARS, characterCount, inputBatchError } from '@/services/inputLimits';
 
 
 const props = defineProps({
@@ -38,6 +39,9 @@ const emit = defineEmits(['usage-changed']);
 const store = useDirectorStore();
 const timelineRows = computed(() => buildSceneMemoryTimeline(store.events, store.contextCheckpoints));
 const input = ref('');
+const inputContents = computed(() => [...store.queuedEvents.map((event) => event.content), ...(input.value ? [input.value] : [])]);
+const inputChars = computed(() => inputContents.value.reduce((sum, text) => sum + characterCount(text), 0));
+const inputSizeError = computed(() => inputBatchError(inputContents.value));
 const inputRef = ref(null);
 const isComposing = ref(false);
 const characterFilter = ref('');
@@ -170,6 +174,7 @@ const queueCurrent = async () => {
 };
 
 const send = async () => {
+  if (inputSizeError.value) { store.error = inputSizeError.value; return; }
   if (!input.value.trim() && !store.queuedEvents.length) {
     return;
   }
@@ -506,6 +511,7 @@ onMounted(() => store.init(props.userUuid));
           <textarea
             ref="inputRef"
             v-model="input"
+            :aria-invalid="Boolean(inputSizeError)"
             rows="3"
             :placeholder="DIALOGUE_INPUT_MODES[store.inputMode].placeholder"
             :disabled="store.isLoading"
@@ -514,17 +520,19 @@ onMounted(() => store.init(props.userUuid));
             @compositionend="isComposing = false"
           ></textarea>
           <div>
-            <button type="button" :disabled="store.isLoading || !input.trim()" @click="queueCurrent">加入</button>
+            <button type="button" :disabled="store.isLoading || !input.trim() || Boolean(inputSizeError)" @click="queueCurrent">加入</button>
             <button
               type="button"
               class="director-send"
-              :disabled="store.isLoading || (!input.trim() && !store.queuedEvents.length)"
+              :disabled="store.isLoading || (!input.trim() && !store.queuedEvents.length) || Boolean(inputSizeError)"
               @click="send"
             >
               发送
             </button>
           </div>
         </div>
+        <p :class="inputSizeError ? 'director-error' : 'director-hint'">{{ inputChars.toLocaleString() }} / {{ MAX_INPUT_CHARS.toLocaleString() }} 字符（含待发送事件）</p>
+        <p v-if="inputSizeError" class="director-error" role="alert">{{ inputSizeError }}</p>
         <p v-if="store.error" class="director-error">{{ store.error }}</p>
         <p v-else class="director-hint">导演通常安排 1 位角色回应，确有互动需要时最多调度 {{ maxSpeakers }} 位；后发言者能听到前一位的公开发言。</p>
         <p v-if="store.historyError" class="director-error">{{ store.historyError }}</p>

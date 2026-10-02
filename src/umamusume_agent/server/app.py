@@ -3,6 +3,8 @@ import asyncio
 import logging
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from starlette.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
 from ..dialogue.models import EVENT_SCHEMA_VERSION
@@ -10,6 +12,8 @@ from .dialogue_routes import create_dialogue_router
 from .director_routes import create_director_router
 from .http_utils import require_valid_user_uuid
 from .middleware import install_api_protection
+from .body_limit import RequestBodyLimitMiddleware
+from ..input_limits import MAX_INPUT_CHARS, MAX_TURN_EVENTS, MAX_HISTORY_BYTES
 from .services import ServerServices, build_services
 from .stage_routes import create_stage_router
 from .tts_routes import create_tts_router
@@ -29,11 +33,21 @@ def create_app(*, services: ServerServices | None = None) -> FastAPI:
     cleanup_interval = max(5, settings.DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS)
     app = FastAPI(title="Umamusume-Dialogue-Server", version="0.2.0")
     app.state.services = services
+    app.add_middleware(RequestBodyLimitMiddleware)
     app.add_middleware(
         CORSMiddleware, allow_origins=['*'], allow_credentials=True,
         allow_methods=['*'], allow_headers=['*'],
     )
     install_api_protection(app, settings=settings)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request, exc):
+        # Default validation responses echo input, potentially the entire large
+        # archive. Keep the standard detail list without private text/ctx.
+        return JSONResponse(status_code=422, content={'detail': [
+            {key: item[key] for key in ('loc', 'msg', 'type') if key in item}
+            for item in exc.errors()
+        ]})
     app.include_router(create_director_router(
         service=services.director_service, sessions=services.director_sessions,
         session_ttl_seconds=settings.DIRECTOR_SESSION_TTL_SECONDS,
@@ -103,6 +117,8 @@ def create_app(*, services: ServerServices | None = None) -> FastAPI:
         """Expose additive protocol features for independently deployed clients."""
         return {
             "dialogue_api_version": 2,
+            "input_limits": {"max_input_chars": MAX_INPUT_CHARS, "max_turn_events": MAX_TURN_EVENTS,
+                             "max_history_bytes": MAX_HISTORY_BYTES},
             "dialogue_events": EVENT_SCHEMA_VERSION,
             "dialogue_memory": 1 if settings.DIALOGUE_COMPACTION_ENABLED else 0,
             "context_event_batch": 1,

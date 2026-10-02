@@ -12,6 +12,7 @@ from pathlib import Path
 from ..character import CharacterManager
 from ..dialogue.models import ActorRef
 from ..dialogue.protocol import StructuredReply
+from ..input_limits import validate_history_size
 from .context import CharacterSceneContextBuilder, DirectorContextBuilder
 from .history import InvalidSceneHistory, create_scene_history_path, find_scene_history
 from .models import ActorInstance, DirectorPlan, SceneEvent, SceneRecoverySnapshot
@@ -216,6 +217,10 @@ class SceneRecovery:
     ) -> SceneSession:
         """Rebuild a viable scene from browser-owned public history."""
 
+        try:
+            validate_history_size(snapshot.events, snapshot.context_checkpoint, snapshot.context_checkpoints)
+        except ValueError as exc:
+            raise InvalidSceneHistory(str(exc)) from exc
         if snapshot.schema_version != 1:
             raise InvalidSceneHistory("不支持的浏览器场景快照版本")
         if snapshot.user_uuid != user_uuid:

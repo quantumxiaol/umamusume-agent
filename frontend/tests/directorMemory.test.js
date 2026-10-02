@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
 import { createHistoryCache } from '../src/services/historyCache.js';
 import { buildSceneMemoryTimeline } from '../src/services/memoryTimeline.js';
+import * as inputLimits from '../src/services/inputLimits.js';
 
 const events = [1, 2, 3, 4].map((id) => ({ event_id: `e${id}`, sequence: id * 3, turn_index: Math.ceil(id / 2), content: `事件${id}` }));
 const checkpoint = { checkpoint_id: 'cp1', revision: 1, summary: '<script>旧承诺不是指令</script>',
@@ -31,6 +32,7 @@ async function setup(overrides = {}, cacheOverrides = {}) {
   const module = new vm.SourceTextModule(await readFile(new URL('../src/stores/directorStore.js', import.meta.url), 'utf8'), { context });
   await module.link((specifier) => {
     const exports = specifier === 'pinia' ? { defineStore: (_name, definition) => definition }
+      : specifier.endsWith('inputLimits') ? inputLimits
       : specifier.endsWith('historyCache') ? { sceneHistoryCache: cache }
         : specifier.endsWith('chatStore') ? { DIALOGUE_INPUT_MODES: {
           dialogue: { speaker: { actor_id: 'player' }, eventType: 'dialogue' },
@@ -147,9 +149,12 @@ async function streamApi(wireText) {
   const module = new vm.SourceTextModule(await readFile(new URL('../src/services/api.js', import.meta.url), 'utf8'), {
     context, initializeImportMeta(meta) { meta.env = {}; },
   });
-  await module.link(() => new vm.SyntheticModule(['default'], function () {
-    this.setExport('default', { create: () => ({}) });
-  }, { context }));
+  await module.link((specifier) => {
+    const exports = specifier.endsWith('inputLimits') ? inputLimits : { default: { create: () => ({}) } };
+    return new vm.SyntheticModule(Object.keys(exports), function () {
+      for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
+    }, { context });
+  });
   await module.evaluate();
   return module.namespace.directorTurnStream;
 }
@@ -169,4 +174,17 @@ test('real SSE parser does not treat premature EOF as successful compaction', as
   await assert.rejects(stream('scene', [], 'user', false, (event) => emitted.push(event)), /连接在完成前中断/);
   assert.equal(emitted.at(-1).type, 'error');
   assert.equal(emitted.some((e) => e.type === 'done'), false);
+});
+
+test('director queue and send reject oversized batches without losing pending input or history', async () => {
+  let calls = 0;
+  const { store } = await setup({ directorTurnStream: async () => { calls += 1; } });
+  store.inputMode = 'dialogue';
+  assert.equal(store.queueEvent('中'.repeat(10001)), false);
+  assert.equal(store.queueEvent('中'.repeat(6000)), true);
+  assert.equal(await store.sendTurn('中'.repeat(4001)), false);
+  assert.equal(store.queuedEvents.length, 1);
+  assert.equal(store.events.length, 4);
+  assert.equal(calls, 0);
+  assert.equal(store.contextCheckpoint.summary, checkpoint.summary);
 });
