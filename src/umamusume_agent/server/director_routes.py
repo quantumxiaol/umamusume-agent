@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from collections.abc import MutableMapping
 from contextlib import nullcontext
 from datetime import datetime
@@ -22,6 +24,8 @@ from ..director.memory import memory_payload
 from ..llm_usage import DeepSeekUsageTracker
 from ..input_limits import validate_input_batch
 from .dialogue_turns import progress_events
+
+logger = logging.getLogger(__name__)
 
 
 class CreateDirectorSessionRequest(BaseModel):
@@ -436,7 +440,13 @@ def create_director_router(
                 )
                 yield f"event: scene_state\ndata: {state_payload}\n\n"
                 yield "event: done\ndata: {}\n\n"
+            except asyncio.CancelledError:
+                logger.warning("Director stream cancelled session_id=%s turn_index=%s",
+                               session.session_id, session.turn_index)
+                raise
             except Exception as exc:
+                logger.error("Director stream failed session_id=%s turn_index=%s error_type=%s",
+                             session.session_id, session.turn_index, type(exc).__name__)
                 translated = _translate_exception(exc)
                 payload = json.dumps(
                     {"detail": translated.detail},

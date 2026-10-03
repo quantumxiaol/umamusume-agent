@@ -245,12 +245,52 @@ class SceneCompactionTests(unittest.IsolatedAsyncioTestCase):
         before = self.session.history_file.read_bytes()
         task = asyncio.create_task(self.service.execute_turn(self.session, self.pending))
         await entered.wait()
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
+        with self.assertLogs('umamusume_agent.dialogue.compaction_work', level='WARNING') as logs:
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertIn('Compaction cancelled', '\n'.join(logs.output))
         self.assertFalse(self.session.lock.locked())
         self.assertEqual(self.session.history_file.read_bytes(), before)
         self.assertIsNone(self.session.checkpoint)
+
+    async def test_failed_later_chunk_reuses_prior_chunk_then_commits_once(self):
+        original = self.session.history_file.read_bytes()
+        self.summarize.side_effect = ['已整理的第一段', CompactionError('模拟后段失败')]
+        with self.assertLogs('umamusume_agent.dialogue.compaction_work', level='ERROR') as logs:
+            with self.assertRaises(CompactionError):
+                await self.compact()
+        self.assertIn('Compaction failed', '\n'.join(logs.output))
+        self.assertEqual(self.session.history_file.read_bytes(), original)
+        self.assertIsNone(self.session.checkpoint)
+        draft = self.session.history_file.with_suffix('.compaction.json')
+        self.assertTrue(draft.exists())
+        self.summarize.reset_mock(side_effect=True)
+        # Reconstruct runtime/service, keeping the same owned session/history path.
+        fresh = self.make_service(self.root / 'unused')
+        fresh.compactor.runtime.summarize = self.summarize
+        with self.assertLogs('umamusume_agent.dialogue.compaction_work', level='INFO') as logs:
+            await fresh.compactor.prepare(self.session, self.pending)
+        self.assertIn('draft reused', '\n'.join(logs.output))
+        self.assertIn('已整理的第一段', self.session.checkpoint.summary)
+        self.assertEqual(len(self.session.checkpoints), 1)
+        self.assertFalse(draft.exists())
+
+    async def test_stream_compaction_failure_logs_both_stage_and_http_error(self):
+        self.summarize.side_effect = CompactionError('模拟摘要失败')
+        app = FastAPI()
+        app.include_router(create_director_router(service=self.service, sessions={self.session.session_id: self.session}, session_ttl_seconds=0))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            with self.assertLogs('umamusume_agent', level='ERROR') as logs:
+                response = await client.post('/director/turn_stream', json={
+                    'session_id': self.session.session_id, 'user_uuid': self.session.user_uuid,
+                    'events': [{'content': '继续'}],
+                })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('event: error', response.text)
+        self.assertNotIn('event: done', response.text)
+        self.assertIn('Compaction failed', '\n'.join(logs.output))
+        self.assertIn('Director stream failed', '\n'.join(logs.output))
 
     async def test_regeneration_after_checkpoint_only_commit_keeps_summary_valid(self):
         await self.compact()

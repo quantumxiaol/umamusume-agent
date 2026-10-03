@@ -7,6 +7,7 @@ import logging
 
 from ..dialogue.compaction import split_source
 from ..dialogue.compaction_runtime import CompactionError, CompactionRuntime, SUMMARY_INSTRUCTION
+from ..dialogue.compaction_work import CompactionWork, logged_compaction
 from ..dialogue.token_budget import estimate_tokens
 from .context import _event_packet
 from .memory import apply_memory_threads, memory_threads, prompt_digest, public_events, source_digest, threads
@@ -71,6 +72,7 @@ class SceneCompactor:
             projected.append(estimate_tokens(thread.messages, thread.token_ratio))
         return max(projected, default=0)
 
+    @logged_compaction
     async def prepare(self, session, pending, *, stage_context=None, on_progress=None):
         if not self.enabled:
             return
@@ -143,24 +145,10 @@ class SceneCompactor:
         chunks = split_source(source, max_tokens=chunk_budget, ratio=ratio)
         if len(chunks) > cfg.DIRECTOR_COMPACTION_MAX_CHUNKS:
             raise CompactionError("场景历史超出本次压缩分段预算，未修改原文或旧摘要。")
-        summaries = []
-        for index, chunk in enumerate(chunks):
-            await progress("compacting", chunk=index + 1, chunks=len(chunks))
-            allowance = max(1, min(budget // len(chunks), int(cfg.DIRECTOR_COMPACTION_MAX_TOKENS * 0.7)))
-            continuity = ([{"role": "user", "content": "前文记忆供理解指代与因果，不重复抄写：\n" + "\n\n".join(summaries)}]
-                          if summaries else [])
-            messages = [*prefix, *continuity, {"role": "user", "content": (
-                f"按时间排序的第 {index + 1}/{len(chunks)} 段；记忆预算约 {allowance} tokens。\n"
-                "<source_transcript>\n" + "\n\n".join(item["content"] for item in chunk) + "\n</source_transcript>"
-            )}]
-            if estimate_tokens(messages, ratio) + cfg.DIRECTOR_COMPACTION_MAX_DYNAMIC_TOKENS + reserve >= capacity:
-                raise CompactionError("场景摘要请求预计超过模型容量，未修改历史。")
-            summaries.append(await self.runtime.summarize(messages=messages, target_tokens=allowance, session_id=session.session_id))
-            if estimate_tokens([{"content": "\n\n".join(summaries)}], ratio) > budget:
-                raise CompactionError("场景摘要超过记忆预算，未替换旧摘要。")
-        checkpoint.summary = "\n\n".join(f"## 历史片段 {i + 1}（后文更新优先）\n{text}" for i, text in enumerate(summaries))
-        if estimate_tokens([{"content": checkpoint.summary}], ratio) > budget:
-            raise CompactionError("场景摘要超过记忆预算，未替换旧摘要。")
+        work = CompactionWork(runtime=self.runtime, session=session, chunks=chunks, prefix=prefix,
+                              ratio=ratio, budget=budget, capacity=capacity, reserve=reserve, scene=True,
+                              prompt_key=checkpoint.prompt_digest)
+        checkpoint.summary = await work.run(progress)
         projected = self.forecast(session, pending, replacements=memory_threads(session, checkpoint), stage_context=stage_context)
         if projected >= min(high, capacity - reserve):
             raise CompactionError("本次场景压缩未释放足够空间，原文和旧摘要已保留。")
@@ -169,6 +157,7 @@ class SceneCompactor:
         apply_memory_threads(session, checkpoint)
         session.checkpoint = checkpoint
         session.checkpoints.append(checkpoint)
+        work.draft.clear()
         logger.info("Scene compaction committed session_id=%s revision=%s covered_events=%s chunks=%s estimated_tokens=%s",
                     session.session_id, checkpoint.revision, checkpoint.covered_events, len(chunks), projected)
         await progress("compacted", checkpoint=checkpoint.model_dump(mode="json"), estimated_tokens=projected)

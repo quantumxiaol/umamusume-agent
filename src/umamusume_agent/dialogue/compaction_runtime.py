@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from time import monotonic
 
 from openai import APIStatusError
 
 from ..llm_diagnostics import llm_request_scope
+
+logger = logging.getLogger(__name__)
 
 
 SUMMARY_INSTRUCTION = """你负责保存长期角色扮演对话的历史记忆，不扮演角色，不续写剧情。
@@ -70,6 +73,10 @@ class CompactionRuntime:
                                         parts.append(content)
                         finally:
                             await stream.close()
+                except asyncio.CancelledError:
+                    logger.warning("Compaction model cancelled session_id=%s purpose=%s attempt=%s elapsed_ms=%s",
+                                   session_id, self.purpose, attempt + 1, round((monotonic() - started) * 1000))
+                    raise
                 except Exception as exc:
                     self.runtime.diagnostics.error(call_id, exc)
                     if isinstance(exc, APIStatusError):
@@ -80,6 +87,8 @@ class CompactionRuntime:
                 summary = "".join(parts).strip()
                 self.runtime.diagnostics.finish(call_id, None, content=summary, finish_reason=reason)
             if reason == "length" and attempt < self.setting("LENGTH_RETRIES") and budget < limit:
+                logger.warning("Compaction length retry session_id=%s purpose=%s max_tokens=%s next_max_tokens=%s target_tokens=%s",
+                               session_id, self.purpose, budget, min(budget * 2, limit), target_tokens)
                 budget = min(budget * 2, limit)
                 continue  # Original messages only, never a repair prompt.
             if reason != "stop" or not summary:

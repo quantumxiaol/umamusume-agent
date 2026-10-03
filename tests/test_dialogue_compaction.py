@@ -399,11 +399,22 @@ class CompactionTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_fsync_rolls_back_only_the_checkpoint_append(self):
         self.fill()
         original = self.session.history_file.read_bytes()
-        with patch('umamusume_agent.dialogue.session.os.fsync', side_effect=OSError('disk unavailable')):
+        append = self.session._append_history_event
+        def fail_checkpoint(payload, **kwargs):
+            # Scope fsync failure to the checkpoint, not the separate draft file.
+            with patch('umamusume_agent.dialogue.session.os.fsync', side_effect=OSError('disk unavailable')):
+                return append(payload, **kwargs)
+        with patch.object(self.session, '_append_history_event', side_effect=fail_checkpoint):
             with self.assertRaises(OSError):
                 await self.compact()
         self.assertIsNone(self.session.checkpoint)
         self.assertEqual(self.session.history_file.read_bytes(), original)
+
+        paid_calls = len(self.llm.calls)
+        await self.compact()
+        self.assertIsNotNone(self.session.checkpoint)
+        self.assertEqual(len(self.llm.calls), paid_calls)
+        self.assertFalse(self.session.history_file.with_suffix('.compaction.json').exists())
 
     async def test_timeout_closes_stream_without_installing_memory(self):
         self.fill()

@@ -946,9 +946,11 @@ export const useDirectorStore = defineStore('director', {
               this._appendEvent(data);
             } else if (type === 'context_status') {
               if (data?.phase === 'compacting') {
+                const label = data.stage === 'shrinking' ? '摘要超出预算，正在精简'
+                  : data.reused ? '已复用完成的剧情分段' : '正在整理共享剧情记忆';
                 this.compactionStatus = data.chunks
-                  ? `正在整理共享剧情记忆（${data.chunk}/${data.chunks}）…`
-                  : '正在整理共享剧情记忆…';
+                  ? `${label}（${data.chunk}/${data.chunks}）…`
+                  : `${label}…`;
               } else if (data?.phase === 'compacted' && data.checkpoint) {
                 this.contextCheckpoint = data.checkpoint;
                 this.contextCheckpoints = [

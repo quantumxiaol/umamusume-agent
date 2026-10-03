@@ -1,11 +1,12 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 
 import { DIALOGUE_INPUT_MODES } from '@/stores/chatStore';
 import { useDirectorStore } from '@/stores/directorStore';
 import MemoryCheckpoint from '@/components/MemoryCheckpoint.vue';
 import { buildSceneMemoryTimeline } from '@/services/memoryTimeline';
 import { MAX_INPUT_CHARS, characterCount, inputBatchError } from '@/services/inputLimits';
+import { buildSceneMarkdown, downloadSceneMarkdown } from '@/services/sceneMarkdown';
 
 
 const props = defineProps({
@@ -46,6 +47,24 @@ const inputRef = ref(null);
 const isComposing = ref(false);
 const characterFilter = ref('');
 const audioRefs = ref({});
+const exportNotice = ref('');
+watch(() => store.sessionId, () => { exportNotice.value = ''; });
+
+const exportScene = async (copy = false) => {
+  exportNotice.value = '';
+  try {
+    const snapshot = store._currentSnapshot();
+    if (!snapshot) return;
+    if (copy) {
+      await navigator.clipboard.writeText(buildSceneMarkdown(snapshot));
+    } else {
+      downloadSceneMarkdown(snapshot);
+    }
+    exportNotice.value = copy ? '已复制剧情 Markdown。' : '已下载剧情纪念册（不用于恢复历史）。';
+  } catch (_error) {
+    exportNotice.value = copy ? '复制失败，请使用下载 Markdown。' : '导出失败，请重试。';
+  }
+};
 
 const inputModes = Object.entries(DIALOGUE_INPUT_MODES).map(([value, item]) => ({
   value,
@@ -403,9 +422,14 @@ onMounted(() => store.init(props.userUuid));
             </span>
           </div>
         </div>
-        <button type="button" class="reset-scene-button" :disabled="store.isLoading" @click="store.resetScene">
-          结束场景
-        </button>
+        <div class="scene-export-tools">
+          <div class="history-actions">
+            <button type="button" class="history-resume" :disabled="store.isLoading || !store.events.length" @click="exportScene(true)">复制 Markdown</button>
+            <button type="button" class="history-resume" :disabled="store.isLoading || !store.events.length" @click="exportScene(false)">下载 Markdown</button>
+            <button type="button" class="reset-scene-button" :disabled="store.isLoading" @click="store.resetScene">结束场景</button>
+          </div>
+          <p v-if="exportNotice" role="status" class="cast-help">{{ exportNotice }}</p>
+        </div>
       </section>
 
       <section class="scene-state-card">
@@ -884,6 +908,15 @@ button:disabled {
 .scene-toolbar {
   grid-column: 1 / -1;
   padding: 18px 22px;
+  flex-wrap: wrap;
+}
+
+.scene-export-tools {
+  max-width: 100%;
+}
+
+.scene-export-tools .history-actions {
+  flex-wrap: wrap;
 }
 
 .reset-scene-button {

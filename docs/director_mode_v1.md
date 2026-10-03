@@ -155,6 +155,15 @@ pending input. Installation occurs under the scene lock only after a durable
 JSONL checkpoint write. Ordinary reply usage calibrates token estimates; summary
 usage is not used for that calibration.
 
+Oversized pieces receive at most two bounded shrinking attempts; prose is never
+cut mid-sentence to force it under budget. Completed pieces and shrink results
+are saved in a fingerprinted `history.compaction.json` sidecar, separate from
+active memory. A retry reuses matching work, even after a process restart if
+the files survive. Drafts are cleared after checkpoint commit, are not sent to
+the browser, and cannot survive an HF instance replacement that erases storage.
+Failure/cancellation, chunk budgets, draft reuse and final commit are logged
+without transcript or summary text. See [drafts and diagnostics](dialogue_memory.md#压缩草稿与失败排查单聊导演和-stage-共用).
+
 Each checkpoint binds browser/scene identity, a stable event-ID/revision/content
 digest and the static prompt configuration. JSONL and browser snapshots retain
 the original events and all inspectable memory versions. Only the active summary
@@ -181,6 +190,25 @@ its external client must retain the returned scene snapshot to recover it.
 See [configuration](configuration.md#导演模式) for all memory settings. Turning
 `DIRECTOR_COMPACTION_ENABLED` off disables new compactions, not restoration of a
 valid previously saved summary.
+
+## Markdown keepsake export
+
+The active scene toolbar offers **复制 Markdown** and **下载 Markdown**. To export
+an ended scene, first open it with **继续场景**; loading history does not invoke
+the LLM or trigger compaction. Export is generated entirely in the browser and
+requires no additional backend endpoint or model call.
+
+The document contains the scene title, cast, opening environment and full public
+timeline grouped by turn, with character actions and dialogue separated. It
+uses the current reply revisions, keeps the original transcript after memory
+compaction, and marks parse-error placeholders as failed generation rather than
+character dialogue. Hidden plans/directives, model inputs, browser/session IDs,
+audio URLs, internal memory checkpoints and unplayed story outlines are excluded.
+HTML and Markdown control syntax in user/model text are escaped for safe reading.
+
+This is a human-readable keepsake, **not a scene restore format**. It does not
+change the existing IndexedDB/JSONL restoration flow. Export is disabled during
+generation to avoid downloading a partially updated turn.
 
 ## API
 

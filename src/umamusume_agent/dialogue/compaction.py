@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from .compaction_runtime import CompactionError, CompactionRuntime, SUMMARY_INSTRUCTION
+from .compaction_work import CompactionWork, logged_compaction
 from .memory import HistoryCheckpoint, memory_messages, prompt_digest, source_digest
 from .models import default_player_actor
 from .protocol import to_compact_context_message
@@ -53,6 +54,7 @@ class HistoryCompactor:
         self.settings = settings
         self.runtime = CompactionRuntime(runtime=runtime, settings=settings)
 
+    @logged_compaction
     async def prepare(self, session, pending, *, text_only=False, on_progress=None):
         cfg = self.settings
         if not cfg.DIALOGUE_COMPACTION_ENABLED:
@@ -117,31 +119,10 @@ class HistoryCompactor:
         chunks = split_source(summary_source, max_tokens=chunk_budget, ratio=ratio)
         if len(chunks) > cfg.DIALOGUE_COMPACTION_MAX_CHUNKS:
             raise CompactionError("待压缩历史过大，超出本次任务的分段预算。")
-        summaries = []
-        for index, chunk in enumerate(chunks):
-            await progress("compacting", chunk=index + 1, chunks=len(chunks))
-            allowance = max(1, min(memory_budget // len(chunks), int(cfg.DIALOGUE_COMPACTION_MAX_TOKENS * 0.7)))
-            transcript = "\n\n".join(f"[{item['role']}]\n{item['content']}" for item in chunk)
-            continuity = ([{"role": "user", "content": (
-                "已整理的前文，仅用于理解指代与因果；不要重复抄写。\n" + "\n\n".join(summaries)
-            )}] if summaries else [])
-            messages = [*prefix, *continuity, {"role": "user", "content": (
-                f"这是按时间排序的第 {index + 1}/{len(chunks)} 段历史。\n"
-                f"记忆篇幅预算约 {allowance} tokens；充分保留细节，但不为凑长度重复内容。\n"
-                "<source_transcript>\n" + transcript + "\n</source_transcript>"
-            )}]
-            if estimate_tokens(messages, ratio) + cfg.DIALOGUE_COMPACTION_MAX_DYNAMIC_TOKENS + reserve >= capacity:
-                raise CompactionError("压缩请求预计超出模型容量，未修改历史。")
-            text = await self.runtime.summarize(messages=messages, target_tokens=allowance, session_id=session.session_id)
-            summaries.append(text)
-            if estimate_tokens([{"content": "\n\n".join(summaries)}], ratio) > memory_budget:
-                raise CompactionError("生成的记忆超过配置预算，原始历史和旧记忆已保留。")
-        summary = "\n\n".join(
-            f"## 历史片段 {i + 1}（后文更新优先）\n{text}" if len(summaries) > 1 else text
-            for i, text in enumerate(summaries)
-        )
-        if estimate_tokens([{"content": summary}], ratio) > memory_budget:
-            raise CompactionError("生成的记忆超过配置预算，原始历史和旧记忆已保留。")
+        work = CompactionWork(runtime=self.runtime, session=session, chunks=chunks, prefix=prefix,
+                              ratio=ratio, budget=memory_budget, capacity=capacity, reserve=reserve,
+                              prompt_key=prompt_digest(session))
+        summary = await work.run(progress)
         checkpoint = HistoryCheckpoint(
             user_uuid=session.user_uuid, character_id=session.character.id,
             revision=max([item.revision for item in session.checkpoints]
@@ -158,6 +139,7 @@ class HistoryCompactor:
         session._append_history_event({"event": "context_checkpoint", "checkpoint": checkpoint.model_dump(mode="json")}, strict=True)
         session.checkpoint = checkpoint
         session.checkpoints.append(checkpoint)
+        work.draft.clear()
         logger.info("History compaction committed session_id=%s revision=%s covered_messages=%s chunks=%s estimated_tokens=%s",
                     session.session_id, checkpoint.revision, cut, len(chunks), after)
         await progress("compacted", checkpoint=checkpoint.model_dump(mode="json"), estimated_tokens=after)

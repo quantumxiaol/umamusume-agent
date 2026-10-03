@@ -44,6 +44,7 @@ characters/
 │   │   ├── context.py             # Prompt、前缀缓存与约束再注入
 │   │   ├── compaction.py          # 高低水位、完整轮次保留与分段记忆编排
 │   │   ├── compaction_runtime.py  # 摘要独立输出预算、流式调用与截断重试
+│   │   ├── compaction_work.py     # 分段草稿复用、超预算精简和失败/取消日志
 │   │   ├── memory.py              # Checkpoint 校验与模型历史视图
 │   │   ├── token_budget.py        # token 估算与实际用量校准
 │   │   ├── history.py             # JSONL 读取、恢复与导入
@@ -103,6 +104,7 @@ characters/
 │   │   ├── services/inputLimits.js # 输入计数、事件批量及历史上传校验
 │   │   ├── services/historyCache.js # 单角色全文及记忆的 IndexedDB 原子缓存
 │   │   ├── services/memoryTimeline.js # 展示行映射，不修改原始对话
+│   │   ├── services/sceneMarkdown.js # 导演公开剧情的阅读用 Markdown 导出
 │   │   ├── stores/chatStore.js   # 单角色状态、历史、事件队列与语音轮询
 │   │   ├── stores/directorStore.js # 导演场景、恢复、revision 与语音轮询
 │   │   ├── App.vue               # 单角色/导演模式入口

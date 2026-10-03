@@ -1188,8 +1188,10 @@ export const useChatStore = defineStore('chat', {
             (event) => {
               const { type, data } = event;
               if (type === 'context_status') {
+                const label = data.stage === 'shrinking' ? '摘要超出预算，正在精简'
+                  : data.reused ? '已复用完成的历史分段' : '正在整理较早历史';
                 this.compactionStatus = data.phase === 'compacting'
-                  ? `正在整理较早历史${data.chunks ? `（${data.chunk}/${data.chunks}）` : ''}，请稍候…` : '';
+                  ? `${label}${data.chunks ? `（${data.chunk}/${data.chunks}）` : ''}，请稍候…` : '';
                 if (data.phase === 'compacted') {
                   this._rememberCheckpoint(data.checkpoint);
                   this._cacheCurrentConversation();

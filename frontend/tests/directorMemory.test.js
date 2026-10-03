@@ -82,6 +82,10 @@ test('progress is not dialogue; checkpoint redelivery is idempotent and cached a
   const { store, saved } = await setup({ directorTurnStream: async (_id, _events, _user, _voice, emit) => {
     emit({ type: 'context_status', data: { phase: 'compacting', chunk: 1, chunks: 2 } });
     assert.match(store.compactionStatus, /1\/2/);
+    emit({ type: 'context_status', data: { phase: 'compacting', chunk: 1, chunks: 2, stage: 'shrinking' } });
+    assert.match(store.compactionStatus, /精简/);
+    emit({ type: 'context_status', data: { phase: 'compacting', chunk: 1, chunks: 2, stage: 'ready', reused: true } });
+    assert.match(store.compactionStatus, /复用/);
     for (let i = 0; i < 2; i += 1) emit({ type: 'context_status', data: { phase: 'compacted', checkpoint } });
     assert.equal(store.events.length, 4);
     emit({ type: 'scene_event', data: { event_id: 'e5', turn_index: 3, content: '继续', event_type: 'dialogue' } });
