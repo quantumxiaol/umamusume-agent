@@ -1,6 +1,7 @@
 // frontend/src/stores/chatStore.js
 import { defineStore } from 'pinia';
 import { dialogueHistoryCache } from '@/services/historyCache';
+import { rateLimits } from '@/services/rateLimit';
 import { inputBatchError, assertHistorySize, assertHistoryFileSize } from '@/services/inputLimits';
 import {
   API_BASE_URL,
@@ -822,10 +823,14 @@ export const useChatStore = defineStore('chat', {
       // into acknowledged history just because the user refreshes the browser.
       if (state && !state.busy
         && state.history_size === normalizeConversationRecords(before.map(messageToRecord)).length) {
-        this.messages = before;
-        this.queuedEvents = queued;
-        this.failedDraft = text;
+        this._restoreUnacceptedInput(before, queued, text);
       }
+    },
+
+    _restoreUnacceptedInput(before, queued, text) {
+      this.messages = before;
+      this.queuedEvents = queued;
+      this.failedDraft = text;
     },
 
     _clearVoicePollers() {
@@ -1106,21 +1111,39 @@ export const useChatStore = defineStore('chat', {
 
       this.error = null;
       this.exportNotice = '';
-      this.queuedEvents = [];
       const keptMessages = this.messages.slice(0, userIndex);
 
+      // Hold the lock across both history replacement and generation. Locking
+      // only in sendMessage leaves an await-sized double-click window.
+      this.isLoading = true;
       try {
+        // Don't truncate the last reply if generation is already cooling down.
+        rateLimits.check('/history/import');
+        rateLimits.check('/chat_stream');
         await this._replaceCurrentSessionHistory(keptMessages, 'regenerate_last_user');
+        this.queuedEvents = [];
+        await this._sendMessage(text, requestedInputMode || original.inputMode || this.inputMode);
+        return !this.error;
       } catch (err) {
         this.error = err.message || '同步重生成上下文失败。';
+        this.failedDraft = text;
         return false;
+      } finally {
+        this.isLoading = false;
       }
-
-      await this.sendMessage(text, requestedInputMode || original.inputMode || this.inputMode);
-      return !this.error;
     },
 
     async sendMessage(text, requestedInputMode = this.inputMode) {
+      if (this.isLoading) return false;
+      this.isLoading = true;
+      try {
+        return await this._sendMessage(text, requestedInputMode);
+      } finally {
+        this.isLoading = false;
+      }
+    },
+
+    async _sendMessage(text, requestedInputMode) {
       const content = String(text || '').trim();
       const pendingEvents = this.dialogueEventsEnabled
         ? [...this.queuedEvents]
@@ -1178,7 +1201,7 @@ export const useChatStore = defineStore('chat', {
         });
         this.messages.push(assistantMessage);
         this.currentAssistantId = assistantMessage.id;
-        this.isLoading = true;
+        let rateLimited = false;
 
         try {
           await chatStream(
@@ -1257,14 +1280,14 @@ export const useChatStore = defineStore('chat', {
           );
         } catch (err) {
           this.error = err.message || '对话失败。';
+          rateLimited = err.status === 429;
         } finally {
           this.compactionStatus = '';
-          if (this.error) await this._recoverUnacceptedInput(messagesBefore, pendingEvents, content);
+          if (rateLimited) this._restoreUnacceptedInput(messagesBefore, pendingEvents, content);
+          else if (this.error) await this._recoverUnacceptedInput(messagesBefore, pendingEvents, content);
           await this._cacheCurrentConversation();
-          this.isLoading = false;
         }
       } else {
-        this.isLoading = true;
         try {
           const data = await chatOnce(
             this.sessionId,
@@ -1314,10 +1337,9 @@ export const useChatStore = defineStore('chat', {
           }
         } catch (err) {
           this.error = err.message || '对话失败。';
-          await this._recoverUnacceptedInput(messagesBefore, pendingEvents, content);
+          if (err.status === 429) this._restoreUnacceptedInput(messagesBefore, pendingEvents, content);
+          else await this._recoverUnacceptedInput(messagesBefore, pendingEvents, content);
           await this._cacheCurrentConversation();
-        } finally {
-          this.isLoading = false;
         }
       }
     },
@@ -1356,7 +1378,7 @@ export const useChatStore = defineStore('chat', {
         memory = result;
         backendSynced = true;
       } catch (err) {
-        if (err.code === 'INPUT_LIMIT' || [400, 413, 422].includes(err.status)) {
+        if (err.code === 'INPUT_LIMIT' || [400, 413, 422, 429].includes(err.status)) {
           this.error = `历史未导入，当前历史和缓存已保留：${err.message}`;
           return false;
         }

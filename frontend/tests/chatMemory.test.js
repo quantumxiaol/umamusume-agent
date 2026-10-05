@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as inputLimits from '../src/services/inputLimits.js';
+import { createRateLimitTracker } from '../src/services/rateLimit.js';
 
 const records = [
   { role: 'user', content: '明天一起训练' },
@@ -13,6 +14,7 @@ const records = [
 const checkpoint = { revision: 1, covered_messages: 2, summary: '约定明天训练', user_uuid: 'user' };
 
 async function setup(apiOverrides = {}, cacheOverrides = {}) {
+  const rateLimits = createRateLimitTracker();
   const saved = [];
   const imports = [];
   const cache = {
@@ -38,6 +40,7 @@ async function setup(apiOverrides = {}, cacheOverrides = {}) {
   await module.link((specifier) => {
     const exports = specifier === 'pinia' ? { defineStore: (_name, options) => options }
       : specifier.endsWith('inputLimits') ? inputLimits
+      : specifier.endsWith('rateLimit') ? { rateLimits }
       : specifier.endsWith('historyCache') ? { dialogueHistoryCache: cache } : api;
     return new vm.SyntheticModule(Object.keys(exports), function () {
       for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
@@ -48,7 +51,7 @@ async function setup(apiOverrides = {}, cacheOverrides = {}) {
   const store = definition.state();
   for (const [key, action] of Object.entries(definition.actions)) store[key] = action.bind(store);
   Object.assign(store, { userUuid: 'user', selectedCharacter: '米浴', sessionId: 'session', capabilities: { dialogue_memory: 1 } });
-  return { store, saved, imports };
+  return { store, saved, imports, rateLimits };
 }
 
 test('JSON and Markdown exports/imports round-trip memory and verbatim model replies', async () => {
@@ -221,8 +224,8 @@ test('oversized files are rejected before reading; rejected history does not ove
   assert.equal(store.contextCheckpoint.summary, checkpoint.summary);
 });
 
-test('backend validation rejection preserves the displayed history and active summary', async () => {
-  for (const status of [400, 413, 422]) {
+test('backend validation or rate-limit rejection preserves displayed history and summary', async () => {
+  for (const status of [400, 413, 422, 429]) {
     let fail = false;
     const { store, saved } = await setup({ importHistory: async () => {
       if (fail) throw Object.assign(new Error('历史超限'), { status });
@@ -237,5 +240,90 @@ test('backend validation rejection preserves the displayed history and active su
     assert.equal(JSON.stringify(store.messages), before);
     assert.equal(JSON.stringify(saved.at(-1)), beforeSaved);
     assert.equal(store.contextCheckpoint.summary, checkpoint.summary);
+  }
+});
+
+test('regeneration locks history sync and generation against duplicate regenerate/send', async () => {
+  const { store } = await setup();
+  await store.importConversationMessages(records, 'test', checkpoint);
+  let releaseImport, releaseReply;
+  let notifyReplyStarted;
+  const replyStarted = new Promise((resolve) => { notifyReplyStarted = resolve; });
+  let imports = 0, replies = 0;
+  store._replaceCurrentSessionHistory = () => { imports += 1; return new Promise((resolve) => { releaseImport = resolve; }); };
+  store._sendMessage = () => { replies += 1; notifyReplyStarted(); return new Promise((resolve) => { releaseReply = resolve; }); };
+  const first = store.regenerateFromLastUser();
+  assert.equal(store.isLoading, true);
+  assert.equal(await store.regenerateFromLastUser(), false);
+  assert.equal(await store.sendMessage('不要重复发送'), false);
+  assert.equal(imports, 1);
+  releaseImport();
+  await replyStarted;
+  assert.equal(replies, 1);
+  assert.equal(store.isLoading, true);
+  assert.equal(await store.regenerateFromLastUser(), false);
+  releaseReply();
+  assert.equal(await first, true);
+  assert.equal(store.isLoading, false);
+});
+
+test('failed regeneration history sync releases lock and preserves previous reply', async () => {
+  const { store } = await setup();
+  await store.importConversationMessages(records, 'test', checkpoint);
+  const before = JSON.stringify(store.messages);
+  let sends = 0;
+  store._replaceCurrentSessionHistory = async () => { throw Object.assign(new Error('请等待 30 秒'), { status: 429 }); };
+  store._sendMessage = async () => { sends += 1; };
+  assert.equal(await store.regenerateFromLastUser(), false);
+  assert.equal(store.isLoading, false);
+  assert.equal(sends, 0);
+  assert.equal(JSON.stringify(store.messages), before);
+});
+
+test('known chat cooldown prevents regeneration from truncating the last reply', async () => {
+  const { store, rateLimits, imports } = await setup();
+  await store.importConversationMessages(records, 'test', checkpoint);
+  const before = JSON.stringify(store.messages);
+  const count = imports.length;
+  rateLimits.record('/chat_stream', '30');
+  assert.equal(await store.regenerateFromLastUser('修改后的发言'), false);
+  assert.equal(store.isLoading, false);
+  assert.equal(imports.length, count);
+  assert.equal(store.failedDraft, '修改后的发言');
+  assert.equal(JSON.stringify(store.messages), before);
+});
+
+test('ordinary sends also reject concurrent submissions and release the lock after failure', async () => {
+  const { store } = await setup();
+  let calls = 0, reject;
+  store._sendMessage = () => { calls += 1; return new Promise((_resolve, fail) => { reject = fail; }); };
+  const first = store.sendMessage('第一句');
+  assert.equal(await store.sendMessage('重复的请求'), false);
+  assert.equal(await store.regenerateFromLastUser(), false);
+  assert.equal(calls, 1);
+  reject(new Error('generation failed'));
+  await assert.rejects(first, /generation failed/);
+  assert.equal(store.isLoading, false);
+});
+
+test('429 in stream or non-stream preserves draft/queued events without a recovery request', async () => {
+  for (const streamMode of [true, false]) {
+    const reject = async () => { throw Object.assign(new Error('请等待 30 秒'), { status: 429 }); };
+    const { store } = await setup({ chatStream: reject, chatOnce: reject });
+    await store.importConversationMessages(records, 'test', checkpoint);
+    store.streamMode = streamMode;
+    store.dialogueEventsEnabled = true;
+    store.contextEventBatchEnabled = true;
+    store.queueMessage('晚上了');
+    const queued = JSON.stringify(store.queuedEvents);
+    const before = JSON.stringify(store.messages);
+    let syncs = 0;
+    store._syncContextCheckpoint = async () => { syncs += 1; };
+    await store.sendMessage('晚安');
+    assert.equal(store.failedDraft, '晚安');
+    assert.equal(JSON.stringify(store.messages), before);
+    assert.equal(JSON.stringify(store.queuedEvents), queued);
+    assert.equal(syncs, 0);
+    assert.equal(store.isLoading, false);
   }
 });

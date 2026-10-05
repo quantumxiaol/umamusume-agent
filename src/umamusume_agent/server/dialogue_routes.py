@@ -1,4 +1,5 @@
 """Single-character HTTP API; orchestration and persistence are injected."""
+import asyncio
 import json
 import logging
 import shutil
@@ -181,6 +182,9 @@ def create_dialogue_router(
                     compactor=compactor,
                 ):
                     yield event
+            except asyncio.CancelledError:
+                logger.info("Dialogue stream cancelled session_id=%s", session.session_id)
+                raise
             except Exception as e:
                 logger.error(f"Stream chat failed: {e}")
                 translated = translate_llm_exception(e)

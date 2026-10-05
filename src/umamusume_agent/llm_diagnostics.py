@@ -146,3 +146,9 @@ class LLMRequestDiagnostics:
     def error(self, call_id: str | None, exc: Exception) -> None:
         if call_id is not None:
             logger.warning("LLM request failed call_id=%s error_type=%s", call_id, type(exc).__name__)
+
+    def cancelled(self, call_id: str | None, *, elapsed_ms: int) -> None:
+        if call_id is not None:
+            record = {**_request_scope.get(), 'call_id': call_id, 'elapsed_ms': elapsed_ms,
+                      'reason': 'task_cancelled', 'provider_usage': 'unknown'}
+            logger.info("LLM request cancelled %s", json.dumps(record, separators=(',', ':')))

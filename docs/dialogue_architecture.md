@@ -69,7 +69,9 @@ the LangChain MCP adapters remain available through the optional
 - `server/services.py`: `build_services` / `ServerServices`, assembling one
   dependency graph per app. Dialogue, Director and Stage reuse the same
   `CharacterRuntime`, while their session registries remain separate.
-- `server/middleware.py`: API-key protection and per-app rate-limit buckets.
+- `server/middleware.py`: pure-ASGI API-key protection, per-app rate-limit buckets
+  and disconnect/cancellation diagnostics; no response buffering or fake success
+  on a disconnected upload. CORS wraps the complete application error stack.
 - `server/body_limit.py`: bounded request buffering before JSON parsing;
   `input_limits.py` separately validates new input and uploaded archives.
 - `server/schemas.py`: single-character HTTP request models.

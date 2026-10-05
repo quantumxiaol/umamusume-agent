@@ -21,6 +21,16 @@ from .tts_routes import create_tts_router
 logger = logging.getLogger(__name__)
 
 
+class _CorsApp(FastAPI):
+    def build_middleware_stack(self):
+        # Keep the FastAPI API (state/router/lifespan), but wrap even its outer
+        # ServerErrorMiddleware so 401/429/413 and unexpected 500s all have CORS.
+        return CORSMiddleware(
+            super().build_middleware_stack(), allow_origins=['*'], allow_credentials=True,
+            allow_methods=['*'], allow_headers=['*'], expose_headers=['Retry-After'],
+        )
+
+
 def create_app(*, services: ServerServices | None = None) -> FastAPI:
     logging.basicConfig(
         level=logging.INFO,
@@ -31,13 +41,9 @@ def create_app(*, services: ServerServices | None = None) -> FastAPI:
     settings = services.settings
     store = services.session_store
     cleanup_interval = max(5, settings.DIALOGUE_SESSION_CLEANUP_INTERVAL_SECONDS)
-    app = FastAPI(title="Umamusume-Dialogue-Server", version="0.2.0")
+    app = _CorsApp(title="Umamusume-Dialogue-Server", version="0.2.0")
     app.state.services = services
     app.add_middleware(RequestBodyLimitMiddleware)
-    app.add_middleware(
-        CORSMiddleware, allow_origins=['*'], allow_credentials=True,
-        allow_methods=['*'], allow_headers=['*'],
-    )
     install_api_protection(app, settings=settings)
 
     @app.exception_handler(RequestValidationError)

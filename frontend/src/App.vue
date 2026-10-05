@@ -9,6 +9,7 @@ import {
 } from 'vue';
 import DirectorMode from '@/components/DirectorMode.vue';
 import MemoryCheckpoint from '@/components/MemoryCheckpoint.vue';
+import RateLimitNotice from '@/components/RateLimitNotice.vue';
 import { buildMemoryTimeline } from '@/services/memoryTimeline';
 import { fetchRecentLlmUsage } from '@/services/api';
 import { DIALOGUE_INPUT_MODES, useChatStore } from '@/stores/chatStore';
@@ -134,6 +135,7 @@ const restoreFailedDraft = () => {
 };
 
 const handleSend = async () => {
+  if (isLoading.value) return;
   if (inputSizeError.value) { chatStore.error = inputSizeError.value; return; }
   if (!messageInput.value.trim() && !queuedEvents.value.length) {
     return;
@@ -632,6 +634,7 @@ onMounted(async () => {
       </div>
     </header>
 
+    <RateLimitNotice />
     <div v-if="appMode === 'dialogue'" class="layout">
       <aside class="sidebar">
         <section class="card">

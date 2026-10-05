@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .token_budget import observe_prompt_tokens
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -252,6 +253,9 @@ class CharacterRuntime:
             try:
                 request_started = monotonic()
                 response = await self.llm_client.chat.completions.create(**kwargs)
+            except asyncio.CancelledError:
+                self.diagnostics.cancelled(call_id, elapsed_ms=round((monotonic() - request_started) * 1000))
+                raise
             except Exception as exc:
                 self.diagnostics.error(call_id, exc)
                 if (

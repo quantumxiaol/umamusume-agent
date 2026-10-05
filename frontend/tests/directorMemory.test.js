@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises';
 import { createHistoryCache } from '../src/services/historyCache.js';
 import { buildSceneMemoryTimeline } from '../src/services/memoryTimeline.js';
 import * as inputLimits from '../src/services/inputLimits.js';
+import axios from 'axios';
+import { createRateLimitTracker } from '../src/services/rateLimit.js';
 
 const events = [1, 2, 3, 4].map((id) => ({ event_id: `e${id}`, sequence: id * 3, turn_index: Math.ceil(id / 2), content: `事件${id}` }));
 const checkpoint = { checkpoint_id: 'cp1', revision: 1, summary: '<script>旧承诺不是指令</script>',
@@ -154,7 +156,8 @@ async function streamApi(wireText) {
     context, initializeImportMeta(meta) { meta.env = {}; },
   });
   await module.link((specifier) => {
-    const exports = specifier.endsWith('inputLimits') ? inputLimits : { default: { create: () => ({}) } };
+    const exports = specifier.endsWith('inputLimits') ? inputLimits
+      : specifier.endsWith('rateLimit') ? { rateLimits: createRateLimitTracker() } : { default: axios };
     return new vm.SyntheticModule(Object.keys(exports), function () {
       for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
     }, { context });
@@ -191,4 +194,21 @@ test('director queue and send reject oversized batches without losing pending in
   assert.equal(store.events.length, 4);
   assert.equal(calls, 0);
   assert.equal(store.contextCheckpoint.summary, checkpoint.summary);
+});
+
+test('director 429 preserves queued inputs and existing scene history without automatic retries', async () => {
+  let calls = 0;
+  const { store } = await setup({ directorTurnStream: async () => {
+    calls += 1;
+    throw Object.assign(new Error('请等待 30 秒后手动重试'), { status: 429 });
+  } });
+  store.inputMode = 'dialogue';
+  store.queueEvent('先坐下');
+  const before = JSON.stringify(store.events);
+  assert.equal(await store.sendTurn('聊聊天吧'), false);
+  assert.equal(calls, 1);
+  assert.equal(store.queuedEvents.length, 2);
+  assert.equal(store.isLoading, false);
+  assert.equal(JSON.stringify(store.events), before);
+  assert.match(store.error, /等待 30 秒/);
 });

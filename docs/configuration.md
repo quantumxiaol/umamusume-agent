@@ -181,6 +181,17 @@ HF 镜像会复制并读取 `.env.template`，无需配齐这些 Variables；已
 `API_ACCESS_KEY` 会被 Pages 前端以 `VITE_API_ACCESS_KEY` 发送，因而无法对浏览器用户
 保密，只适合轻量防护。
 
+触发限流返回 `429`，JSON 的 `retry_after` 与响应头 `Retry-After` 表示需要等待的秒数。
+Pages 和本地前端会显示倒计时，并在当前页面中暂停同类请求；普通 API 与对话 API
+分别等待，不进行高频轮询或自动重发。等待结束后由用户手动重试，未发送的对话输入保留。
+跨域处理覆盖鉴权、限流、上传校验及服务器错误响应，前端可以读取真实状态和等待时间。
+
+服务端的 `API rate limited` 日志包含限流分组、窗口、等待秒数与匿名化客户端标识，
+可辅助核查代理 IP 是否导致多个请求共用额度；不应根据 HF 的 `10.16.x.x` 访问日志判断用户数。
+`HTTP request cancelled` 区分已观察到的客户端断开和任务取消；`LLM request cancelled`
+通过 `call_id` 和 `http_request_id` 关联调用，取消时未收到的供应商用量标记为 `unknown`，
+不代表模型未计费。日志不记录对话原文、请求体或 API Key。
+
 ### 输入与历史上传限制
 
 当前是代码中的硬上限，不是 `.env` 配置；本地、HF 与 Pages 使用同样的校验。

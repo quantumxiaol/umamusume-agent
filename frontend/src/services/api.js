@@ -1,6 +1,7 @@
 // frontend/src/services/api.js
 import axios from 'axios';
 import { assertHistorySize, assertHistoryPayloadSize } from './inputLimits';
+import { rateLimits } from './rateLimit';
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:1111';
 export const API_ACCESS_KEY = import.meta.env.VITE_API_ACCESS_KEY || '';
@@ -23,11 +24,22 @@ const apiClient = axios.create({
   }),
 });
 
+apiClient.interceptors.request.use((request) => {
+  rateLimits.check(request.url);
+  return request;
+});
+apiClient.interceptors.response.use((response) => response, (error) => {
+  if (error.response?.status === 429) {
+    throw rateLimits.record(error.config?.url || '/', error.response.headers?.['retry-after'], error.response.data?.retry_after);
+  }
+  throw error;
+});
+
 const errorDetail = (detail) => (Array.isArray(detail)
   ? detail.map((item) => item.msg || String(item)).join('；') : String(detail || 'Unknown error'));
 
 const parseError = (error) => {
-  if (error.code === 'INPUT_LIMIT') return error;
+  if (error.code === 'INPUT_LIMIT' || error.code === 'RATE_LIMIT') return error;
   if (error.response) {
     const parsed = new Error(`Server Error: ${error.response.status} - ${errorDetail(error.response.data?.detail)}`);
     parsed.status = error.response.status;
@@ -38,6 +50,17 @@ const parseError = (error) => {
   }
   return new Error(`Request Error: ${error.message}`);
 };
+
+async function checkStreamResponse(response, url) {
+  if (response.ok) return;
+  const text = await response.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) { data = {}; }
+  if (response.status === 429) {
+    throw rateLimits.record(url, response.headers.get('Retry-After'), data?.retry_after);
+  }
+  throw Object.assign(new Error(`Server Error: ${response.status} - ${errorDetail(data?.detail || text)}`), { status: response.status });
+}
 
 export const fetchCharacters = async () => {
   try {
@@ -149,6 +172,7 @@ export const chatStream = async (
 ) => {
   try {
     const url = `${API_BASE_URL}/chat_stream`;
+    rateLimits.check(url);
     const response = await fetch(url, {
       method: 'POST',
       headers: buildAuthHeaders({
@@ -162,10 +186,7 @@ export const chatStream = async (
       }),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Server Error: ${response.status} - ${errorText}`);
-    }
+    await checkStreamResponse(response, url);
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -426,7 +447,9 @@ export const directorTurnStream = async (
   onEvent,
 ) => {
   try {
-    const response = await fetch(`${API_BASE_URL}/director/turn_stream`, {
+    const url = `${API_BASE_URL}/director/turn_stream`;
+    rateLimits.check(url);
+    const response = await fetch(url, {
       method: 'POST',
       headers: buildAuthHeaders({
         'Content-Type': 'application/json',
@@ -438,10 +461,7 @@ export const directorTurnStream = async (
         generate_voice: Boolean(generateVoice),
       }),
     });
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Server Error: ${response.status} - ${errorText}`);
-    }
+    await checkStreamResponse(response, url);
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
