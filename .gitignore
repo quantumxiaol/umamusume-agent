@@ -44,10 +44,12 @@ logs/
 *.log
 
 # Character assets
+.character-backups/
+characters/**/notes.md
 !characters/
 !characters/**/
 !characters/**/*.json
-!characters/**/*.md
+!characters/**/prompt.md
 !characters/**/*.txt
 !characters/**/*.mp3
 !characters/**/*.wav

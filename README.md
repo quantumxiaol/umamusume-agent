@@ -141,6 +141,9 @@ pnpm install --frozen-lockfile
 仓库已包含可用角色目录。如果导入自己的角色，将已构建目录放入
 `characters/`；文件格式见 [角色数据说明](docs/project_structure.md#角色数据)。
 
+修改 `prompt.md` 后，用 `python scripts/update_characters.py prompts --character almond_eye --apply`
+同步到运行时读取的 JSON。预览、批量更新和参考音频合并见 [角色更新说明](docs/character_updates.md)。
+
 ## 配置
 
 复制模板：
