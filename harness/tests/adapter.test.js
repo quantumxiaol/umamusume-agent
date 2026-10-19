@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { initialState, reduceState, replyText, sumUsage, openAIUsage, RECORD } from '../state.js';
 import { modelRequest, executeModelCall } from '../model.js';
 import { runWorker } from '../worker.js';
+import { State, WorkerEvent } from '../protocol.js';
 
 const signal = () => new AbortController().signal;
 const route = { provider: 'user-provider', model: 'user-model' };
@@ -58,8 +59,8 @@ test('truncation stays truncation and missing/error finishes cannot become succe
 
 test('native settlement is the commit boundary; cancellation and replay are safe', () => {
   const state = initialState(true);
-  const result = { baseRevision: 0, replaceFrom: 0, historyAppend: [{ role: 'user', content: '你好' }, { role: 'assistant', content: '你好！' }],
-    checkpoint: null, checkpoints: [], tokenRatio: .5, input: { message: '你好' }, reply: { characterName: '米浴', action: '微笑', dialogue: '你好！' } };
+  const result = { version: 1, regenerate: false, baseRevision: 0, replaceFrom: 0, historyAppend: [{ role: 'user', content: '你好' }, { role: 'assistant', content: '你好！' }],
+    checkpoint: null, checkpoints: [], tokenRatio: .5, input: { message: '你好', mode: 'dialogue', queue: [], historyStart: 0 }, reply: { characterName: '米浴', action: '微笑', dialogue: '你好！' } };
   const prepared = { type: RECORD + 'prepared', ignorable: true, data: { version: 1, turn: 1, step: 1, result } };
   const waiting = reduceState(state, prepared);
   assert.equal(waiting.history.length, 0);
@@ -92,7 +93,11 @@ test('Python bridge runs the real character core, repairs JSON, restores and reg
     return { choices: [{ message: { content: ++calls === 1 ? 'not JSON' : JSON.stringify({ action: '轻轻点头', dialogue: '好，我们一起去。' }) }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 100, completion_tokens: 10 } };
   };
-  const result = await runWorker({ config, input: base, signal: signal(), onModel });
+  const progress = [];
+  const result = await runWorker({ config, input: base, signal: signal(), onModel, onProgress: event => progress.push(event) });
+  assert.deepEqual(progress.filter(event => event.stage).map(({ stage, phase }) => [stage, phase]),
+    [['python-startup', 'start'], ['python-startup', 'end'], ['context', 'start'], ['context', 'end']]);
+  assert.ok(progress.filter(event => event.phase === 'end').every(event => event.durationMs >= 0));
   assert.equal(calls, 2);
   assert.match(result.reply.dialogue, /一起/);
   assert.equal(result.historyAppend.length, 2);
@@ -106,6 +111,26 @@ test('Python bridge runs the real character core, repairs JSON, restores and reg
   assert.equal(redo.replaceFrom, 0);
   assert.equal(redo.regenerate, true);
   assert.equal(redo.historyAppend.length, 2);
+});
+
+test('persisted and cross-process schemas reject incomplete or corrupt state', () => {
+  const state = initialState(true);
+  assert.deepEqual(State.parse(state), state);
+  assert.throws(() => State.parse({ ...state, history: [{ role: 'user', content: 123 }] }));
+  assert.throws(() => State.parse({ ...state, queue: [{ content: 'hi', event_type: 'invalid' }] }));
+  assert.throws(() => WorkerEvent.parse({ type: 'result', result: { reply: { dialogue: 'partial' } } }));
+  assert.throws(() => WorkerEvent.parse({ type: 'model', id: 'call', call: { messages: [{ role: 'tool', content: 'bad' }] } }));
+});
+
+test('missing Python reports an actionable startup failure and closes its stage', async () => {
+  const progress = [];
+  await assert.rejects(runWorker({
+    config: { pythonExecutable: fileURLToPath(new URL('./missing-python-executable', import.meta.url)) },
+    input: {}, signal: signal(), onModel: async () => { throw new Error('must not call a model'); },
+    onProgress: event => progress.push(event),
+  }), /无法启动本地 Python/);
+  assert.equal(progress.at(-1).stage, 'python-startup');
+  assert.equal(progress.at(-1).phase, 'error');
 });
 
 test('cancelling a real worker rejects promptly without a completed turn', { skip: !existsSync(python) }, async () => {

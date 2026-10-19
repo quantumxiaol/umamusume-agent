@@ -1,4 +1,4 @@
-# DeepSeek Harness 插件（第一版）
+# DeepSeek Harness 插件
 
 在 Harness 的“新会话”中选择 **赛马娘单聊**，使用自己配置的模型/API 与角色对话。角色卡、结构化回复校验、修复重试与历史压缩仍由本项目的 Python 核心执行；插件只负责模型调用、界面和持久化的适配。
 
@@ -8,8 +8,8 @@
 
 - DeepSeek Harness **0.2.1-rc.2**（已验证版本）；manifest 允许兼容的 0.2.x，后续版本需重新验证 API。
 - 已在 Harness 中配置可用的模型与自己的 API。模型需要支持 system/user/assistant 文本消息、流式调用，并能按提示返回 JSON。
-- [`uv`](https://docs.astral.sh/uv/getting-started/installation/)。首次对话会准备 Python 3.12 和 `harness/requirements.txt` 中的最小依赖，之后复用缓存。也可以指定已有 Python，见下文。
-- 使用 CLI 安装时需要 Git、pnpm，以及 Harness CLI 的运行环境。插件自身不需要 npm 安装依赖或编译，不下载音频模型。
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/)。首次对话会准备 Python 3.12 和锁定的依赖，之后复用缓存。`harness/requirements.txt` 由仓库 `uv.lock` 自动导出，包含基础依赖的精确版本与哈希；不安装可选的 TTS/LangChain extras。也可以指定已有 Python，见下文。
+- 使用 CLI 安装时需要 Git、pnpm，以及 Harness CLI 的运行环境。Harness 自动安装包依赖，用户无需手工编译 TypeScript，不下载音频模型。
 
 ## 本地测试
 
@@ -58,15 +58,17 @@ dsh plugin --profile my-profile add 'github:quantumxiaol/umamusume-agent#<commit
 
 Desktop 的“安装第三方插件”输入框也接受同一个 `github:quantumxiaol/umamusume-agent#<commit-sha>` 地址，安装后点“立即启用”。
 
-根目录 `package.json` 声明了 `dsh.bundle`，服务端和浏览器入口均为可直接运行的 JavaScript，没有 `prepare` 或其他安装构建脚本。无需 npm 发布，也无需为构建授权。`files` 白名单只打包 Python 源码、角色 JSON 和插件文件；Git 克隆阶段若不需要音频，可设置 `GIT_LFS_SKIP_SMUDGE=1`。
+根目录 `package.json` 声明了 `dsh.bundle`。开发源码位于 `harness/src/`，服务端使用严格 TypeScript，界面使用 TSX；`harness/*.js` 是随仓库提交的构建产物。Git 安装直接加载这些文件，没有 `prepare` 或其他安装构建脚本。CI 检查产物与源码一致，不能只上传 artifact 而遗漏 Git 中的 JS。无需 npm 发布，也无需为构建授权。`files` 白名单只打包 Python 源码、角色 JSON 和插件运行文件；Git 克隆阶段若不需要音频，可设置 `GIT_LFS_SKIP_SMUDGE=1`。
 
 交付 tarball 也支持：
 
 ```sh
 mkdir -p dist
+npm run typecheck
+npm run build
 npm run check:package
 npm pack --ignore-scripts --pack-destination dist
-dsh plugin --profile my-profile add ./dist/dsh-umamusume-agent-0.1.1.tgz
+dsh plugin --profile my-profile add ./dist/dsh-umamusume-agent-0.1.2.tgz
 ```
 
 卸载：`dsh plugin --profile my-profile remove dsh-umamusume-agent`，然后重启。
@@ -74,6 +76,10 @@ dsh plugin --profile my-profile add ./dist/dsh-umamusume-agent-0.1.1.tgz
 ### 更新到 0.1.1
 
 0.1.1 修复了前端调用命令时出现的 `cannot get property "remote" without inject`。如果通过本地目录安装，更新该目录的源码后完全退出并重新打开 Harness；如果通过 Git 或 tarball 安装，重新安装包含修复的 commit 或 `dsh-umamusume-agent-0.1.1.tgz`，然后重启。旧的安装副本不会自动包含本地代码修改。
+
+### 更新到 0.1.2
+
+0.1.2 将接入层迁至 TS/TSX，增加跨进程消息和状态校验，并将 Python 依赖统一为 `uv.lock` 的导出结果。原有角色核心与会话格式保持兼容。首次使用此版本可能需要准备锁文件指定的依赖；输入框上方显示准备状态，完成过程与轨迹显示“检查所选模型 / 准备本地 Python 环境 / 载入角色与历史记忆 / 角色回复”的分段耗时。Python 阶段包含 uv 环境准备、进程启动及核心模块导入，不能把这一段全部视作网络耗时。
 
 ## 使用流程
 
@@ -111,22 +117,35 @@ dsh plugin --profile my-profile add ./dist/dsh-umamusume-agent-0.1.1.tgz
 
 本仓库开发者可将 `pythonExecutable` 设为仓库 `.venv/bin/python`，免去首次下载。Windows 使用实际的 `python.exe` 路径。
 
-## 第一版边界与验收
+## 当前边界与验收
 
 本版提供单角色文字对话、输入类型与事件队列、重生成、长期记忆、停止、恢复、原生用量和调用轨迹。多角色导演/Stage、TTS、附件与网站历史导入导出尚未接入；原网站仍照常使用。
 
 建议验收：切换角色并聊天 → 加入环境事件 → 停止一轮 → 继续 → 重生成 → 重启 Harness 后继续。真实供应商的 JSON 遵从性、缓存报告与错误格式还需用自己的模型验证。
 
-开发验证（不调用付费 API）：
+开发与 CI（Node 24，Python 3.12，uv 0.9.8；不调用付费 API）：
 
 ```sh
-# Python 已准备好时
+npm ci --ignore-scripts
+npm run check:python-lock
+npm run typecheck
+npm run build
+npm run check:build
+# Python 已准备好时；可使用 uv sync --locked --no-dev 建立的环境
 UMA_TEST_PYTHON=/absolute/path/to/python npm test
 npm run check:package
+# 验证用户默认的 uv 启动路径，首次可能下载依赖
+npm run test:runtime
+# 打包 → 安装到临时 profile → 离线对话/取消/恢复 → 退出并清理
+UMA_TEST_PYTHON=/absolute/path/to/python npm run test:package
 ```
 
-未指定 `UMA_TEST_PYTHON` 时，测试查找仓库 `.venv/bin/python`；不存在则跳过 Python 集成项。测试覆盖前端依赖声明与控件 RPC、JSON 修复、长度截断、缺失终止标记、流式摘要、缓存计数、取消、记忆恢复和重生成。`harness/tests/mock-provider.js` 与 `host-smoke.js` 仅用于隔离 `DSH_HOME` 中的宿主集成测试，不进入安装包，不会覆盖用户模型。
+修改 TS/TSX 后运行 `npm run build`，同时提交源码与 `harness/*.js`。修改 Python 依赖时更新根目录 `uv.lock`，再执行 `npm run python:export`；不要手改 `harness/requirements.txt`。导出使用 `uv export --locked --no-dev --no-emit-project`，不更新锁文件。插件默认以这份导出文件准备隔离环境，不依赖安装目录下可写的 `.venv`。自定义 `pythonExecutable` 则由部署者负责按同一依赖清单准备环境。
 
-实现入口：`harness/index.js`（服务与会话事务）、`harness/model.js`（模型协议）、`harness/worker.js`（子进程与取消）、`harness/client.js`（原生界面）、`src/umamusume_agent/harness/worker.py`（复用角色核心）。
+未指定 `UMA_TEST_PYTHON` 时，单元测试查找仓库 `.venv/bin/python`；不存在则跳过 Python 集成项。CI 显式准备锁定环境，不跳过这些测试。测试覆盖前端依赖声明与控件 RPC、JSON 修复、长度截断、缺失终止标记、流式摘要、缓存计数、取消、记忆恢复、重生成、协议校验与启动阶段。`harness/tests/mock-provider.js` 与 `host-smoke.js` 仅用于隔离 `DSH_HOME` 中的宿主集成测试，不进入安装包，不会覆盖用户模型。真实宿主测试当前在 Linux CI 运行，开发机已验证 macOS；Windows 未完成验收。
 
-Harness 接口参考：[第一个插件](https://deepseek-harness.github.io/deepseek-harness/develop/basic/)、[打包与安装](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish/)。
+`.github/workflows/check-harness.yml` 安装 `package-lock.json` 锁定的工具与官方 Harness 类型，检查 Python 导出、执行 `tsc`、检查已提交 JS、构建、测试，再验装和上传 `.tgz`。类型检查与构建分开，转译成功不代表类型检查通过。Git 安装不需要开发依赖或这套构建过程。
+
+实现入口：`harness/src/index.ts`（服务与会话事务）、`model.ts`（模型协议）、`worker.ts`（子进程与取消）、`client.tsx`（原生界面）、`protocol.ts`（共享类型及运行时校验）；Python 接入层仍为 `src/umamusume_agent/harness/worker.py`。请编辑源码，不要直接修改生成的 JS。
+
+Harness 接口参考：[第一个插件](https://deepseek-harness.github.io/deepseek-harness/develop/basic/)、[打包与安装](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish)。

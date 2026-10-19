@@ -2,10 +2,10 @@ name: Check Harness Plugin
 
 on:
   pull_request:
-    paths: ['harness/**', 'src/**', 'characters/**/config.json', 'package.json', 'docs/harness.md', '.github/workflows/check-harness.yml']
+    paths: ['harness/**', 'src/**', 'characters/**/config.json', 'package.json', 'package-lock.json', 'pyproject.toml', 'uv.lock', 'docs/harness.md', '.github/workflows/check-harness.yml']
   push:
     branches: [main]
-    paths: ['harness/**', 'src/**', 'characters/**/config.json', 'package.json', 'docs/harness.md', '.github/workflows/check-harness.yml']
+    paths: ['harness/**', 'src/**', 'characters/**/config.json', 'package.json', 'package-lock.json', 'pyproject.toml', 'uv.lock', 'docs/harness.md', '.github/workflows/check-harness.yml']
   workflow_dispatch:
 
 permissions:
@@ -14,23 +14,48 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UMA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
       - uses: actions/setup-python@v5
         id: python
         with:
           python-version: '3.12'
-      - name: Install minimal Python dependencies
-        run: python -m pip install -r harness/requirements.txt
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.8'
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            harness/requirements.txt
+      - name: Install locked JavaScript dependencies
+        run: npm ci --ignore-scripts
+      - name: Check Python lock export
+        run: npm run check:python-lock
+      - name: Install locked Python dependencies
+        run: |
+          uv venv .venv --python '${{ steps.python.outputs.python-path }}'
+          uv pip install --python "$UMA_TEST_PYTHON" --require-hashes --no-deps -r harness/requirements.txt
+      - name: Check TypeScript against Harness interfaces
+        run: npm run typecheck
+      - name: Verify committed Git-install entries match sources
+        run: npm run check:build
+      - name: Build server and browser entries
+        run: npm run build
       - name: Test adapter and real Python core with mock model
         run: npm test
-        env:
-          UMA_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
       - name: Check package contents
         run: npm run check:package
+      - name: Verify end-user locked uv runtime
+        run: npm run test:runtime
+      - name: Install tarball in an isolated Harness and exercise it
+        run: npm run test:package
       - name: Pack installable bundle
         run: |
           mkdir -p dist

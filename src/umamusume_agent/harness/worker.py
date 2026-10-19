@@ -17,6 +17,10 @@ from uuid import uuid4, uuid5, NAMESPACE_URL
 # Set before importing the core: a linked developer checkout must not load .env.
 os.environ["UMAMUSUME_SKIP_ENV_FILES"] = "1"
 
+if __name__ == "__main__" and sys.version_info[:2] != (3, 12):
+    print(json.dumps({"type": "error", "message": "角色插件需要 Python 3.12，请使用 uv 默认环境或调整 pythonExecutable。"}, ensure_ascii=False), flush=True)
+    sys.exit(1)
+
 from ..character import CharacterManager
 from ..config import Config
 from ..dialogue.compaction import HistoryCompactor, pending_messages
@@ -177,6 +181,7 @@ async def execute(input, client=None, progress=None):
 
 async def main():
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+    emit({"type": "ready"})
     data = json.loads(sys.stdin.readline())
     async def progress(value):
         emit({"type": "progress", "data": value})

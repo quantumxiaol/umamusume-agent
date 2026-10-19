@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ try {
       env: { ...process.env, npm_config_cache: cache } }));
   const paths = new Set(pack.files.map(file => file.path));
   for (const path of ['package.json', 'harness/index.js', 'harness/client.js', 'harness/preset.js',
-    'harness/cordis.patch.yml', 'harness/requirements.txt', 'src/umamusume_agent/harness/worker.py',
+    'harness/cordis.patch.yml', 'harness/requirements.txt', 'harness/protocol.js', 'src/umamusume_agent/harness/worker.py',
     'src/umamusume_agent/dialogue/runtime.py', 'docs/harness.md']) assert.ok(paths.has(path), `Missing ${path}`);
   const characters = readdirSync(join(root, 'characters'), { withFileTypes: true }).filter(item => item.isDirectory());
   for (const character of characters) assert.ok(paths.has(`characters/${character.name}/config.json`));
@@ -22,5 +22,10 @@ try {
     assert.ok(!/\.(mp3|wav|png|pyc|log|tgz)$/.test(path), `Unexpected asset ${path}`);
   }
   assert.ok(pack.size < 5_000_000, 'Text-only plugin package unexpectedly exceeds 5 MB');
+  const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assert.ok(!manifest.scripts.prepare && !manifest.scripts.install && !manifest.scripts.postinstall, 'Git installs must not require a build');
+  const requirements = readFileSync(join(root, 'harness/requirements.txt'), 'utf8');
+  assert.match(requirements, /^# Generated from uv.lock/);
+  assert.match(requirements, /--hash=sha256:/);
   console.log(`Package OK: ${paths.size} files, ${characters.length} characters, ${(pack.size / 1024).toFixed(0)} KiB compressed`);
 } finally { rmSync(cache, { recursive: true, force: true }); }
