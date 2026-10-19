@@ -21,6 +21,8 @@ short_description: FastAPI backend for Umamusume roleplay chat.
 
 对于长期使用体验，建议自己在 github 和 hugging face 分别fork本项目，接入自己的[DeepSeek API](https://api-docs.deepseek.com/zh-cn/)，搭建属于自己的服务，确保服务稳定和数据安全，参见[搭建流程](./docs/deployment.md)。
 
+也可安装 [DeepSeek Harness 插件](./docs/harness.md)，在 Harness 原生界面使用自己的模型/API 进行单角色文字对话。角色与记忆逻辑在本机运行，无需部署后端；第一版支持角色选择、事件队列、停止、重生成、历史恢复及用量统计。安装方法见链接，导演模式与配音暂未接入插件。
+
 单角色和导演模式（含 Stage）均支持按 token 水位低频压缩早期历史，保留近期原文和完整归档；导演与各角色共用一份公开剧情摘要。导演页面和单聊的历史及摘要可随浏览器缓存恢复。超大单次输入或压缩失败仍可能触及上下文上限，不能简单按对话轮数估算容量。详见[单角色长历史记忆](docs/dialogue_memory.md)与[导演共享记忆](docs/director_mode_v1.md#shared-scene-memory)。
 
 由于大陆地区规定禁止提供AI虚拟角色陪同类服务，我不能提供收费方式来回收部分成本，否则就构成提供付费服务了。因此随着成本的攀升可能停止提供服务。代码仓库本身为MIT LICENSE，可以自行部署服务。

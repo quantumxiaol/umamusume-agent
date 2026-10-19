@@ -1,0 +1,13 @@
+- insert:
+    - id: umamusume-runtime
+      name: dsh-umamusume-agent
+    - id: preset-umamusume
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: umamusume
+        name: 赛马娘单聊
+        description: 本机运行角色与记忆逻辑，使用你选择的模型和 API。
+        order: 50
+        plugins:
+          - id: umamusume-controls
+            name: dsh-umamusume-agent/preset

@@ -20,6 +20,8 @@ def _load_env_defaults() -> None:
     2. 项目根目录 .env
     3. 项目根目录 .env.template
     """
+    if os.getenv("UMAMUSUME_SKIP_ENV_FILES") == "1":
+        return
     merged_defaults: dict[str, str] = {}
 
     for filename in (".env.template", ".env"):

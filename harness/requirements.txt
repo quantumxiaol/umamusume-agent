@@ -1,0 +1,4 @@
+# Isolated uv environment; no GPU, audio models, web server, or project .env.
+openai==1.75.0
+pydantic>=2.7.0,<3
+python-dotenv>=1.0.0,<2

@@ -1,0 +1,38 @@
+{
+  "name": "dsh-umamusume-agent",
+  "version": "0.1.1",
+  "description": "Umamusume roleplay using the local Python runtime and your Harness model provider",
+  "type": "module",
+  "license": "MIT",
+  "main": "harness/index.js",
+  "exports": {
+    ".": "./harness/index.js",
+    "./preset": "./harness/preset.js",
+    "./client": "./harness/client.js"
+  },
+  "files": ["harness/*.js", "harness/*.yml", "harness/requirements.txt", "src/umamusume_agent/**/*.py", "characters/*/config.json", "umamusume_characters.json", "docs/harness.md", "LICENSE"],
+  "engines": { "node": ">=22", "dsh": ">=0.2.1-rc.2 <0.3.0" },
+  "scripts": {
+    "test": "node --test harness/tests/*.test.js",
+    "check:package": "node harness/scripts/check-package.js"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/schemastery": "~3.18.5",
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-session": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true },
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/dsh-session": { "optional": true }
+  },
+  "dsh": {
+    "bundle": { "patch": "./harness/cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-chat", "@deepseek-ai/dsh-client-ui-trajectory", "@deepseek-ai/dsh-client-ui-renderer", "@deepseek-ai/dsh-client-ui-session"]
+    }
+  }
+}
