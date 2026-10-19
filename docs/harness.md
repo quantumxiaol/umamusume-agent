@@ -9,7 +9,7 @@
 - DeepSeek Harness **0.2.1-rc.2**（已验证版本）；manifest 允许兼容的 0.2.x，后续版本需重新验证 API。
 - 已在 Harness 中配置可用的模型与自己的 API。模型需要支持 system/user/assistant 文本消息、流式调用，并能按提示返回 JSON。
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)。首次对话会准备 Python 3.12 和锁定的依赖，之后复用缓存。`harness/requirements.txt` 由仓库 `uv.lock` 自动导出，包含基础依赖的精确版本与哈希；不安装可选的 TTS/LangChain extras。也可以指定已有 Python，见下文。
-- 使用 CLI 安装时需要 Git、pnpm，以及 Harness CLI 的运行环境。Harness 自动安装包依赖，用户无需手工编译 TypeScript，不下载音频模型。
+- 使用 CLI 安装时需要 Git、pnpm，以及 Harness CLI 的运行环境（本项目使用 Node.js 24 和 pnpm 11.20.0 验证）。Node.js 不会自动提供 pnpm；`dsh plugin add` 需要能在 PATH 中找到它。Harness 自动安装包依赖，用户无需手工编译 TypeScript，不下载音频模型。
 
 ## 本地测试
 
@@ -123,9 +123,12 @@ dsh plugin --profile my-profile add ./dist/dsh-umamusume-agent-0.1.2.tgz
 
 建议验收：切换角色并聊天 → 加入环境事件 → 停止一轮 → 继续 → 重生成 → 重启 Harness 后继续。真实供应商的 JSON 遵从性、缓存报告与错误格式还需用自己的模型验证。
 
-开发与 CI（Node 24，Python 3.12，uv 0.9.8；不调用付费 API）：
+开发与 CI（Node 24，pnpm 11.20.0，Python 3.12，uv 0.9.8；不调用付费 API）：
 
 ```sh
+# 若尚未安装 pnpm：npm install --global pnpm@11.20.0
+node --version
+pnpm --version
 npm ci --ignore-scripts
 npm run check:python-lock
 npm run typecheck
@@ -144,7 +147,7 @@ UMA_TEST_PYTHON=/absolute/path/to/python npm run test:package
 
 未指定 `UMA_TEST_PYTHON` 时，单元测试查找仓库 `.venv/bin/python`；不存在则跳过 Python 集成项。CI 显式准备锁定环境，不跳过这些测试。测试覆盖前端依赖声明与控件 RPC、JSON 修复、长度截断、缺失终止标记、流式摘要、缓存计数、取消、记忆恢复、重生成、协议校验与启动阶段。`harness/tests/mock-provider.js` 与 `host-smoke.js` 仅用于隔离 `DSH_HOME` 中的宿主集成测试，不进入安装包，不会覆盖用户模型。真实宿主测试当前在 Linux CI 运行，开发机已验证 macOS；Windows 未完成验收。
 
-`.github/workflows/check-harness.yml` 安装 `package-lock.json` 锁定的工具与官方 Harness 类型，检查 Python 导出、执行 `tsc`、检查已提交 JS、构建、测试，再验装和上传 `.tgz`。类型检查与构建分开，转译成功不代表类型检查通过。Git 安装不需要开发依赖或这套构建过程。
+`.github/workflows/check-harness.yml` 显式准备 Node 24 和 pnpm 11.20.0，再用 npm 安装 `package-lock.json` 锁定的工具与官方 Harness 类型，检查 Python 导出、执行 `tsc`、检查已提交 JS、构建、测试，再验装和上传 `.tgz`。仓库依赖仍由 npm 管理；pnpm 专供 Harness 的插件安装流程使用，`test:package` 会在打包前检查它并打印版本。类型检查与构建分开，转译成功不代表类型检查通过。Git 安装不需要开发依赖或这套构建过程。
 
 实现入口：`harness/src/index.ts`（服务与会话事务）、`model.ts`（模型协议）、`worker.ts`（子进程与取消）、`client.tsx`（原生界面）、`protocol.ts`（共享类型及运行时校验）；Python 接入层仍为 `src/umamusume_agent/harness/worker.py`。请编辑源码，不要直接修改生成的 JS。
 

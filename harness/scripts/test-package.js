@@ -30,6 +30,15 @@ function run(command, args, cwd = home, timeout = 180000) {
 }
 const dsh = args => run(process.execPath, ['--expose-internals', cli, ...args]);
 try {
+  // npm installs this repository; the Harness CLI separately invokes pnpm in its profile.
+  let pnpmVersion;
+  try {
+    pnpmVersion = await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['--version'], home, 10000);
+  } catch (cause) {
+    throw new Error('test:package requires a working pnpm on PATH: Harness uses it for dsh plugin add. '
+      + 'Install pnpm 11.20.0 (CI uses pnpm/action-setup); installing Node.js alone is not sufficient.', { cause });
+  }
+  console.log(`Package smoke test: Node ${process.versions.node}; pnpm ${pnpmVersion.trim()}`);
   const packDir = join(home, 'pack');
   await mkdir(packDir);
   const pack = JSON.parse(await run(process.platform === 'win32' ? 'npm.cmd' : 'npm',

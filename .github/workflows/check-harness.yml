@@ -23,6 +23,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Install pnpm for Harness plugin management
+        uses: pnpm/action-setup@v4
+        with:
+          version: '11.20.0'
+          run_install: false
       - uses: actions/setup-python@v5
         id: python
         with:
