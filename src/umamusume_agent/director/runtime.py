@@ -19,6 +19,7 @@ from .models import (
     DirectorStageAction,
     DirectorStopFollowAction,
     DirectorStopAction,
+    DirectorTravelAction,
 )
 
 
@@ -68,6 +69,8 @@ class DirectorRuntime:
         allowed_anchor_ids: set[str] | None,
         allowed_stage_actor_ids: set[str] | None,
         allowed_stage_target_actor_ids: set[str] | None,
+        remote_stage_actor_ids: set[str] | None = None,
+        allowed_travel_destinations: dict[str, set[str]] | None = None,
     ) -> DirectorPlan:
         speakers: list[DirectorSpeakerPlan] = []
         seen: set[str] = set()
@@ -109,6 +112,15 @@ class DirectorRuntime:
                     or actor_id not in allowed_stage_actor_ids
                 ):
                     continue
+                if actor_id in (remote_stage_actor_ids or ()) and not isinstance(
+                    action,
+                    (
+                        DirectorTravelAction,
+                        DirectorApproachAction,
+                        DirectorFollowAction,
+                    ),
+                ):
+                    continue
                 if isinstance(action, DirectorMoveAction):
                     anchor_id = action.anchor_id.strip()
                     if not anchor_id or anchor_id not in allowed_anchor_ids:
@@ -119,6 +131,36 @@ class DirectorRuntime:
                             actor_id=actor_id,
                             anchor_id=anchor_id,
                             slot_id=(action.slot_id or "").strip() or None,
+                        )
+                    )
+                elif isinstance(action, DirectorTravelAction):
+                    target_scene_id = action.target_scene_id.strip()
+                    target_spawn_id = (
+                        action.target_spawn_id.strip()
+                        if action.target_spawn_id is not None
+                        else None
+                    )
+                    allowed_spawn_ids = (
+                        allowed_travel_destinations or {}
+                    ).get(target_scene_id)
+                    if (
+                        not target_scene_id
+                        or allowed_spawn_ids is None
+                        or (
+                            action.target_spawn_id is not None
+                            and (
+                                not target_spawn_id
+                                or target_spawn_id not in allowed_spawn_ids
+                            )
+                        )
+                    ):
+                        continue
+                    stage_actions.append(
+                        DirectorTravelAction(
+                            type="actor.travel_to_scene",
+                            actor_id=actor_id,
+                            target_scene_id=target_scene_id,
+                            target_spawn_id=target_spawn_id,
                         )
                     )
                 elif isinstance(action, DirectorFaceAction):
@@ -225,6 +267,8 @@ class DirectorRuntime:
         allowed_anchor_ids: set[str] | None = None,
         allowed_stage_actor_ids: set[str] | None = None,
         allowed_stage_target_actor_ids: set[str] | None = None,
+        remote_stage_actor_ids: set[str] | None = None,
+        allowed_travel_destinations: dict[str, set[str]] | None = None,
         require_speaker: bool = True,
     ) -> DirectorPlan:
         attempts = max(0, int(self.settings.DIRECTOR_JSON_REPAIR_ATTEMPTS)) + 1
@@ -263,6 +307,8 @@ class DirectorRuntime:
                     allowed_anchor_ids=allowed_anchor_ids,
                     allowed_stage_actor_ids=allowed_stage_actor_ids,
                     allowed_stage_target_actor_ids=allowed_stage_target_actor_ids,
+                    remote_stage_actor_ids=remote_stage_actor_ids,
+                    allowed_travel_destinations=allowed_travel_destinations,
                 )
                 if require_speaker and not sanitized.speakers:
                     fallback = self._fallback_plan(

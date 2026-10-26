@@ -110,6 +110,32 @@ class DirectorService:
             if isinstance(actor, dict) and isinstance(actor.get("actor_id"), str)
         }
 
+    @staticmethod
+    def _stage_travel_destinations(
+        stage_context: dict | None,
+    ) -> dict[str, set[str]] | None:
+        if stage_context is None:
+            return None
+        destinations = stage_context.get("travel_destinations")
+        if not isinstance(destinations, list):
+            return {}
+        allowed: dict[str, set[str]] = {}
+        for destination in destinations:
+            if not isinstance(destination, dict):
+                continue
+            scene_id = destination.get("scene_id")
+            if not isinstance(scene_id, str) or not scene_id:
+                continue
+            spawn_ids = destination.get("spawn_ids")
+            if not isinstance(spawn_ids, list):
+                continue
+            allowed.setdefault(scene_id, set()).update(
+                spawn_id
+                for spawn_id in spawn_ids
+                if isinstance(spawn_id, str)
+            )
+        return allowed
+
     async def create_session(
         self,
         *,
@@ -349,6 +375,7 @@ class DirectorService:
         *,
         stage_context: dict | None = None,
         allowed_stage_actor_ids: set[str] | None = None,
+        remote_stage_actor_ids: set[str] | None = None,
         allowed_dialogue_actor_ids: set[str] | None = None,
         stage_actions_output: list[DirectorStageAction] | None = None,
         on_progress=None,
@@ -406,6 +433,10 @@ class DirectorService:
                     allowed_anchor_ids=self._stage_anchor_ids(stage_context),
                     allowed_stage_actor_ids=allowed_stage_actor_ids,
                     allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
+                    remote_stage_actor_ids=remote_stage_actor_ids,
+                    allowed_travel_destinations=self._stage_travel_destinations(
+                        stage_context
+                    ),
                 )
             calibrate(session.director_thread, plan_messages, usage)
             self.director_context_builder.record_plan(
@@ -611,6 +642,7 @@ class DirectorService:
         *,
         stage_context: dict,
         allowed_stage_actor_ids: set[str],
+        remote_stage_actor_ids: set[str] | None = None,
     ) -> tuple[list[SceneEvent], list[DirectorStageAction]]:
         """Generate the character reply, then let Director stage that reply."""
 
@@ -716,6 +748,10 @@ class DirectorService:
                     allowed_anchor_ids=self._stage_anchor_ids(stage_context),
                     allowed_stage_actor_ids=allowed_stage_actor_ids,
                     allowed_stage_target_actor_ids=self._stage_actor_ids(stage_context),
+                    remote_stage_actor_ids=remote_stage_actor_ids,
+                    allowed_travel_destinations=self._stage_travel_destinations(
+                        stage_context
+                    ),
                     require_speaker=False,
                 )
             calibrate(session.director_thread, plan_messages, usage)
@@ -744,6 +780,7 @@ class DirectorService:
         stage_context: dict,
         allowed_stage_actor_ids: set[str],
         allowed_agent_actor_ids: set[str] | None = None,
+        remote_stage_actor_ids: set[str] | None = None,
     ) -> tuple[list[SceneEvent], list[DirectorStageAction]]:
         stage_actions: list[DirectorStageAction] = []
         events = [
@@ -754,6 +791,7 @@ class DirectorService:
                 stage_context=stage_context,
                 allowed_stage_actor_ids=allowed_stage_actor_ids,
                 allowed_dialogue_actor_ids=allowed_agent_actor_ids,
+                remote_stage_actor_ids=remote_stage_actor_ids,
                 stage_actions_output=stage_actions,
             )
         ]

@@ -40,6 +40,11 @@ class StageSceneService:
             live_stage=live_stage,
             actor_bindings=actor_bindings,
         )
+        allowed_stage_actor_ids = {
+            binding.stage_actor_id for binding in actor_bindings
+        }
+        live_stage_actor_ids = {actor.actor_id for actor in live_stage.actors}
+        remote_stage_actor_ids = allowed_stage_actor_ids - live_stage_actor_ids
         stage_context = live_stage.model_dump(mode="json")
         stage_context["actor_bindings"] = [
             binding.model_dump(mode="json") for binding in actor_bindings
@@ -70,9 +75,8 @@ class StageSceneService:
                     session,
                     input_events,
                     stage_context=stage_context,
-                    allowed_stage_actor_ids={
-                        binding.stage_actor_id for binding in actor_bindings
-                    },
+                    allowed_stage_actor_ids=allowed_stage_actor_ids,
+                    remote_stage_actor_ids=remote_stage_actor_ids,
                 )
             )
             actions = list(director_actions)
@@ -81,10 +85,9 @@ class StageSceneService:
                 session,
                 input_events,
                 stage_context=stage_context,
-                allowed_stage_actor_ids={
-                    binding.stage_actor_id for binding in actor_bindings
-                },
+                allowed_stage_actor_ids=allowed_stage_actor_ids,
                 allowed_agent_actor_ids=set(binding_by_agent),
+                remote_stage_actor_ids=remote_stage_actor_ids,
             )
             actions = list(director_actions)
         for event in events:
@@ -119,7 +122,6 @@ class StageSceneService:
         stage_actors = {
             actor.actor_id: actor
             for actor in live_stage.actors
-            if actor.control_owner == "agent"
         }
         for binding in actor_bindings:
             if binding.agent_actor_id in binding_by_agent:
@@ -128,10 +130,28 @@ class StageSceneService:
                 raise ValueError(f"重复 Stage 角色绑定: {binding.stage_actor_id}")
             if binding.agent_actor_id not in session.characters:
                 raise ValueError(f"角色不属于当前会话: {binding.agent_actor_id}")
-            if binding.stage_actor_id not in stage_actors:
-                raise ValueError(
-                    f"Stage 角色不存在或不受 agent 控制: {binding.stage_actor_id}"
-                )
+            stage_actor = stage_actors.get(binding.stage_actor_id)
+            if stage_actor is not None:
+                if stage_actor.control_owner != "agent":
+                    raise ValueError(
+                        f"Stage 角色不存在或不受 agent 控制: {binding.stage_actor_id}"
+                    )
+            else:
+                scene_id = (binding.scene_id or "").strip()
+                remote_scene_ids = {
+                    remote.scene_id
+                    for remote in live_stage.remote_actors
+                    if remote.actor_id == binding.stage_actor_id
+                }
+                if (
+                    not scene_id
+                    or scene_id == live_stage.scene_id
+                    or scene_id not in remote_scene_ids
+                ):
+                    raise ValueError(
+                        "缺席 Stage 角色绑定必须有匹配 remote_actors 的其他场景 "
+                        f"scene_id: {binding.stage_actor_id}"
+                    )
             binding_by_agent[binding.agent_actor_id] = binding
             seen_stage_ids.add(binding.stage_actor_id)
 

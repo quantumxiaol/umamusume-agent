@@ -14,6 +14,7 @@ from ..input_limits import validate_input_batch
 class StageActorBinding(BaseModel):
     agent_actor_id: str
     stage_actor_id: str
+    scene_id: str | None = None
 
 
 class LiveStageActor(BaseModel):
@@ -35,6 +36,23 @@ class LiveStageAnchor(BaseModel):
     available_slots: list[str] = Field(default_factory=list)
 
 
+class RemoteStageActor(BaseModel):
+    actor_id: str
+    scene_id: str
+
+
+class StageTravelDestination(BaseModel):
+    scene_id: str
+    display_name: str = ""
+    spawn_ids: list[str] = Field(default_factory=list)
+
+
+class LiveStagePortal(BaseModel):
+    id: str
+    target_scene_id: str
+    target_spawn_id: str
+
+
 class LiveStageContext(BaseModel):
     schema_version: Literal["live_stage.v1"]
     stage_id: str
@@ -42,7 +60,9 @@ class LiveStageContext(BaseModel):
     actors: list[LiveStageActor]
     anchors: list[LiveStageAnchor]
     activity_paths: list[dict] = Field(default_factory=list)
-    portals: list[dict] = Field(default_factory=list)
+    portals: list[LiveStagePortal] = Field(default_factory=list)
+    remote_actors: list[RemoteStageActor] = Field(default_factory=list)
+    travel_destinations: list[StageTravelDestination] = Field(default_factory=list)
 
 
 class CreateStageSessionRequest(BaseModel):
@@ -110,6 +130,13 @@ class StageStopAction(BaseModel):
     actor_id: str
 
 
+class StageTravelAction(BaseModel):
+    type: Literal["actor.travel_to_scene"]
+    actor_id: str
+    target_scene_id: str
+    target_spawn_id: str | None = None
+
+
 class StageDialogueAction(BaseModel):
     type: Literal["dialogue.say"]
     actor_id: str
@@ -124,6 +151,7 @@ AgentStageAction = Annotated[
     | StageFollowAction
     | StageStopFollowAction
     | StageStopAction
+    | StageTravelAction
     | StageDialogueAction,
     Field(discriminator="type"),
 ]

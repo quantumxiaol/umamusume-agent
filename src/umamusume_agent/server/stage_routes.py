@@ -82,6 +82,7 @@ def create_stage_router(
             "max_stage_actions_per_turn": max(0, max_stage_actions),
             "action_types": [
                 "actor.move_to",
+                "actor.travel_to_scene",
                 "actor.approach",
                 "actor.follow",
                 "actor.stop_follow",

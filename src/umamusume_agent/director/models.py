@@ -146,6 +146,13 @@ class DirectorStopAction(BaseModel):
     actor_id: str
 
 
+class DirectorTravelAction(BaseModel):
+    type: Literal["actor.travel_to_scene"]
+    actor_id: str
+    target_scene_id: str
+    target_spawn_id: str | None = None
+
+
 DirectorStageAction = Annotated[
     DirectorMoveAction
     | DirectorFaceAction
@@ -153,7 +160,8 @@ DirectorStageAction = Annotated[
     | DirectorApproachAction
     | DirectorFollowAction
     | DirectorStopFollowAction
-    | DirectorStopAction,
+    | DirectorStopAction
+    | DirectorTravelAction,
     Field(discriminator="type"),
 ]
 
