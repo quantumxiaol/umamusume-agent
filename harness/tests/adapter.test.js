@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm';
 import { initialState, reduceState, replyText, sumUsage, openAIUsage, RECORD } from '../state.js';
 import { modelRequest, executeModelCall } from '../model.js';
 import { runWorker } from '../worker.js';
@@ -18,6 +19,29 @@ test('provider request uses core messages and the user model, with no tools or c
   assert.equal(request.maxTokens, 512);
   assert.equal(request.tools, undefined);
   assert.equal(request.apiKey, undefined);
+  assert.equal(request.sessionId, undefined);
+});
+
+test('auxiliary model calls retain session routing without inheriting the agent-loop request', async () => {
+  const seen = [];
+  const llm = { async *stream(request) {
+    assert.equal(isAgentLoopRequest(request), false, 'inner calls must not recursively enter the roleplay turn');
+    assert.equal(request.system, undefined);
+    assert.equal(request.tools, undefined);
+    seen.push(request.sessionId);
+    yield { type: 'text-delta', index: 0, text: 'ok' };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  } };
+  for (const sessionId of ['session-a', 'session-b']) {
+    const outer = markAgentLoopRequest({ ...route, sessionId, system: 'Harness system prompt',
+      messages: [], tools: [{ name: 'bash', description: 'host tool', parameters: {} }] });
+    assert.equal(isAgentLoopRequest(outer), true);
+    for (const [content, stream] of [['角色回复', false], ['JSON 修复', false], ['历史压缩', true]]) {
+      await executeModelCall({ llm, route: outer, signal: signal(),
+        call: { messages: [{ role: 'user', content }], stream } });
+    }
+  }
+  assert.deepEqual(seen, ['session-a', 'session-a', 'session-a', 'session-b', 'session-b', 'session-b']);
 });
 
 test('stream conversion counts cache and reasoning without double counting', async () => {

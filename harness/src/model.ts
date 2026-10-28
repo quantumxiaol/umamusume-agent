@@ -17,7 +17,10 @@ export function modelRequest(call: ModelCall, route: ModelRoute, signal: AbortSi
       ? createAssistantMessage({ content, source: { provider: route.provider, model: route.model } })
       : createUserMessage({ content, source: { kind: 'user' } });
   });
+  // Keep the host's stable transport identity for replies, repairs, and compaction.
+  // This fresh request is not marked as an agent-loop request, so it won't re-enter our turn hook.
   return { provider: route.provider, model: route.model, messages, signal,
+    ...(route.sessionId !== undefined ? { sessionId: route.sessionId } : {}),
     ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort } : {}),
     ...(call.max_tokens ? { maxTokens: call.max_tokens } : {}),
     ...(call.temperature !== undefined ? { temperature: call.temperature } : {}) };

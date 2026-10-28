@@ -69,7 +69,7 @@ export type Reply = z.infer<typeof Reply>;
 export type Catalog = z.infer<typeof Catalog>;
 export type TurnInput = z.infer<typeof TurnInput>;
 export type CallRecord = z.infer<typeof CallRecord>;
-export type ModelRoute = Pick<GenerateOptions, 'provider' | 'model' | 'reasoningEffort'>;
+export type ModelRoute = Pick<GenerateOptions, 'provider' | 'model' | 'reasoningEffort' | 'sessionId'>;
 export interface WorkerInput {
   sessionId: string;
   state: State;

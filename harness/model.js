@@ -17,6 +17,7 @@ function modelRequest(call, route, signal) {
     model: route.model,
     messages,
     signal,
+    ...route.sessionId !== void 0 ? { sessionId: route.sessionId } : {},
     ...route.reasoningEffort ? { reasoningEffort: route.reasoningEffort } : {},
     ...call.max_tokens ? { maxTokens: call.max_tokens } : {},
     ...call.temperature !== void 0 ? { temperature: call.temperature } : {}

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
-import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, isAgentLoopRequest } from '@deepseek-ai/dsh-llm';
 
 export const inject = ['agents', 'agentPresets', 'umamusume'];
 
@@ -21,6 +21,11 @@ export function apply(ctx) {
 
 async function run(ctx) {
   const id = 'session-uma-smoke-' + randomUUID();
+  const innerSessions = [];
+  ctx.on('llm/stream', (request, next) => {
+    if (request.provider === 'uma-test' && !isAgentLoopRequest(request)) innerSessions.push(request.sessionId);
+    return next();
+  });
   const setup = async aCtx => { await ctx.agentPresets.mount(aCtx, 'umamusume'); };
   const agentOptions = { provider: 'uma-test', model: 'mock' };
   let handle = await ctx.agents.create({ sessionId: id, agentOptions,
@@ -68,6 +73,8 @@ async function run(ctx) {
     await send('谢谢，继续一起训练吧。');
     assert.equal(state().turns, 2);
     assert.equal(state().history.length, 5);
-    return { sessionId: id, checks: ['character', 'event queue', 'regenerate', 'cancel', 'durable resume', 'continue'] };
+    assert.ok(innerSessions.length >= 3, 'observe reply, regenerate, and resumed reply requests');
+    assert.ok(innerSessions.every(sessionId => sessionId === id), 'all inner calls must retain the durable session ID');
+    return { sessionId: id, checks: ['character', 'event queue', 'regenerate', 'cancel', 'durable resume', 'continue', 'stable session routing'] };
   } finally { await handle.dispose(); }
 }
